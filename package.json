@@ -8,15 +8,15 @@
     "pnpm": ">=11.0.0"
   },
   "scripts": {
-    "build": "pnpm -r --if-present build",
-    "dev": "pnpm --filter @remote-controle/control-plane dev",
-    "dev:ui": "pnpm --filter @remote-controle/operator-ui dev",
+    "build": "corepack pnpm -r --if-present build",
+    "dev": "corepack pnpm --filter @remote-controle/control-plane dev",
+    "dev:ui": "corepack pnpm --filter @remote-controle/operator-ui dev",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "lint": "pnpm -r --if-present lint",
-    "test": "pnpm -r --if-present test",
-    "typecheck": "pnpm -r --if-present typecheck",
-    "verify": "pnpm format && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+    "lint": "corepack pnpm -r --if-present lint",
+    "test": "corepack pnpm -r --if-present test",
+    "typecheck": "corepack pnpm -r --if-present typecheck",
+    "verify": "corepack pnpm format && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm test && corepack pnpm build"
   },
   "devDependencies": {
     "@types/node": "^22.19.18",

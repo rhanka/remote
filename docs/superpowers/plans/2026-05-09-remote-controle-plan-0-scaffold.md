@@ -95,15 +95,15 @@ Write `package.json`:
     "pnpm": ">=11.0.0"
   },
   "scripts": {
-    "build": "pnpm -r --if-present build",
-    "dev": "pnpm --filter @remote-controle/control-plane dev",
-    "dev:ui": "pnpm --filter @remote-controle/operator-ui dev",
+    "build": "corepack pnpm -r --if-present build",
+    "dev": "corepack pnpm --filter @remote-controle/control-plane dev",
+    "dev:ui": "corepack pnpm --filter @remote-controle/operator-ui dev",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "lint": "pnpm -r --if-present lint",
-    "test": "pnpm -r --if-present test",
-    "typecheck": "pnpm -r --if-present typecheck",
-    "verify": "pnpm format && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+    "lint": "corepack pnpm -r --if-present lint",
+    "test": "corepack pnpm -r --if-present test",
+    "typecheck": "corepack pnpm -r --if-present typecheck",
+    "verify": "corepack pnpm format && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm test && corepack pnpm build"
   },
   "devDependencies": {
     "@types/node": "^22.19.18",
@@ -1013,7 +1013,7 @@ Run:
 
 ```bash
 corepack enable pnpm
-pnpm install
+corepack pnpm install
 ```
 
 Expected:
@@ -1026,7 +1026,7 @@ Expected:
 Run:
 
 ```bash
-pnpm format
+corepack pnpm format
 ```
 
 Expected:
@@ -1039,7 +1039,7 @@ Expected:
 Run:
 
 ```bash
-pnpm typecheck
+corepack pnpm typecheck
 ```
 
 Expected:
@@ -1051,7 +1051,7 @@ Expected:
 Run:
 
 ```bash
-pnpm test
+corepack pnpm test
 ```
 
 Expected:
@@ -1064,7 +1064,7 @@ Expected:
 Run:
 
 ```bash
-pnpm build
+corepack pnpm build
 ```
 
 Expected:
@@ -1077,7 +1077,7 @@ Expected:
 Run:
 
 ```bash
-pnpm verify
+corepack pnpm verify
 ```
 
 Expected:
@@ -1131,8 +1131,8 @@ Kubernetes-native orchestration for delegated CLI sessions.
 
 ```bash
 corepack enable pnpm
-pnpm install
-pnpm verify
+corepack pnpm install
+corepack pnpm verify
 ```
 ````
 
