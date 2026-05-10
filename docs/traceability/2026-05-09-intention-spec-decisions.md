@@ -16,26 +16,261 @@ Commits GitHub connus:
 
 ## Mapping intention -> spec
 
-| Intention utilisateur | Traduction dans la spec |
-| --- | --- |
-| Piloter n'importe quelle CLI avec n'importe quelle CLI, pour code ou autre tache | `Goals`, `Master And Slave Plugins`, `Session Runtime` |
-| Backend minimal d'orchestration de sessions a la demande en micro-conteneurs isoles | Control plane TypeScript k8s-native qui cree directement `Pod`, `PVC`, `Service`, `Secret`, `ConfigMap`; pas de CRD/operator au MVP |
-| k8s sur Scaleway ou GCP | Ordre cible valide: `k3s` pour dev cluster, Scaleway Kapsule PoC, puis GKE |
-| Filesystem virtuel persistant pour sessions de code | `PVC` par session monte dans `/workspace` |
-| Orchestration avec systeme de secrets | Secrets longs hors runtime; injection temporaire par session; policies par capability |
-| Ensemble des CLI disponibles: codex/opencode/claude-code/gemini-cli, gh, scw, gcloud, npm, python | Profils CLI initiaux et runtime image controlee; secrets/approvals pour outils ops |
-| Pop des docker/tests de chaque session | Scenario MVP: install/test/build dans workspace, avec extension future vers containers de test par session |
-| Navigateur headed pour delegation utilisateur | Runtime Playwright headed + browser bridge + UAT/browser panes dans le frontend |
-| Configs de session et stockage perenne conversations | Profils de session, historique conversation/evenements, workspace persistant |
-| Plugin session maitre: instructions, drumbeat, avancement, escalades, planifier/configurer/poper nouveaux envs | `Master And Slave Plugins`; master control avec instruction input, drumbeat, status et approvals |
-| Plugin sessions esclaves: escalade sudo/install, validation, besoin 2FA | `session-agent` / slave plugin avec capability requests, approvals, 2FA |
-| Gestionnaire 2FA pour secrets et auth tierce | 2FA par saisie utilisateur et/ou prise de main temporaire navigateur; jamais de secret 2FA durable donne a l'agent |
-| Frontend terminal mobile swipe/tab par env, proxy UAT, proxy navigateur Playwright, voix via voxtral-js | Svelte 5 frontend, tabs desktop + swipe mobile, xterm.js, panes UAT/browser, WebRTC si latence critique, transcription live `voxtral-js` |
-| Veille des features cle remote control et libs a recoder si besoin, sans dependances opaques pour le coeur | Spec garde V2 research et core packages; inspiration Coder/DevPod/OpenHands/WebContainers/SES/WASI, sans copier les fonctions coeur |
-| TypeScript backend et Svelte 5 frontend | `Goals`, `Frontend Operator` |
-| Scaffolder pour publier un maximum en librairies, possiblement `@entropic/...` | Monorepo avec packages publiaux potentiels; scope npm differe, compatible `@entropic/...` si acces confirme |
-| MVP doit couvrir code + ops CLI + navigateur/2FA, sinon pas de test bout en bout | `Context`, `Testing Strategy`: un E2E unique doit couvrir les 3 familles |
-| V2: emulateur d'OS TypeScript dans V8 pour paravirtualisation plus micro | `V2 Research: TypeScript Micro-OS`, gates A-D, menu initial de commandes |
+### 1. Piloter n'importe quelle CLI avec n'importe quelle CLI
+
+Intention:
+
+> Piloter n'importe quelle CLI avec n'importe quelle CLI, pour code ou autre tache.
+
+Spec:
+
+- Sections: `Goals`, `Master And Slave Plugins`, `Session Runtime`.
+- Traduction: sessions commandables par plugin maitre, frontend operateur, ou API.
+
+### 2. Backend minimal d'orchestration
+
+Intention:
+
+> Backend minimal pour orchestration de sessions a la demande en micro-conteneurs isoles.
+
+Spec:
+
+- Control plane TypeScript k8s-native.
+- Creation directe de ressources Kubernetes:
+  - `Pod`
+  - `PVC`
+  - `Service`
+  - `Secret`
+  - `ConfigMap`
+- Pas de CRD/operator au MVP.
+
+### 3. Cibles Kubernetes
+
+Intention:
+
+> k8s sur Scaleway ou GCP.
+
+Spec:
+
+- Ordre cible valide:
+  - `k3s` pour developpement cluster realiste.
+  - Scaleway Kapsule PoC.
+  - GKE.
+
+### 4. Workspace persistant
+
+Intention:
+
+> Filesystem virtuel persistant pour les sessions de code.
+
+Spec:
+
+- `PVC` par session.
+- Montage dans `/workspace`.
+- Persistance entre redemarrages/reconnexions.
+
+### 5. Secrets
+
+Intention:
+
+> Orchestration avec le systeme de secret.
+
+Spec:
+
+- Secrets longs hors runtime de session.
+- Injection temporaire par session.
+- Policies par capability.
+- Aucun secret long stocke dans l'historique de conversation.
+
+### 6. CLIs disponibles
+
+Intention:
+
+> Ensemble des CLI dispo: codex/opencode/claude-code/gemini-cli, gh, scw, gcloud, npm, python.
+
+Spec:
+
+- Profils CLI initiaux:
+  - `shell`
+  - `codex`
+  - `opencode`
+  - `claude-code`
+  - `gemini-cli`
+- Runtime image controlee avec outils ops/dev.
+- Secrets et approvals pour `gh`, `scw`, `gcloud`, `npm`, `python`, etc.
+
+### 7. Tests par session
+
+Intention:
+
+> Pop des docker/tests de chaque session.
+
+Spec:
+
+- Scenario MVP:
+  - installer les dependances;
+  - executer tests/build;
+  - exposer une UAT;
+  - conserver les artefacts.
+- Extension future: containers de test dedies par session.
+
+### 8. Navigateur delegue
+
+Intention:
+
+> Navigateur headed pour action de navigation en delegation de l'utilisateur.
+
+Spec:
+
+- Runtime Playwright headed.
+- Browser bridge.
+- Panes UAT/browser integres au frontend.
+- WebRTC quand la latence d'interaction l'exige.
+
+### 9. Config et historique de session
+
+Intention:
+
+> Gestion des confs de session et stockage perenne des conversations de session.
+
+Spec:
+
+- Profils de session.
+- Historique conversation/evenements.
+- Workspace persistant.
+- Event log append-only pour les decisions sensibles.
+
+### 10. Plugin maitre
+
+Intention:
+
+> Plugin pour une session maitre: instructions, drumbeat, avancement, escalades,
+> planifier/configurer/poper nouveaux envs.
+
+Spec:
+
+- Section: `Master And Slave Plugins`.
+- Master control:
+  - instruction input;
+  - drumbeat configurable;
+  - status sessions;
+  - approvals;
+  - creation d'environnements depuis profils.
+
+### 11. Plugin esclave
+
+Intention:
+
+> Plugin pour sessions esclaves: escalation sudo/install, validation, besoin 2FA.
+
+Spec:
+
+- `session-agent` / slave plugin.
+- Capability requests:
+  - secrets;
+  - escalades;
+  - 2FA;
+  - actions navigateur sensibles.
+
+### 12. Gestion 2FA
+
+Intention:
+
+> Gestionnaire de 2FA pour acceder aux secrets et/ou permettre la tierce auth 2FA.
+
+Spec:
+
+- 2FA par saisie utilisateur dans le frontend.
+- Ou prise de main temporaire du navigateur par l'utilisateur.
+- Jamais de secret 2FA durable donne a l'agent.
+
+### 13. Frontend operateur
+
+Intention:
+
+> Terminal mobile swipe/tab par env, proxy UAT, proxy navigateur Playwright,
+> voix via voxtral-js.
+
+Spec:
+
+- Svelte 5 frontend.
+- Tabs desktop + swipe mobile.
+- xterm.js.
+- Panes UAT/browser.
+- WebRTC si latence critique.
+- Transcription live `voxtral-js` dans l'input CLI/instruction.
+
+### 14. Veille et libs maitrisables
+
+Intention:
+
+> Veille des features cle remote control et libs a recoder si besoin,
+> sans dependances opaques pour le coeur.
+
+Spec:
+
+- V2 research et core packages separes.
+- Inspirations identifiees:
+  - Coder
+  - DevPod
+  - OpenHands
+  - WebContainers
+  - SES/Endo
+  - WASI
+- Les fonctions coeur restent dans des packages maitrisables.
+
+### 15. Stack technique
+
+Intention:
+
+> TypeScript backend et Svelte 5 frontend.
+
+Spec:
+
+- Backend TypeScript.
+- Frontend Svelte 5.
+- Monorepo avec packages publiables.
+
+### 16. Publication librairies
+
+Intention:
+
+> Scaffolder pour publier un maximum en librairies, possiblement `@entropic/...`.
+
+Spec:
+
+- Monorepo avec packages publiables potentiels.
+- Scope npm differe.
+- Noms compatibles `@entropic/...` si acces confirme.
+
+### 17. MVP end-to-end complet
+
+Intention:
+
+> MVP doit couvrir code + ops CLI + navigateur/2FA, sinon pas de test bout en bout.
+
+Spec:
+
+- Sections: `Context`, `Testing Strategy`.
+- Un E2E unique doit couvrir:
+  - code;
+  - ops CLI;
+  - navigateur/UAT;
+  - 2FA/approval;
+  - persistance.
+
+### 18. V2 micro-OS TypeScript
+
+Intention:
+
+> Emulateur d'OS TypeScript dans V8 pour paravirtualisation plus micro.
+
+Spec:
+
+- Section: `V2 Research: TypeScript Micro-OS`.
+- Gates A-D.
+- Menu initial de commandes.
+- Verification Codex/Claude Code dans containers k8s reels avant hypothese micro-OS.
 
 ## Decisions prises pendant brainstorm
 
