@@ -122,6 +122,8 @@ Write `pnpm-workspace.yaml`:
 packages:
   - apps/*
   - packages/*
+allowBuilds:
+  esbuild: true
 ```
 
 - [ ] **Step 3: Create the shared TypeScript config**
@@ -1155,3 +1157,5 @@ Expected:
   - Package scope is consistently `@remote-controle/*`.
   - Protocol exports use `CliProfile`, `Capability`, and `SessionDescriptor`.
   - Backend imports `REMOTE_CONTROLE_PROTOCOL_VERSION` from `@remote-controle/protocol`.
+- pnpm build scripts:
+  - pnpm 11 allows only `esbuild` build scripts because Vite, Vitest, and tsup depend on it.
