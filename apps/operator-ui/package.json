@@ -1,0 +1,28 @@
+{
+  "name": "@remote-controle/operator-ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite dev --host 0.0.0.0",
+    "lint": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@remote-controle/protocol": "workspace:*",
+    "@sent-tech/components-svelte": "0.1.0",
+    "@sveltejs/adapter-node": "^5.5.4",
+    "@sveltejs/kit": "^2.59.1",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@xterm/xterm": "^6.0.0",
+    "svelte": "^5.55.5",
+    "vite": "^8.0.11",
+    "voxtral-transcribe-ts": "0.1.3"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "svelte-check": "^4.4.8"
+  }
+}
