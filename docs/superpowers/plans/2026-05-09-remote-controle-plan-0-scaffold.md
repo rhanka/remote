@@ -68,7 +68,7 @@ Create these files:
 - `packages/browser-bridge/tsconfig.json`: package TS config.
 - `packages/browser-bridge/src/index.ts`: exported package metadata.
 
-The package names use the temporary scope `@remote-controle/*`. Rename to `@entropic/*` only after access to that npm scope is confirmed.
+The package names use the temporary scaffold scope `@remote-controle/*`. The validated publishing family is `@entropiq/remote-*`; rename package manifests after npm scope access is confirmed.
 
 ## Task 1: Root Workspace
 

@@ -235,13 +235,13 @@ Spec:
 
 Intention:
 
-> Scaffolder pour publier un maximum en librairies, possiblement `@entropic/...`.
+> Scaffolder pour publier un maximum en librairies, possiblement `@entropiq/...`.
 
 Spec:
 
 - Monorepo avec packages publiables potentiels.
-- Scope npm differe.
-- Noms compatibles `@entropic/...` si acces confirme.
+- Scope npm retenu: `@entropiq`.
+- Famille de packages cible: `@entropiq/remote-*`.
 
 ### 17. MVP end-to-end complet
 
@@ -307,7 +307,7 @@ Spec:
 
 ## Points ouverts a trancher avant implementation detaillee
 
-- Repository ou organisation qui publie deja sous `@entropic/...` et acces au scope.
+- Acces de publication npm au scope `@entropiq` depuis ce repository.
 - Namespace par session ou namespace partage avec labels stricts.
 - Premiere source externe de secrets pour k3s et Scaleway PoC.
 - Browser transport initial: WebRTC-first ou fallback noVNC/WebSocket avec spike WebRTC.

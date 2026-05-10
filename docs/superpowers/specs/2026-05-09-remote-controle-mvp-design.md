@@ -15,7 +15,7 @@ The initial brief is preserved verbatim in `docs/brief-as-is.md`, with later add
 - Support k3s first for realistic local cluster development, then Scaleway Kapsule in the PoC space, then GKE.
 - Let a master session or operator frontend create sessions, send instructions, stream terminal output, monitor progress, handle approvals, and observe browser/UAT actions.
 - Persist session workspaces and conversation/event history.
-- Structure the repository as a monorepo whose core packages can later be published as libraries, with npm scope decided later and names compatible with `@entropic/...` if access is confirmed.
+- Structure the repository as a monorepo whose core packages can later be published as libraries under the validated `@entropiq/remote-*` package family once npm scope access is confirmed.
 
 ## Non-goals
 
@@ -115,7 +115,7 @@ The repository should be a monorepo with publishable packages from the start, bu
 Validated decisions:
 
 - Use monorepo structure rather than a single app or many separate repos.
-- Defer final npm scope. Use package naming compatible with `@entropic/...` if scope access is confirmed.
+- Use `@entropiq/remote-*` as the final npm package family; keep temporary scaffold package names until npm scope access is confirmed.
 - Create core packages for `protocol`, `k8s-orchestrator`, `session-agent`, `approval-core`, `secret-broker`, `terminal-transport`, `browser-bridge`, and the Svelte frontend app.
 - Reserve runtime interfaces for V2: `CommandRuntime`, `VirtualFS`, `Process`, `Capability`, and `ArtifactStore`.
 
@@ -171,7 +171,7 @@ Provider test order:
 
 ## Open Questions
 
-- Confirm the existing repository that publishes under `@entropic/...` and whether this repo can publish packages under that scope.
+- Confirm npm publishing access for the `@entropiq` scope from this repository.
 - Decide whether sessions use one namespace per session or a shared namespace with strict labels for the first implementation.
 - Choose the first external secret source for k3s and Scaleway PoC.
 - Confirm whether the first cloud browser transport is WebRTC-first or starts with noVNC-style fallback plus WebRTC spike.
