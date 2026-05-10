@@ -3,7 +3,7 @@ import {
   CAPABILITIES,
   CLI_PROFILES,
   REMOTE_CONTROLE_PROTOCOL_VERSION,
-  type SessionDescriptor
+  type SessionDescriptor,
 } from "./index.js";
 
 describe("protocol constants", () => {
@@ -13,7 +13,7 @@ describe("protocol constants", () => {
       "codex",
       "opencode",
       "claude-code",
-      "gemini-cli"
+      "gemini-cli",
     ]);
   });
 
@@ -31,7 +31,7 @@ describe("protocol constants", () => {
       id: "session-001",
       profile: "codex",
       target: "k3s",
-      workspacePath: "/workspace"
+      workspacePath: "/workspace",
     };
 
     expect(descriptor.workspacePath).toBe("/workspace");

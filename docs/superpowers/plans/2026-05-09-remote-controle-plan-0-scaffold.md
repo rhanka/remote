@@ -258,7 +258,7 @@ export const CLI_PROFILES = [
   "codex",
   "opencode",
   "claude-code",
-  "gemini-cli"
+  "gemini-cli",
 ] as const;
 
 export type CliProfile = (typeof CLI_PROFILES)[number];
@@ -270,7 +270,7 @@ export const CAPABILITIES = [
   "create-cloud-resource",
   "install-system-package",
   "browser-login",
-  "browser-sensitive-action"
+  "browser-sensitive-action",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -295,7 +295,7 @@ import {
   CAPABILITIES,
   CLI_PROFILES,
   REMOTE_CONTROLE_PROTOCOL_VERSION,
-  type SessionDescriptor
+  type SessionDescriptor,
 } from "./index.js";
 
 describe("protocol constants", () => {
@@ -305,7 +305,7 @@ describe("protocol constants", () => {
       "codex",
       "opencode",
       "claude-code",
-      "gemini-cli"
+      "gemini-cli",
     ]);
   });
 
@@ -323,7 +323,7 @@ describe("protocol constants", () => {
       id: "session-001",
       profile: "codex",
       target: "k3s",
-      workspacePath: "/workspace"
+      workspacePath: "/workspace",
     };
 
     expect(descriptor.workspacePath).toBe("/workspace");
@@ -424,7 +424,7 @@ export function createControlPlane(): FastifyInstance {
   app.get("/healthz", async () => ({
     ok: true,
     service: "remote-controle-control-plane",
-    protocolVersion: REMOTE_CONTROLE_PROTOCOL_VERSION
+    protocolVersion: REMOTE_CONTROLE_PROTOCOL_VERSION,
   }));
 
   return app;
@@ -459,7 +459,7 @@ describe("control plane", () => {
     expect(response.json()).toEqual({
       ok: true,
       service: "remote-controle-control-plane",
-      protocolVersion: "0.0.0"
+      protocolVersion: "0.0.0",
     });
 
     await app.close();
@@ -691,7 +691,7 @@ The native build-script allowlist is limited to `esbuild` plus `voxtral-transcri
     "build": "vite build",
     "dev": "vite dev --host 0.0.0.0",
     "lint": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
@@ -722,8 +722,8 @@ import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 const config = {
   preprocess: vitePreprocess(),
   kit: {
-    adapter: adapter()
-  }
+    adapter: adapter(),
+  },
 };
 
 export default config;
@@ -738,8 +738,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [sveltekit()],
   test: {
-    environment: "jsdom"
-  }
+    environment: "jsdom",
+  },
 });
 ```
 
@@ -1005,6 +1005,7 @@ Expected:
 **Files:**
 
 - Modify: `pnpm-lock.yaml`
+- Create: `.prettierignore`
 
 - [ ] **Step 1: Install dependencies**
 
@@ -1031,6 +1032,7 @@ pnpm format
 Expected:
 
 - Prettier exits with status 0.
+- `.prettierignore` preserves raw brief audit files at `docs/brief-as-is.md` and `docs/brief-additions/*.md` as-is.
 
 - [ ] **Step 3: Verify typechecking**
 
@@ -1105,7 +1107,7 @@ Expected:
 
 Write `README.md`:
 
-```md
+````md
 # remote-controle
 
 Kubernetes-native orchestration for delegated CLI sessions.
@@ -1132,7 +1134,9 @@ corepack enable pnpm
 pnpm install
 pnpm verify
 ```
-```
+````
+
+````
 
 - [ ] **Step 2: Commit README update**
 
@@ -1141,7 +1145,7 @@ Run:
 ```bash
 git add README.md
 git commit -m "docs: describe scaffold workspace"
-```
+````
 
 Expected:
 

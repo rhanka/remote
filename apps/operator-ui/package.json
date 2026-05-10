@@ -7,7 +7,7 @@
     "build": "vite build",
     "dev": "vite dev --host 0.0.0.0",
     "lint": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {

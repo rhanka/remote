@@ -5,7 +5,7 @@ export const CLI_PROFILES = [
   "codex",
   "opencode",
   "claude-code",
-  "gemini-cli"
+  "gemini-cli",
 ] as const;
 
 export type CliProfile = (typeof CLI_PROFILES)[number];
@@ -17,7 +17,7 @@ export const CAPABILITIES = [
   "create-cloud-resource",
   "install-system-package",
   "browser-login",
-  "browser-sensitive-action"
+  "browser-sensitive-action",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

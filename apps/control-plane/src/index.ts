@@ -7,7 +7,7 @@ export function createControlPlane(): FastifyInstance {
   app.get("/healthz", async () => ({
     ok: true,
     service: "remote-controle-control-plane",
-    protocolVersion: REMOTE_CONTROLE_PROTOCOL_VERSION
+    protocolVersion: REMOTE_CONTROLE_PROTOCOL_VERSION,
   }));
 
   return app;
