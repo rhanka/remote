@@ -1136,8 +1136,6 @@ pnpm verify
 ```
 ````
 
-````
-
 - [ ] **Step 2: Commit README update**
 
 Run:
@@ -1145,7 +1143,7 @@ Run:
 ```bash
 git add README.md
 git commit -m "docs: describe scaffold workspace"
-````
+```
 
 Expected:
 
