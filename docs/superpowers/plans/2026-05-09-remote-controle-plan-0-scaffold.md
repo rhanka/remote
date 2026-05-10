@@ -143,6 +143,7 @@ Write `tsconfig.base.json`:
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
+    "ignoreDeprecations": "6.0",
     "isolatedModules": true
   }
 }
