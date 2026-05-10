@@ -124,6 +124,9 @@ packages:
   - packages/*
 allowBuilds:
   esbuild: true
+  onnxruntime-node: true
+  protobufjs: true
+  sharp: true
 ```
 
 - [ ] **Step 3: Create the shared TypeScript config**
@@ -676,6 +679,7 @@ Expected:
 
 `@sent-tech/components-svelte@0.1.0` was verified with `npm view @sent-tech/components-svelte version`.
 `voxtral-transcribe-ts@0.1.3` was verified with `npm search voxtral --json` and is the published Voxtral TypeScript package from the `rhk` npm publisher.
+The native build-script allowlist is limited to `esbuild` plus `voxtral-transcribe-ts` transitive native dependencies: `onnxruntime-node`, `protobufjs`, `sharp`.
 
 ```json
 {
