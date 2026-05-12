@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "tsup": "^8.5.1"
   },
   "dependencies": {

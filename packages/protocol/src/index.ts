@@ -20,9 +20,5 @@ export type SessionLifecycleState =
 export type SessionTarget =
   (typeof import("./constants.js").SESSION_TARGETS)[number];
 
-export interface SessionDescriptor {
-  readonly id: string;
-  readonly profile: CliProfile;
-  readonly target: SessionTarget;
-  readonly workspacePath: "/workspace";
-}
+export * from "./schemas/index.js";
+export type * from "./types.js";
