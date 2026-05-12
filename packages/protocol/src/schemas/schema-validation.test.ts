@@ -2,15 +2,27 @@ import { Ajv } from "ajv";
 import * as addFormatsModule from "ajv-formats";
 import type { FormatsPlugin } from "ajv-formats";
 import { describe, expect, it } from "vitest";
+import { REMOTE_SCHEMA_BASE_URL } from "../constants.js";
 import {
   actorSchema,
+  approvalDecisionSchema,
+  approvalDecisionRequestSchema,
+  approvalDecisionResponseSchema,
+  approvalRequestSchema,
   createSessionRequestSchema,
   createSessionResponseSchema,
   getSessionResponseSchema,
   listSessionsResponseSchema,
+  remoteErrorCodeSchema,
+  remoteErrorSchema,
+  riskSchema,
   sendInstructionRequestSchema,
   sendInstructionResponseSchema,
   sessionDescriptorSchema,
+  secretDeliverySchema,
+  secretGrantResponseSchema,
+  secretGrantStatusSchema,
+  secretRequestSchema,
   stopSessionRequestSchema,
   stopSessionResponseSchema,
 } from "./index.js";
@@ -158,5 +170,116 @@ describe("session JSON Schemas", () => {
     expect(validateAdditionalStopProperty.errors?.[0]?.keyword).toBe(
       "additionalProperties",
     );
+  });
+});
+
+describe("approval, secret, and error JSON Schemas", () => {
+  it("exposes public enum schema ids and compiles them with strict Ajv", () => {
+    const publicEnumSchemas = [
+      [
+        riskSchema,
+        `${REMOTE_SCHEMA_BASE_URL}/approval-risk.schema.json`,
+        "critical",
+      ],
+      [
+        approvalDecisionSchema,
+        `${REMOTE_SCHEMA_BASE_URL}/approval-decision.schema.json`,
+        "approved",
+      ],
+      [
+        secretDeliverySchema,
+        `${REMOTE_SCHEMA_BASE_URL}/secret-delivery.schema.json`,
+        "kubernetes-secret",
+      ],
+      [
+        secretGrantStatusSchema,
+        `${REMOTE_SCHEMA_BASE_URL}/secret-grant-status.schema.json`,
+        "granted",
+      ],
+      [
+        remoteErrorCodeSchema,
+        `${REMOTE_SCHEMA_BASE_URL}/remote-error-code.schema.json`,
+        "capability.denied",
+      ],
+    ] as const;
+
+    for (const [schema, id, validValue] of publicEnumSchemas) {
+      expect(schema.$id).toBe(id);
+      expect(schema.title).toBeTypeOf("string");
+      expect(ajv.compile(schema)(validValue)).toBe(true);
+    }
+  });
+
+  it("validates approval request and decision payloads", () => {
+    expect(
+      ajv.compile(approvalRequestSchema)({
+        approvalRequestId: "approval_001",
+        sessionId: "session_001",
+        capability: "publish-npm",
+        risk: "high",
+        reason: "Publish package after tests pass",
+        requestedBy: { id: "agent_001", kind: "session-agent" },
+        requestedAt: "2026-05-11T12:00:00.000Z",
+        expiresAt: "2026-05-11T12:05:00.000Z",
+        subject: "npm publish",
+        proposedAction: "npm publish --access public",
+        context: { packageName: "@sentropic/remote-protocol" },
+      }),
+    ).toBe(true);
+
+    expect(
+      ajv.compile(approvalDecisionRequestSchema)({
+        approvalRequestId: "approval_001",
+        decision: "approved",
+        comment: "Tests passed",
+      }),
+    ).toBe(true);
+
+    expect(
+      ajv.compile(approvalDecisionResponseSchema)({
+        approvalRequestId: "approval_001",
+        decision: "approved",
+        decidedAt: "2026-05-11T12:01:00.000Z",
+      }),
+    ).toBe(true);
+  });
+
+  it("validates secret request and grant payloads without secret values", () => {
+    const request = {
+      secretRequestId: "secret_req_001",
+      sessionId: "session_001",
+      secretRef: "github-token",
+      capability: "read-secret",
+      purpose: "Authenticate gh for repository access",
+      requestedBy: { id: "agent_001", kind: "session-agent" },
+      requestedAt: "2026-05-11T12:00:00.000Z",
+      expiresAt: "2026-05-11T12:10:00.000Z",
+      delivery: "kubernetes-secret",
+      context: { repository: "rhanka/remote-controle" },
+    };
+
+    const grant = {
+      secretRequestId: "secret_req_001",
+      status: "granted",
+      handle: "secret_handle_001",
+      expiresAt: "2026-05-11T12:10:00.000Z",
+      redactedPreview: "ghp_...1234",
+    };
+
+    expect(ajv.compile(secretRequestSchema)(request)).toBe(true);
+    expect(ajv.compile(secretGrantResponseSchema)(grant)).toBe(true);
+    expect(JSON.stringify(grant)).not.toContain("ghp_secret_value");
+  });
+
+  it("validates remote errors", () => {
+    expect(
+      ajv.compile(remoteErrorSchema)({
+        code: "capability.denied",
+        message: "Capability denied by policy",
+        retryable: false,
+        correlationId: "corr_001",
+        details: { capability: "publish-npm" },
+      }),
+    ).toBe(true);
   });
 });

@@ -1,5 +1,15 @@
 import type { FromSchema } from "json-schema-to-ts";
+import type {
+  approvalDecisionRequestSchema,
+  approvalDecisionResponseSchema,
+  approvalRequestSchema,
+} from "./schemas/approvals.js";
 import type { actorSchema } from "./schemas/common.js";
+import type { remoteErrorSchema } from "./schemas/errors.js";
+import type {
+  secretGrantResponseSchema,
+  secretRequestSchema,
+} from "./schemas/secrets.js";
 import type {
   createSessionRequestSchema,
   createSessionResponseSchema,
@@ -32,3 +42,13 @@ export type SendInstructionRequest = FromSchema<
 export type SendInstructionResponse = FromSchema<
   typeof sendInstructionResponseSchema
 >;
+export type ApprovalRequest = FromSchema<typeof approvalRequestSchema>;
+export type ApprovalDecisionRequest = FromSchema<
+  typeof approvalDecisionRequestSchema
+>;
+export type ApprovalDecisionResponse = FromSchema<
+  typeof approvalDecisionResponseSchema
+>;
+export type SecretRequest = FromSchema<typeof secretRequestSchema>;
+export type SecretGrantResponse = FromSchema<typeof secretGrantResponseSchema>;
+export type RemoteError = FromSchema<typeof remoteErrorSchema>;
