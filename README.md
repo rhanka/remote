@@ -1,6 +1,8 @@
-# remote-controle
+# Sentropic Remote
 
 Kubernetes-native orchestration for delegated CLI sessions.
+
+Repository codename: `remote-controle`.
 
 ## Stack
 
@@ -14,6 +16,7 @@ Kubernetes-native orchestration for delegated CLI sessions.
 
 - Initial brief: `docs/brief-as-is.md`
 - Traceability: `docs/traceability/2026-05-09-intention-spec-decisions.md`
+- Naming and packaging: `docs/decisions/2026-05-10-naming-and-packaging.md`
 - MVP spec: `docs/superpowers/specs/2026-05-09-remote-controle-mvp-design.md`
 - Plan 0 scaffold: `docs/superpowers/plans/2026-05-09-remote-controle-plan-0-scaffold.md`
 
