@@ -11,6 +11,8 @@ import {
   approvalRequestSchema,
   createSessionRequestSchema,
   createSessionResponseSchema,
+  browserTwoFactorRequestSchema,
+  browserUserTakeoverChangedSchema,
   getSessionResponseSchema,
   listSessionsResponseSchema,
   remoteErrorCodeSchema,
@@ -25,6 +27,9 @@ import {
   secretRequestSchema,
   stopSessionRequestSchema,
   stopSessionResponseSchema,
+  terminalOutputSchema,
+  terminalResizeSchema,
+  uatRouteCreatedSchema,
 } from "./index.js";
 
 const addFormats = addFormatsModule.default as unknown as FormatsPlugin;
@@ -279,6 +284,58 @@ describe("approval, secret, and error JSON Schemas", () => {
         retryable: false,
         correlationId: "corr_001",
         details: { capability: "publish-npm" },
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("terminal, browser, and UAT JSON Schemas", () => {
+  it("validates terminal output and resize payloads", () => {
+    expect(
+      ajv.compile(terminalOutputSchema)({
+        terminalId: "term_001",
+        stream: "stdout",
+        data: "$ npm test\n",
+        encoding: "utf8",
+      }),
+    ).toBe(true);
+
+    expect(
+      ajv.compile(terminalResizeSchema)({
+        terminalId: "term_001",
+        columns: 120,
+        rows: 40,
+      }),
+    ).toBe(true);
+  });
+
+  it("validates browser 2FA, takeover, and UAT route payloads", () => {
+    expect(
+      ajv.compile(browserTwoFactorRequestSchema)({
+        pageId: "page_001",
+        url: "https://github.com/login",
+        challengeId: "challenge_001",
+        method: "totp",
+        requestedAt: "2026-05-11T12:00:00.000Z",
+        expiresAt: "2026-05-11T12:02:00.000Z",
+      }),
+    ).toBe(true);
+
+    expect(
+      ajv.compile(browserUserTakeoverChangedSchema)({
+        pageId: "page_001",
+        state: "active",
+        changedAt: "2026-05-11T12:01:00.000Z",
+      }),
+    ).toBe(true);
+
+    expect(
+      ajv.compile(uatRouteCreatedSchema)({
+        routeId: "uat_001",
+        url: "https://uat.example.invalid/session_001",
+        port: 5173,
+        expiresAt: "2026-05-11T13:00:00.000Z",
+        exposurePolicy: "operator-only",
       }),
     ).toBe(true);
   });

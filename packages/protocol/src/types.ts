@@ -4,6 +4,16 @@ import type {
   approvalDecisionResponseSchema,
   approvalRequestSchema,
 } from "./schemas/approvals.js";
+import type {
+  browserNavigatedSchema,
+  browserSensitiveActionRequestSchema,
+  browserStartedSchema,
+  browserTwoFactorRequestSchema,
+  browserUserTakeoverChangedSchema,
+  browserUserTakeoverRequestSchema,
+  uatRouteCreatedSchema,
+  uatRouteExpiredSchema,
+} from "./schemas/browser.js";
 import type { actorSchema } from "./schemas/common.js";
 import type { remoteErrorSchema } from "./schemas/errors.js";
 import type {
@@ -21,6 +31,13 @@ import type {
   stopSessionRequestSchema,
   stopSessionResponseSchema,
 } from "./schemas/session.js";
+import type {
+  terminalExitedSchema,
+  terminalInputSchema,
+  terminalOpenedSchema,
+  terminalOutputSchema,
+  terminalResizeSchema,
+} from "./schemas/terminal.js";
 
 export type Actor = FromSchema<typeof actorSchema>;
 export type SessionDescriptor = FromSchema<typeof sessionDescriptorSchema>;
@@ -52,3 +69,24 @@ export type ApprovalDecisionResponse = FromSchema<
 export type SecretRequest = FromSchema<typeof secretRequestSchema>;
 export type SecretGrantResponse = FromSchema<typeof secretGrantResponseSchema>;
 export type RemoteError = FromSchema<typeof remoteErrorSchema>;
+export type TerminalOpened = FromSchema<typeof terminalOpenedSchema>;
+export type TerminalInput = FromSchema<typeof terminalInputSchema>;
+export type TerminalOutput = FromSchema<typeof terminalOutputSchema>;
+export type TerminalResize = FromSchema<typeof terminalResizeSchema>;
+export type TerminalExited = FromSchema<typeof terminalExitedSchema>;
+export type BrowserStarted = FromSchema<typeof browserStartedSchema>;
+export type BrowserNavigated = FromSchema<typeof browserNavigatedSchema>;
+export type BrowserTwoFactorRequest = FromSchema<
+  typeof browserTwoFactorRequestSchema
+>;
+export type BrowserUserTakeoverRequest = FromSchema<
+  typeof browserUserTakeoverRequestSchema
+>;
+export type BrowserUserTakeoverChanged = FromSchema<
+  typeof browserUserTakeoverChangedSchema
+>;
+export type BrowserSensitiveActionRequest = FromSchema<
+  typeof browserSensitiveActionRequestSchema
+>;
+export type UatRouteCreated = FromSchema<typeof uatRouteCreatedSchema>;
+export type UatRouteExpired = FromSchema<typeof uatRouteExpiredSchema>;
