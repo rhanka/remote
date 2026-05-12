@@ -16,6 +16,7 @@ import type {
 } from "./schemas/browser.js";
 import type { actorSchema } from "./schemas/common.js";
 import type { remoteErrorSchema } from "./schemas/errors.js";
+import type { remoteEventEnvelopeSchema } from "./schemas/events.js";
 import type {
   secretGrantResponseSchema,
   secretRequestSchema,
@@ -90,3 +91,4 @@ export type BrowserSensitiveActionRequest = FromSchema<
 >;
 export type UatRouteCreated = FromSchema<typeof uatRouteCreatedSchema>;
 export type UatRouteExpired = FromSchema<typeof uatRouteExpiredSchema>;
+export type RemoteEventEnvelope = FromSchema<typeof remoteEventEnvelopeSchema>;

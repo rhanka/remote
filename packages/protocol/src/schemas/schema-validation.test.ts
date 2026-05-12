@@ -4,6 +4,12 @@ import type { FormatsPlugin } from "ajv-formats";
 import { describe, expect, it } from "vitest";
 import { REMOTE_SCHEMA_BASE_URL } from "../constants.js";
 import {
+  approvalRequestedEventExample,
+  browserTwoFactorRequestedEventExample,
+  sessionLifecycleChangedEventExample,
+  terminalOutputEventExample,
+} from "../examples.js";
+import {
   actorSchema,
   approvalDecisionSchema,
   approvalDecisionRequestSchema,
@@ -17,6 +23,7 @@ import {
   listSessionsResponseSchema,
   remoteErrorCodeSchema,
   remoteErrorSchema,
+  remoteEventEnvelopeSchema,
   riskSchema,
   sendInstructionRequestSchema,
   sendInstructionResponseSchema,
@@ -285,6 +292,39 @@ describe("approval, secret, and error JSON Schemas", () => {
         correlationId: "corr_001",
         details: { capability: "publish-npm" },
       }),
+    ).toBe(true);
+  });
+});
+
+describe("remote event envelope JSON Schema", () => {
+  it("validates representative event examples", () => {
+    const validate = ajv.compile(remoteEventEnvelopeSchema);
+
+    expect(validate(sessionLifecycleChangedEventExample)).toBe(true);
+    expect(validate(approvalRequestedEventExample)).toBe(true);
+    expect(validate(terminalOutputEventExample)).toBe(true);
+    expect(validate(browserTwoFactorRequestedEventExample)).toBe(true);
+  });
+
+  it("rejects an event without protocol version", () => {
+    const validate = ajv.compile(remoteEventEnvelopeSchema);
+    const { protocolVersion: _protocolVersion, ...invalid } =
+      terminalOutputEventExample;
+
+    expect(validate(invalid)).toBe(false);
+  });
+
+  it("validates representative event payload examples against payload schemas", () => {
+    expect(
+      ajv.compile(approvalRequestSchema)(approvalRequestedEventExample.payload),
+    ).toBe(true);
+    expect(
+      ajv.compile(terminalOutputSchema)(terminalOutputEventExample.payload),
+    ).toBe(true);
+    expect(
+      ajv.compile(browserTwoFactorRequestSchema)(
+        browserTwoFactorRequestedEventExample.payload,
+      ),
     ).toBe(true);
   });
 });

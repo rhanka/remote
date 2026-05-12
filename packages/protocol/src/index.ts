@@ -21,4 +21,6 @@ export type SessionTarget =
   (typeof import("./constants.js").SESSION_TARGETS)[number];
 
 export * from "./schemas/index.js";
+export * from "./examples.js";
+export * from "./openapi.js";
 export type * from "./types.js";
