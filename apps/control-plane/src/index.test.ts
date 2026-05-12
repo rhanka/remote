@@ -10,7 +10,7 @@ describe("control plane", () => {
     expect(response.json()).toEqual({
       ok: true,
       service: "remote-controle-control-plane",
-      protocolVersion: "0.0.0",
+      protocolVersion: "0.1.0",
     });
 
     await app.close();

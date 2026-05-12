@@ -16,7 +16,7 @@
     "lint": "corepack pnpm -r --if-present lint",
     "test": "corepack pnpm -r --if-present test",
     "typecheck": "corepack pnpm -r --if-present typecheck",
-    "verify": "corepack pnpm format && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm test && corepack pnpm build"
+    "verify": "corepack pnpm format && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm build && corepack pnpm test"
   },
   "devDependencies": {
     "@types/node": "^22.19.18",

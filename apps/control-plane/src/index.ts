@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { REMOTE_CONTROLE_PROTOCOL_VERSION } from "@remote-controle/protocol";
+import { REMOTE_PROTOCOL_VERSION } from "@remote-controle/protocol";
 
 export function createControlPlane(): FastifyInstance {
   const app = Fastify({ logger: true });
@@ -7,7 +7,7 @@ export function createControlPlane(): FastifyInstance {
   app.get("/healthz", async () => ({
     ok: true,
     service: "remote-controle-control-plane",
-    protocolVersion: REMOTE_CONTROLE_PROTOCOL_VERSION,
+    protocolVersion: REMOTE_PROTOCOL_VERSION,
   }));
 
   return app;
