@@ -1,28 +1,24 @@
-export const REMOTE_CONTROLE_PROTOCOL_VERSION = "0.0.0";
+export {
+  ACTOR_KINDS,
+  CAPABILITIES,
+  CLI_PROFILES,
+  EVENT_TYPES,
+  REMOTE_CONTROLE_PROTOCOL_VERSION,
+  REMOTE_PROTOCOL_VERSION,
+  REMOTE_SCHEMA_BASE_URL,
+  REMOTE_SCHEMA_VERSION,
+  SESSION_LIFECYCLE_STATES,
+  SESSION_TARGETS,
+} from "./constants.js";
 
-export const CLI_PROFILES = [
-  "shell",
-  "codex",
-  "opencode",
-  "claude-code",
-  "gemini-cli",
-] as const;
-
-export type CliProfile = (typeof CLI_PROFILES)[number];
-
-export const CAPABILITIES = [
-  "read-secret",
-  "push-git",
-  "publish-npm",
-  "create-cloud-resource",
-  "install-system-package",
-  "browser-login",
-  "browser-sensitive-action",
-] as const;
-
-export type Capability = (typeof CAPABILITIES)[number];
-
-export type SessionTarget = "k3s" | "scaleway-kapsule" | "gke";
+export type ActorKind = (typeof import("./constants.js").ACTOR_KINDS)[number];
+export type Capability = (typeof import("./constants.js").CAPABILITIES)[number];
+export type CliProfile = (typeof import("./constants.js").CLI_PROFILES)[number];
+export type EventType = (typeof import("./constants.js").EVENT_TYPES)[number];
+export type SessionLifecycleState =
+  (typeof import("./constants.js").SESSION_LIFECYCLE_STATES)[number];
+export type SessionTarget =
+  (typeof import("./constants.js").SESSION_TARGETS)[number];
 
 export interface SessionDescriptor {
   readonly id: string;

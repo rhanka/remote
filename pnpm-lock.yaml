@@ -113,7 +113,14 @@ importers:
         version: 8.5.1(postcss@8.5.14)(tsx@4.21.0)(typescript@6.0.3)
 
   packages/protocol:
+    dependencies:
+      json-schema-to-ts:
+        specifier: ^3.1.1
+        version: 3.1.1
     devDependencies:
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(postcss@8.5.14)(tsx@4.21.0)(typescript@6.0.3)
@@ -175,6 +182,13 @@ packages:
       {
         integrity: sha512-n8GuYSrI9bF7FFZ/SjhwevlHc8xaVlb/7HmHelnc/PZXBD2ZR49NnN9sMMuDdEGPeeRQ5d0hqlSlEpgCX3Wl0Q==,
       }
+
+  "@babel/runtime@7.29.2":
+    resolution:
+      {
+        integrity: sha512-JiDShH45zKHWyGe4ZNVRrCjBz8Nh9TMmZG1kh4QTK8hCBTWBi8Da+i7s1fJw7/lYpM4ccepSNfqzZ/QvABBi5g==,
+      }
+    engines: { node: ">=6.9.0" }
 
   "@bramus/specificity@2.4.2":
     resolution:
@@ -2342,6 +2356,13 @@ packages:
         integrity: sha512-hOrZIVL5jyYFjzk7+y7n5JDzGlU8rfWDuYyHwGa2WA8/pcmMHezp2xsVwxrebD/Q9t8Nc5DboieySDpCp4WG4A==,
       }
 
+  json-schema-to-ts@3.1.1:
+    resolution:
+      {
+        integrity: sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g==,
+      }
+    engines: { node: ">=16" }
+
   json-schema-traverse@1.0.0:
     resolution:
       {
@@ -3315,6 +3336,12 @@ packages:
       }
     hasBin: true
 
+  ts-algebra@2.0.0:
+    resolution:
+      {
+        integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==,
+      }
+
   ts-interface-checker@0.1.13:
     resolution:
       {
@@ -3632,6 +3659,8 @@ snapshots:
   "@asamuzakjp/generational-cache@1.0.1": {}
 
   "@asamuzakjp/nwsapi@2.3.9": {}
+
+  "@babel/runtime@7.29.2": {}
 
   "@bramus/specificity@2.4.2":
     dependencies:
@@ -4744,6 +4773,11 @@ snapshots:
     dependencies:
       dequal: 2.0.3
 
+  json-schema-to-ts@3.1.1:
+    dependencies:
+      "@babel/runtime": 7.29.2
+      ts-algebra: 2.0.0
+
   json-schema-traverse@1.0.0: {}
 
   json-stringify-safe@5.0.1: {}
@@ -5349,6 +5383,8 @@ snapshots:
       punycode: 2.3.1
 
   tree-kill@1.2.2: {}
+
+  ts-algebra@2.0.0: {}
 
   ts-interface-checker@0.1.13: {}
 
