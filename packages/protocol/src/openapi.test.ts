@@ -1,85 +1,55 @@
 import { describe, expect, it } from "vitest";
-import {
-  actorSchema,
-  approvalDecisionRequestSchema,
-  approvalDecisionResponseSchema,
-  approvalRequestSchema,
-  browserNavigatedSchema,
-  browserSensitiveActionRequestSchema,
-  browserStartedSchema,
-  browserTwoFactorRequestSchema,
-  browserUserTakeoverChangedSchema,
-  browserUserTakeoverRequestSchema,
-  createSessionRequestSchema,
-  createSessionResponseSchema,
-  getSessionResponseSchema,
-  listSessionsResponseSchema,
-  remoteErrorSchema,
-  remoteEventEnvelopeSchema,
-  remoteOpenApiComponents,
-  secretGrantResponseSchema,
-  secretRequestSchema,
-  sendInstructionRequestSchema,
-  sendInstructionResponseSchema,
-  sessionDescriptorSchema,
-  stopSessionRequestSchema,
-  stopSessionResponseSchema,
-  terminalExitedSchema,
-  terminalInputSchema,
-  terminalOpenedSchema,
-  terminalOutputSchema,
-  terminalResizeSchema,
-  uatRouteCreatedSchema,
-  uatRouteExpiredSchema,
-} from "./index.js";
+import * as protocol from "./index.js";
+import { remoteOpenApiComponents } from "./index.js";
+
+type PublicJsonSchema = {
+  readonly $id: string;
+  readonly title: string;
+};
+
+const publicExportedSchemas = () =>
+  (Object.entries(protocol) as Array<[string, unknown]>).filter(
+    (entry): entry is [string, PublicJsonSchema] => {
+      const [exportName, value] = entry;
+
+      if (!exportName.endsWith("Schema")) {
+        return false;
+      }
+
+      if (value === null || typeof value !== "object") {
+        return false;
+      }
+
+      const candidate = value as { $id?: unknown; title?: unknown };
+
+      return (
+        typeof candidate.$id === "string" && typeof candidate.title === "string"
+      );
+    },
+  );
 
 describe("remoteOpenApiComponents", () => {
-  const expectedPublicObjectSchemas = {
-    Actor: actorSchema,
-    ApprovalDecisionRequest: approvalDecisionRequestSchema,
-    ApprovalDecisionResponse: approvalDecisionResponseSchema,
-    ApprovalRequest: approvalRequestSchema,
-    BrowserNavigated: browserNavigatedSchema,
-    BrowserSensitiveActionRequest: browserSensitiveActionRequestSchema,
-    BrowserStarted: browserStartedSchema,
-    BrowserTwoFactorRequest: browserTwoFactorRequestSchema,
-    BrowserUserTakeoverChanged: browserUserTakeoverChangedSchema,
-    BrowserUserTakeoverRequest: browserUserTakeoverRequestSchema,
-    CreateSessionRequest: createSessionRequestSchema,
-    CreateSessionResponse: createSessionResponseSchema,
-    GetSessionResponse: getSessionResponseSchema,
-    ListSessionsResponse: listSessionsResponseSchema,
-    RemoteError: remoteErrorSchema,
-    RemoteEventEnvelope: remoteEventEnvelopeSchema,
-    SecretGrantResponse: secretGrantResponseSchema,
-    SecretRequest: secretRequestSchema,
-    SendInstructionRequest: sendInstructionRequestSchema,
-    SendInstructionResponse: sendInstructionResponseSchema,
-    SessionDescriptor: sessionDescriptorSchema,
-    StopSessionRequest: stopSessionRequestSchema,
-    StopSessionResponse: stopSessionResponseSchema,
-    TerminalExited: terminalExitedSchema,
-    TerminalInput: terminalInputSchema,
-    TerminalOpened: terminalOpenedSchema,
-    TerminalOutput: terminalOutputSchema,
-    TerminalResize: terminalResizeSchema,
-    UatRouteCreated: uatRouteCreatedSchema,
-    UatRouteExpired: uatRouteExpiredSchema,
-  } as const;
+  it("contains every public exported schema with an id by identity", () => {
+    const componentSchemas = Object.values(remoteOpenApiComponents.schemas);
+    const exportedSchemas = publicExportedSchemas();
 
-  it("contains the public object schemas needed by the control-plane", () => {
-    const expectedSchemaNames = Object.keys(
-      expectedPublicObjectSchemas,
-    ) as Array<keyof typeof expectedPublicObjectSchemas>;
-
-    expect(Object.keys(remoteOpenApiComponents.schemas).sort()).toEqual(
-      [...expectedSchemaNames].sort(),
+    expect(exportedSchemas.map(([exportName]) => exportName).sort()).toEqual(
+      expect.arrayContaining([
+        "capabilitySchema",
+        "riskSchema",
+        "sessionLifecycleChangedPayloadSchema",
+        "terminalStreamSchema",
+      ]),
     );
 
-    for (const name of expectedSchemaNames) {
-      expect(remoteOpenApiComponents.schemas[name]).toBe(
-        expectedPublicObjectSchemas[name],
-      );
+    for (const [exportName, schema] of exportedSchemas) {
+      expect(componentSchemas, exportName).toContain(schema);
+    }
+  });
+
+  it("keys public schemas by schema title", () => {
+    for (const [, schema] of publicExportedSchemas()) {
+      expect(remoteOpenApiComponents.schemas[schema.title]).toBe(schema);
     }
   });
 
@@ -88,8 +58,8 @@ describe("remoteOpenApiComponents", () => {
       remoteOpenApiComponents.schemas,
     )) {
       expect(name).toMatch(/^[A-Z]/);
-      expect(schema).toHaveProperty("$id");
-      expect(schema).toHaveProperty("title");
+      expect(schema.$id).toBeTypeOf("string");
+      expect(schema.title).toBe(name);
     }
   });
 });

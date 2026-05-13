@@ -8,6 +8,7 @@ import {
   browserTwoFactorRequestedEventExample,
   sessionLifecycleChangedEventExample,
   terminalOutputEventExample,
+  uatRouteCreatedEventExample,
 } from "../examples.js";
 import {
   actorSchema,
@@ -301,15 +302,30 @@ describe("remote event envelope JSON Schema", () => {
     const validate = ajv.compile(remoteEventEnvelopeSchema);
 
     expect(validate(sessionLifecycleChangedEventExample)).toBe(true);
-    expect(validate(approvalRequestedEventExample)).toBe(true);
     expect(validate(terminalOutputEventExample)).toBe(true);
+    expect(validate(approvalRequestedEventExample)).toBe(true);
     expect(validate(browserTwoFactorRequestedEventExample)).toBe(true);
+    expect(validate(uatRouteCreatedEventExample)).toBe(true);
   });
 
   it("rejects an event without protocol version", () => {
     const validate = ajv.compile(remoteEventEnvelopeSchema);
     const { protocolVersion: _protocolVersion, ...invalid } =
       terminalOutputEventExample;
+
+    expect(validate(invalid)).toBe(false);
+  });
+
+  it("rejects a terminal output event whose payload is not terminal output", () => {
+    const validate = ajv.compile(remoteEventEnvelopeSchema);
+    const invalid = {
+      ...terminalOutputEventExample,
+      payload: {
+        approvalRequestId: "approval_001",
+        sessionId: "session_001",
+        capability: "publish-npm",
+      },
+    };
 
     expect(validate(invalid)).toBe(false);
   });

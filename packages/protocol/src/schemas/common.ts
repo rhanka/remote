@@ -39,6 +39,7 @@ export const actorSchema = {
 } as const;
 
 export const resourceLimitsSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/resource-limits.schema.json`,
   title: "ResourceLimits",
   type: "object",
   additionalProperties: false,
@@ -54,24 +55,28 @@ export const protocolEnvelopeProperties = {
 } as const;
 
 export const cliProfileSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/cli-profile.schema.json`,
   title: "CliProfile",
   type: "string",
   enum: CLI_PROFILES,
 } as const;
 
 export const capabilitySchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/capability.schema.json`,
   title: "Capability",
   type: "string",
   enum: CAPABILITIES,
 } as const;
 
 export const sessionTargetSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/session-target.schema.json`,
   title: "SessionTarget",
   type: "string",
   enum: SESSION_TARGETS,
 } as const;
 
 export const sessionLifecycleStateSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/session-lifecycle-state.schema.json`,
   title: "SessionLifecycleState",
   type: "string",
   enum: SESSION_LIFECYCLE_STATES,

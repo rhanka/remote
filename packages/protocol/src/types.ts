@@ -1,5 +1,10 @@
 import type { FromSchema } from "json-schema-to-ts";
 import type {
+  EVENT_TYPES,
+  REMOTE_PROTOCOL_VERSION,
+  REMOTE_SCHEMA_VERSION,
+} from "./constants.js";
+import type {
   approvalDecisionRequestSchema,
   approvalDecisionResponseSchema,
   approvalRequestSchema,
@@ -16,7 +21,14 @@ import type {
 } from "./schemas/browser.js";
 import type { actorSchema } from "./schemas/common.js";
 import type { remoteErrorSchema } from "./schemas/errors.js";
-import type { remoteEventEnvelopeSchema } from "./schemas/events.js";
+import type {
+  auditRecordedPayloadSchema,
+  secretRevokedPayloadSchema,
+  sessionHealthReportedPayloadSchema,
+  sessionInstructionCompletedPayloadSchema,
+  sessionInstructionReceivedPayloadSchema,
+  sessionLifecycleChangedPayloadSchema,
+} from "./schemas/events.js";
 import type {
   secretGrantResponseSchema,
   secretRequestSchema,
@@ -91,4 +103,34 @@ export type BrowserSensitiveActionRequest = FromSchema<
 >;
 export type UatRouteCreated = FromSchema<typeof uatRouteCreatedSchema>;
 export type UatRouteExpired = FromSchema<typeof uatRouteExpiredSchema>;
-export type RemoteEventEnvelope = FromSchema<typeof remoteEventEnvelopeSchema>;
+export type SessionLifecycleChangedPayload = FromSchema<
+  typeof sessionLifecycleChangedPayloadSchema
+>;
+export type SessionHealthReportedPayload = FromSchema<
+  typeof sessionHealthReportedPayloadSchema
+>;
+export type SessionInstructionReceivedPayload = FromSchema<
+  typeof sessionInstructionReceivedPayloadSchema
+>;
+export type SessionInstructionCompletedPayload = FromSchema<
+  typeof sessionInstructionCompletedPayloadSchema
+>;
+export type SecretRevokedPayload = FromSchema<
+  typeof secretRevokedPayloadSchema
+>;
+export type AuditRecordedPayload = FromSchema<
+  typeof auditRecordedPayloadSchema
+>;
+export type RemoteEventEnvelope = {
+  protocolVersion: typeof REMOTE_PROTOCOL_VERSION;
+  schemaVersion: typeof REMOTE_SCHEMA_VERSION;
+  eventId: string;
+  sessionId: string;
+  sequence: number;
+  type: (typeof EVENT_TYPES)[number];
+  occurredAt: string;
+  correlationId: string;
+  actor: Actor;
+  payload: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};

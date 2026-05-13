@@ -88,3 +88,17 @@ export const browserTwoFactorRequestedEventExample = {
     expiresAt: "2026-05-11T12:02:00.000Z",
   },
 } satisfies RemoteEventEnvelope;
+
+export const uatRouteCreatedEventExample = {
+  ...baseEvent,
+  eventId: "event_005",
+  sequence: 5,
+  type: "uat.route.created",
+  payload: {
+    routeId: "uat_001",
+    url: "https://uat.example.invalid/session_001",
+    port: 5173,
+    expiresAt: "2026-05-11T13:00:00.000Z",
+    exposurePolicy: "operator-only",
+  },
+} satisfies RemoteEventEnvelope;
