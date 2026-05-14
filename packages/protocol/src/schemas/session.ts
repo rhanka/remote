@@ -8,9 +8,14 @@ import {
   metadataSchema,
   resourceLimitsSchema,
   sessionTargetSchema,
+  stripSchemaIds,
 } from "./common.js";
 
-const { $id: _actorSchemaId, ...embeddedActorSchema } = actorSchema;
+const embeddedActorSchema = stripSchemaIds(actorSchema);
+const embeddedCapabilitySchema = stripSchemaIds(capabilitySchema);
+const embeddedCliProfileSchema = stripSchemaIds(cliProfileSchema);
+const embeddedResourceLimitsSchema = stripSchemaIds(resourceLimitsSchema);
+const embeddedSessionTargetSchema = stripSchemaIds(sessionTargetSchema);
 
 export const sessionDescriptorSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/session-descriptor.schema.json`,
@@ -27,17 +32,17 @@ export const sessionDescriptorSchema = {
   ],
   properties: {
     id: { type: "string", minLength: 1 },
-    profile: cliProfileSchema,
-    target: sessionTargetSchema,
+    profile: embeddedCliProfileSchema,
+    target: embeddedSessionTargetSchema,
     workspacePath: { type: "string", const: "/workspace" },
     createdAt: isoDateTimeSchema,
     createdBy: embeddedActorSchema,
     displayName: { type: "string", minLength: 1 },
     labels: labelsSchema,
-    resourceLimits: resourceLimitsSchema,
+    resourceLimits: embeddedResourceLimitsSchema,
     requiredCapabilities: {
       type: "array",
-      items: capabilitySchema,
+      items: embeddedCapabilitySchema,
       uniqueItems: true,
     },
     browser: {
@@ -60,8 +65,7 @@ export const sessionDescriptorSchema = {
   },
 } as const;
 
-const { $id: _sessionDescriptorSchemaId, ...embeddedSessionDescriptorSchema } =
-  sessionDescriptorSchema;
+const embeddedSessionDescriptorSchema = stripSchemaIds(sessionDescriptorSchema);
 
 export const createSessionRequestSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/create-session-request.schema.json`,
@@ -70,14 +74,14 @@ export const createSessionRequestSchema = {
   additionalProperties: false,
   required: ["profile", "target"],
   properties: {
-    profile: cliProfileSchema,
-    target: sessionTargetSchema,
+    profile: embeddedCliProfileSchema,
+    target: embeddedSessionTargetSchema,
     displayName: { type: "string", minLength: 1 },
     labels: labelsSchema,
-    resourceLimits: resourceLimitsSchema,
+    resourceLimits: embeddedResourceLimitsSchema,
     requiredCapabilities: {
       type: "array",
-      items: capabilitySchema,
+      items: embeddedCapabilitySchema,
       uniqueItems: true,
     },
     metadata: metadataSchema,

@@ -4,9 +4,11 @@ import {
   capabilitySchema,
   isoDateTimeSchema,
   metadataSchema,
+  stripSchemaIds,
 } from "./common.js";
 
-const { $id: _actorSchemaId, ...embeddedActorSchema } = actorSchema;
+const embeddedActorSchema = stripSchemaIds(actorSchema);
+const embeddedCapabilitySchema = stripSchemaIds(capabilitySchema);
 
 export const secretDeliverySchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/secret-delivery.schema.json`,
@@ -22,10 +24,8 @@ export const secretGrantStatusSchema = {
   enum: ["granted", "denied", "expired", "unavailable"],
 } as const;
 
-const { $id: _secretDeliverySchemaId, ...embeddedSecretDeliverySchema } =
-  secretDeliverySchema;
-const { $id: _secretGrantStatusSchemaId, ...embeddedSecretGrantStatusSchema } =
-  secretGrantStatusSchema;
+const embeddedSecretDeliverySchema = stripSchemaIds(secretDeliverySchema);
+const embeddedSecretGrantStatusSchema = stripSchemaIds(secretGrantStatusSchema);
 
 export const secretRequestSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/secret-request.schema.json`,
@@ -48,7 +48,7 @@ export const secretRequestSchema = {
     secretRequestId: { type: "string", minLength: 1 },
     sessionId: { type: "string", minLength: 1 },
     secretRef: { type: "string", minLength: 1 },
-    capability: capabilitySchema,
+    capability: embeddedCapabilitySchema,
     purpose: { type: "string", minLength: 1 },
     requestedBy: embeddedActorSchema,
     requestedAt: isoDateTimeSchema,

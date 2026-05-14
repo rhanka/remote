@@ -4,9 +4,11 @@ import {
   capabilitySchema,
   isoDateTimeSchema,
   metadataSchema,
+  stripSchemaIds,
 } from "./common.js";
 
-const { $id: _actorSchemaId, ...embeddedActorSchema } = actorSchema;
+const embeddedActorSchema = stripSchemaIds(actorSchema);
+const embeddedCapabilitySchema = stripSchemaIds(capabilitySchema);
 
 export const riskSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/approval-risk.schema.json`,
@@ -22,9 +24,8 @@ export const approvalDecisionSchema = {
   enum: ["approved", "denied", "expired", "cancelled"],
 } as const;
 
-const { $id: _riskSchemaId, ...embeddedRiskSchema } = riskSchema;
-const { $id: _approvalDecisionSchemaId, ...embeddedApprovalDecisionSchema } =
-  approvalDecisionSchema;
+const embeddedRiskSchema = stripSchemaIds(riskSchema);
+const embeddedApprovalDecisionSchema = stripSchemaIds(approvalDecisionSchema);
 
 export const approvalRequestSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/approval-request.schema.json`,
@@ -47,7 +48,7 @@ export const approvalRequestSchema = {
   properties: {
     approvalRequestId: { type: "string", minLength: 1 },
     sessionId: { type: "string", minLength: 1 },
-    capability: capabilitySchema,
+    capability: embeddedCapabilitySchema,
     risk: embeddedRiskSchema,
     reason: { type: "string", minLength: 1 },
     requestedBy: embeddedActorSchema,

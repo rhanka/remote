@@ -19,6 +19,7 @@ import {
   metadataSchema,
   protocolEnvelopeProperties,
   sessionLifecycleStateSchema,
+  stripSchemaIds,
 } from "./common.js";
 import { secretGrantResponseSchema, secretRequestSchema } from "./secrets.js";
 import {
@@ -31,28 +32,6 @@ import {
 
 type EventType = (typeof EVENT_TYPES)[number];
 type JsonSchemaObject = { readonly [key: string]: unknown };
-
-const stripSchemaIds = <T>(schema: T): T => {
-  if (Array.isArray(schema)) {
-    return schema.map((item) => stripSchemaIds(item)) as T;
-  }
-
-  if (schema !== null && typeof schema === "object") {
-    const stripped: Record<string, unknown> = {};
-
-    for (const [key, value] of Object.entries(schema)) {
-      if (key === "$id") {
-        continue;
-      }
-
-      stripped[key] = stripSchemaIds(value);
-    }
-
-    return stripped as T;
-  }
-
-  return schema;
-};
 
 const embeddedActorSchema = stripSchemaIds(actorSchema);
 const embeddedSessionLifecycleStateSchema = stripSchemaIds(

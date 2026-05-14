@@ -9,6 +9,38 @@ import {
   SESSION_TARGETS,
 } from "../constants.js";
 
+export type StripSchemaIds<T> = T extends readonly unknown[]
+  ? { readonly [Index in keyof T]: StripSchemaIds<T[Index]> }
+  : T extends object
+    ? {
+        readonly [Key in keyof T as Key extends "$id"
+          ? never
+          : Key]: StripSchemaIds<T[Key]>;
+      }
+    : T;
+
+export const stripSchemaIds = <T>(schema: T): StripSchemaIds<T> => {
+  if (Array.isArray(schema)) {
+    return schema.map((item) => stripSchemaIds(item)) as StripSchemaIds<T>;
+  }
+
+  if (schema !== null && typeof schema === "object") {
+    const stripped: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(schema)) {
+      if (key === "$id") {
+        continue;
+      }
+
+      stripped[key] = stripSchemaIds(value);
+    }
+
+    return stripped as StripSchemaIds<T>;
+  }
+
+  return schema as StripSchemaIds<T>;
+};
+
 export const isoDateTimeSchema = {
   type: "string",
   format: "date-time",
