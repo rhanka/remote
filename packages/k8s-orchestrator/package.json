@@ -12,10 +12,11 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "lint": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@kubernetes/client-node": "^1.4.0",
     "@sentropic/remote-protocol": "*"
   },
   "devDependencies": {

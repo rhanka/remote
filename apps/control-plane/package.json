@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.5",
-    "@kubernetes/client-node": "^1.4.0",
+    "@sentropic/remote-k8s-orchestrator": "*",
     "@sentropic/remote-protocol": "*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

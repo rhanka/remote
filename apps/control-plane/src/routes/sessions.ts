@@ -1,4 +1,9 @@
 import {
+  InMemoryProvisioner,
+  type ProvisionerEmit,
+  type SessionProvisioner,
+} from "@sentropic/remote-k8s-orchestrator";
+import {
   createSessionRequestSchema,
   sendInstructionRequestSchema,
   stopSessionRequestSchema,
@@ -73,8 +78,13 @@ export function createSessionsRouter(
   ajv: Ajv,
   store: SessionStore = new SessionStore(),
   bus: SessionEventBus = new SessionEventBus(),
+  provisioner: SessionProvisioner = new InMemoryProvisioner(),
 ): Hono<{ Variables: ValidationVars }> {
   const router = new Hono<{ Variables: ValidationVars }>();
+
+  const emit: ProvisionerEmit = (sessionId, type, payload) => {
+    bus.publish(sessionId, type, payload);
+  };
 
   router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
     const req = validatedBody<CreateSessionRequest>(c);
@@ -82,6 +92,7 @@ export function createSessionsRouter(
     bus.publish(descriptor.id, "session.lifecycle.changed", {
       nextState: "requested",
     });
+    void provisioner.provision(descriptor, emit);
     const response: CreateSessionResponse = { session: descriptor };
     return c.json(response, 201);
   });
@@ -106,11 +117,8 @@ export function createSessionsRouter(
       const session = store.get(id);
       if (!session) return notFound(c);
       validatedBody<StopSessionRequest>(c);
-      bus.publish(id, "session.lifecycle.changed", {
-        previousState: "running",
-        nextState: "stopping",
-      });
       store.delete(id);
+      void provisioner.destroy(id, emit);
       const response: StopSessionResponse = { sessionId: id, accepted: true };
       return c.json(response);
     },

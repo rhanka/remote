@@ -198,6 +198,38 @@ describe("control plane", () => {
     expect(afterStop.status).toBe(404);
   });
 
+  it("delegates provisioning and destruction to the injected provisioner", async () => {
+    type Call =
+      | { op: "provision"; sessionId: string }
+      | { op: "destroy"; sessionId: string };
+    const calls: Call[] = [];
+    const provisioner = {
+      async provision(descriptor: { id: string }) {
+        calls.push({ op: "provision", sessionId: descriptor.id });
+      },
+      async destroy(sessionId: string) {
+        calls.push({ op: "destroy", sessionId });
+      },
+      async inspect() {
+        return undefined;
+      },
+    };
+    const app = createControlPlane({ provisioner });
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    await app.request(`/sessions/${id}/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "test" }),
+    });
+
+    expect(calls).toEqual([
+      { op: "provision", sessionId: id },
+      { op: "destroy", sessionId: id },
+    ]);
+  });
+
   it("returns session.not_found for unknown ids", async () => {
     const app = createControlPlane();
     const response = await app.request("/sessions/missing");
