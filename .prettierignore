@@ -1,2 +1,8 @@
 docs/brief-as-is.md
 docs/brief-additions/*.md
+pnpm-lock.yaml
+node_modules/
+dist/
+.playwright-mcp/
+remote-controle/
+remote-controle-scope-snapshot.md

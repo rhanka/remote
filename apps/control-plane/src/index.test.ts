@@ -47,9 +47,8 @@ describe("control plane", () => {
     expect((doc.info as { version: string }).version).toBe(
       REMOTE_PROTOCOL_VERSION,
     );
-    const schemas = (
-      doc.components as { schemas: Record<string, unknown> }
-    ).schemas;
+    const schemas = (doc.components as { schemas: Record<string, unknown> })
+      .schemas;
     expect(schemas).toHaveProperty("SessionDescriptor");
     expect(schemas).toHaveProperty("CreateSessionRequest");
     expect(schemas).toHaveProperty("RemoteError");

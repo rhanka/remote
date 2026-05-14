@@ -51,17 +51,13 @@ export function createSessionsRouter(
 ): Hono<{ Variables: ValidationVars }> {
   const router = new Hono<{ Variables: ValidationVars }>();
 
-  router.post(
-    "/",
-    validateJsonBody(ajv, createSessionRequestSchema),
-    (c) => {
-      const req = validatedBody<CreateSessionRequest>(c);
-      const response: CreateSessionResponse = {
-        session: buildDescriptor(req),
-      };
-      return c.json(response, 201);
-    },
-  );
+  router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
+    const req = validatedBody<CreateSessionRequest>(c);
+    const response: CreateSessionResponse = {
+      session: buildDescriptor(req),
+    };
+    return c.json(response, 201);
+  });
 
   return router;
 }
