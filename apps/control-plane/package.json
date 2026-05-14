@@ -7,13 +7,13 @@
     "build": "tsup src/index.ts --format esm --dts --clean",
     "dev": "tsx watch src/index.ts",
     "lint": "tsc --noEmit",
-    "test": "corepack pnpm --filter @remote-controle/protocol build && vitest run",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.5",
     "@kubernetes/client-node": "^1.4.0",
-    "@remote-controle/protocol": "workspace:*",
+    "@remote-controle/protocol": "*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "hono": "^4.12.18"

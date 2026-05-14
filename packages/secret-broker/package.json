@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@remote-controle/protocol": "workspace:*"
+    "@remote-controle/protocol": "*"
   },
   "devDependencies": {
     "tsup": "^8.5.1"

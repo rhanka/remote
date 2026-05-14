@@ -2,26 +2,33 @@
   "name": "remote-controle",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.0.9",
+  "packageManager": "npm@11.14.1",
   "engines": {
     "node": ">=22.0.0",
-    "pnpm": ">=11.0.0"
+    "npm": ">=11.0.0"
   },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "build": "corepack pnpm -r --if-present build",
-    "dev": "corepack pnpm --filter @remote-controle/control-plane dev",
-    "dev:ui": "corepack pnpm --filter @remote-controle/operator-ui dev",
+    "build": "npm run build --workspaces --if-present",
+    "dev": "npm run dev -w @remote-controle/control-plane",
+    "dev:ui": "npm run dev -w @remote-controle/operator-ui",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "lint": "corepack pnpm -r --if-present lint",
-    "test": "corepack pnpm -r --if-present test",
-    "typecheck": "corepack pnpm -r --if-present typecheck",
-    "verify": "corepack pnpm format && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm build && corepack pnpm test"
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "verify": "npm run format && npm run lint && npm run typecheck && npm run build && npm run test"
   },
   "devDependencies": {
     "@types/node": "^22.19.18",
     "prettier": "^3.8.3",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
+  },
+  "overrides": {
+    "cookie": "^0.7.2"
   }
 }

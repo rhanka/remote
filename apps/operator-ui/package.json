@@ -11,7 +11,7 @@
     "typecheck": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@remote-controle/protocol": "workspace:*",
+    "@remote-controle/protocol": "*",
     "@sent-tech/components-svelte": "0.1.0",
     "@sveltejs/adapter-node": "^5.5.4",
     "@sveltejs/kit": "^2.59.1",
