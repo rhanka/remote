@@ -6,6 +6,7 @@ import {
   type CreateSessionResponse,
   type GetSessionResponse,
   type ListSessionsResponse,
+  type RemoteEventEnvelope,
   type SendInstructionRequest,
   type SendInstructionResponse,
   type SessionDescriptor,
@@ -14,7 +15,9 @@ import {
 } from "@remote-controle/protocol";
 import type { Ajv } from "ajv";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 
+import { SessionEventBus } from "../sessions/events.js";
 import { SessionStore } from "../sessions/store.js";
 import {
   type ValidationVars,
@@ -22,24 +25,17 @@ import {
   validatedBody,
 } from "../validation.js";
 
-function generateSessionId(): string {
-  const random = Math.floor(Math.random() * 1e10)
+function randomId(prefix: string): string {
+  const random = Math.floor(Math.random() * 1e12)
     .toString(36)
     .padStart(8, "0");
-  return `sess-${random}`;
-}
-
-function generateInstructionId(): string {
-  const random = Math.floor(Math.random() * 1e10)
-    .toString(36)
-    .padStart(8, "0");
-  return `inst-${random}`;
+  return `${prefix}-${random}`;
 }
 
 function buildDescriptor(req: CreateSessionRequest): SessionDescriptor {
   const now = new Date().toISOString();
   const descriptor: SessionDescriptor = {
-    id: generateSessionId(),
+    id: randomId("sess"),
     profile: req.profile,
     target: req.target,
     workspacePath: "/workspace",
@@ -76,12 +72,16 @@ function notFound(c: { json: (body: unknown, status: number) => Response }) {
 export function createSessionsRouter(
   ajv: Ajv,
   store: SessionStore = new SessionStore(),
+  bus: SessionEventBus = new SessionEventBus(),
 ): Hono<{ Variables: ValidationVars }> {
   const router = new Hono<{ Variables: ValidationVars }>();
 
   router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
     const req = validatedBody<CreateSessionRequest>(c);
     const descriptor = store.put(buildDescriptor(req));
+    bus.publish(descriptor.id, "session.lifecycle.changed", {
+      nextState: "requested",
+    });
     const response: CreateSessionResponse = { session: descriptor };
     return c.json(response, 201);
   });
@@ -106,6 +106,10 @@ export function createSessionsRouter(
       const session = store.get(id);
       if (!session) return notFound(c);
       validatedBody<StopSessionRequest>(c);
+      bus.publish(id, "session.lifecycle.changed", {
+        previousState: "running",
+        nextState: "stopping",
+      });
       store.delete(id);
       const response: StopSessionResponse = { sessionId: id, accepted: true };
       return c.json(response);
@@ -118,14 +122,64 @@ export function createSessionsRouter(
     (c) => {
       const id = c.req.param("id");
       if (!store.get(id)) return notFound(c);
-      validatedBody<SendInstructionRequest>(c);
+      const req = validatedBody<SendInstructionRequest>(c);
+      const instructionId = randomId("inst");
+      const payload: Record<string, unknown> = {
+        instructionId,
+        instruction: req.instruction,
+      };
+      if (req.correlationId !== undefined)
+        payload.correlationId = req.correlationId;
+      if (req.metadata !== undefined) payload.metadata = req.metadata;
+      bus.publish(id, "session.instruction.received", payload, {
+        ...(req.correlationId !== undefined
+          ? { correlationId: req.correlationId }
+          : {}),
+      });
       const response: SendInstructionResponse = {
-        instructionId: generateInstructionId(),
+        instructionId,
         accepted: true,
       };
       return c.json(response, 202);
     },
   );
+
+  router.get("/:id/events", (c) => {
+    const id = c.req.param("id");
+    if (!store.get(id)) return notFound(c);
+
+    const queue: RemoteEventEnvelope[] = [];
+    let notify: (() => void) | null = null;
+    const unsubscribe = bus.subscribe(id, (envelope) => {
+      queue.push(envelope);
+      const wake = notify;
+      notify = null;
+      wake?.();
+    });
+
+    return streamSSE(c, async (stream) => {
+      stream.onAbort(unsubscribe);
+      try {
+        while (!stream.aborted) {
+          while (queue.length > 0 && !stream.aborted) {
+            const envelope = queue.shift();
+            if (!envelope) break;
+            await stream.writeSSE({
+              event: envelope.type,
+              data: JSON.stringify(envelope),
+              id: envelope.eventId,
+            });
+          }
+          if (stream.aborted) break;
+          await new Promise<void>((resolve) => {
+            notify = resolve;
+          });
+        }
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
 
   return router;
 }

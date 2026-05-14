@@ -139,6 +139,30 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           },
         },
       },
+      "/sessions/{id}/events": {
+        get: {
+          summary: "Stream protocol events for a session as SSE",
+          parameters: [
+            {
+              name: "id",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Event stream",
+              content: {
+                "text/event-stream": {
+                  schema: ref("RemoteEventEnvelope"),
+                },
+              },
+            },
+            "404": notFoundError,
+          },
+        },
+      },
     },
   };
 }

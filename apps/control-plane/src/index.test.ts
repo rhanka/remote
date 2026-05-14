@@ -3,6 +3,7 @@ import {
   type CreateSessionResponse,
   type GetSessionResponse,
   type ListSessionsResponse,
+  type RemoteEventEnvelope,
   type SendInstructionResponse,
   type StopSessionResponse,
   REMOTE_PROTOCOL_VERSION,
@@ -10,6 +11,7 @@ import {
   getSessionResponseSchema,
   listSessionsResponseSchema,
   remoteErrorSchema,
+  remoteEventEnvelopeSchema,
   sendInstructionResponseSchema,
   sessionDescriptorSchema,
   stopSessionResponseSchema,
@@ -76,6 +78,65 @@ describe("control plane", () => {
     expect(paths).toHaveProperty("/sessions/{id}");
     expect(paths).toHaveProperty("/sessions/{id}/stop");
     expect(paths).toHaveProperty("/sessions/{id}/instructions");
+    expect(paths).toHaveProperty("/sessions/{id}/events");
+  });
+
+  it("streams protocol events via SSE for an existing session", async () => {
+    const app = createControlPlane();
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    const controller = new AbortController();
+    const sseResponse = await app.fetch(
+      new Request(`http://localhost/sessions/${id}/events`, {
+        signal: controller.signal,
+      }),
+    );
+    expect(sseResponse.status).toBe(200);
+    expect(sseResponse.headers.get("content-type")).toContain(
+      "text/event-stream",
+    );
+
+    const instructionPromise = app.request(`/sessions/${id}/instructions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instruction: "echo hello" }),
+    });
+
+    const reader = sseResponse.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.includes("\n\n")) break;
+    }
+
+    const instructionResponse = await instructionPromise;
+    expect(instructionResponse.status).toBe(202);
+    controller.abort();
+    await reader.cancel().catch(() => {});
+
+    const dataLine = buffer
+      .split("\n")
+      .find((line) => line.startsWith("data: "));
+    expect(dataLine).toBeDefined();
+    const envelope = JSON.parse(dataLine!.slice(6)) as RemoteEventEnvelope;
+    expect(strictAjv().compile(remoteEventEnvelopeSchema)(envelope)).toBe(true);
+    expect(envelope.type).toBe("session.instruction.received");
+    expect(envelope.sessionId).toBe(id);
+    expect((envelope.payload as { instruction: string }).instruction).toBe(
+      "echo hello",
+    );
+  });
+
+  it("returns 404 on the events stream for unknown sessions", async () => {
+    const app = createControlPlane();
+    const response = await app.request("/sessions/missing/events");
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.code).toBe("session.not_found");
   });
 
   it("creates a session and returns a schema-conformant descriptor", async () => {
