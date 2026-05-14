@@ -7,6 +7,22 @@ const ref = (name: string) => ({
   $ref: `#/components/schemas/${name}`,
 });
 
+const jsonBody = (schemaRef: ReturnType<typeof ref>) => ({
+  required: true,
+  content: { "application/json": { schema: schemaRef } },
+});
+
+const jsonResponse = (
+  description: string,
+  schemaRef: ReturnType<typeof ref>,
+) => ({
+  description,
+  content: { "application/json": { schema: schemaRef } },
+});
+
+const validationError = jsonResponse("Validation failed", ref("RemoteError"));
+const notFoundError = jsonResponse("Session not found", ref("RemoteError"));
+
 export function buildOpenApiDocument(): Record<string, unknown> {
   return {
     openapi: "3.1.0",
@@ -41,33 +57,85 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         },
       },
       "/sessions": {
+        get: {
+          summary: "List remote sessions",
+          responses: {
+            "200": jsonResponse(
+              "List of sessions",
+              ref("ListSessionsResponse"),
+            ),
+          },
+        },
         post: {
           summary: "Create a remote session",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: ref("CreateSessionRequest"),
-              },
-            },
-          },
+          requestBody: jsonBody(ref("CreateSessionRequest")),
           responses: {
-            "201": {
-              description: "Session created",
-              content: {
-                "application/json": {
-                  schema: ref("CreateSessionResponse"),
-                },
-              },
+            "201": jsonResponse(
+              "Session created",
+              ref("CreateSessionResponse"),
+            ),
+            "400": validationError,
+          },
+        },
+      },
+      "/sessions/{id}": {
+        get: {
+          summary: "Get a remote session",
+          parameters: [
+            {
+              name: "id",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
             },
-            "400": {
-              description: "Validation failed",
-              content: {
-                "application/json": {
-                  schema: ref("RemoteError"),
-                },
-              },
+          ],
+          responses: {
+            "200": jsonResponse(
+              "Session descriptor",
+              ref("GetSessionResponse"),
+            ),
+            "404": notFoundError,
+          },
+        },
+      },
+      "/sessions/{id}/stop": {
+        post: {
+          summary: "Stop a remote session",
+          parameters: [
+            {
+              name: "id",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
             },
+          ],
+          requestBody: jsonBody(ref("StopSessionRequest")),
+          responses: {
+            "200": jsonResponse("Stop accepted", ref("StopSessionResponse")),
+            "400": validationError,
+            "404": notFoundError,
+          },
+        },
+      },
+      "/sessions/{id}/instructions": {
+        post: {
+          summary: "Send an instruction to a session",
+          parameters: [
+            {
+              name: "id",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
+            },
+          ],
+          requestBody: jsonBody(ref("SendInstructionRequest")),
+          responses: {
+            "202": jsonResponse(
+              "Instruction accepted",
+              ref("SendInstructionResponse"),
+            ),
+            "400": validationError,
+            "404": notFoundError,
           },
         },
       },
