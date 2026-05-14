@@ -1,0 +1,190 @@
+import type { SessionDescriptor } from "@sentropic/remote-protocol";
+
+export type ResourceQuantities = Readonly<Record<string, string>>;
+
+export type K8sPodSpec = {
+  readonly apiVersion: "v1";
+  readonly kind: "Pod";
+  readonly metadata: {
+    readonly name: string;
+    readonly namespace: string;
+    readonly labels: Readonly<Record<string, string>>;
+  };
+  readonly spec: {
+    readonly restartPolicy: "Never";
+    readonly containers: ReadonlyArray<{
+      readonly name: string;
+      readonly image: string;
+      readonly imagePullPolicy: "IfNotPresent";
+      readonly env: ReadonlyArray<{
+        readonly name: string;
+        readonly value: string;
+      }>;
+      readonly volumeMounts: ReadonlyArray<{
+        readonly name: string;
+        readonly mountPath: string;
+      }>;
+      readonly resources?: {
+        readonly requests?: ResourceQuantities;
+        readonly limits?: ResourceQuantities;
+      };
+    }>;
+    readonly volumes: ReadonlyArray<{
+      readonly name: string;
+      readonly persistentVolumeClaim: { readonly claimName: string };
+    }>;
+  };
+};
+
+export type K8sPvcSpec = {
+  readonly apiVersion: "v1";
+  readonly kind: "PersistentVolumeClaim";
+  readonly metadata: {
+    readonly name: string;
+    readonly namespace: string;
+    readonly labels: Readonly<Record<string, string>>;
+  };
+  readonly spec: {
+    readonly accessModes: ReadonlyArray<"ReadWriteOnce">;
+    readonly resources: { readonly requests: ResourceQuantities };
+    readonly storageClassName?: string;
+  };
+};
+
+export type SpecBuilderOptions = {
+  readonly namespace: string;
+  readonly image: string;
+  readonly storageClassName?: string;
+  readonly defaultWorkspaceSize: string;
+  readonly controlPlaneEndpoint: string;
+};
+
+const PVC_VOLUME = "workspace";
+const POD_CONTAINER = "session-agent";
+
+export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
+  namespace: "sentropic-remote",
+  image: "ghcr.io/sentropic/remote-session-agent:0.1.0",
+  defaultWorkspaceSize: "1Gi",
+  controlPlaneEndpoint: "http://sentropic-remote-control-plane:8080",
+};
+
+export function sessionLabels(
+  descriptor: SessionDescriptor,
+): Readonly<Record<string, string>> {
+  return {
+    "app.kubernetes.io/name": "sentropic-remote",
+    "app.kubernetes.io/component": "session-agent",
+    "app.kubernetes.io/managed-by": "control-plane",
+    "sentropic.dev/session-id": descriptor.id,
+    "sentropic.dev/profile": descriptor.profile,
+    "sentropic.dev/target": descriptor.target,
+  };
+}
+
+export function resourceNames(descriptor: SessionDescriptor): {
+  readonly pod: string;
+  readonly pvc: string;
+} {
+  return {
+    pod: `session-${descriptor.id}`,
+    pvc: `session-${descriptor.id}-workspace`,
+  };
+}
+
+export function buildSessionPvcSpec(
+  descriptor: SessionDescriptor,
+  options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
+): K8sPvcSpec {
+  const names = resourceNames(descriptor);
+  return {
+    apiVersion: "v1",
+    kind: "PersistentVolumeClaim",
+    metadata: {
+      name: names.pvc,
+      namespace: options.namespace,
+      labels: sessionLabels(descriptor),
+    },
+    spec: {
+      accessModes: ["ReadWriteOnce"],
+      resources: {
+        requests: {
+          storage: options.defaultWorkspaceSize,
+        },
+      },
+      ...(options.storageClassName !== undefined
+        ? { storageClassName: options.storageClassName }
+        : {}),
+    },
+  };
+}
+
+export function buildSessionPodSpec(
+  descriptor: SessionDescriptor,
+  options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
+): K8sPodSpec {
+  const names = resourceNames(descriptor);
+  const limits = descriptor.resourceLimits;
+  const resourceLimits: ResourceQuantities = {};
+  const resourceRequests: ResourceQuantities = {};
+  if (limits?.cpu) {
+    Object.assign(resourceLimits, { cpu: limits.cpu });
+    Object.assign(resourceRequests, { cpu: limits.cpu });
+  }
+  if (limits?.memory) {
+    Object.assign(resourceLimits, { memory: limits.memory });
+    Object.assign(resourceRequests, { memory: limits.memory });
+  }
+
+  return {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: {
+      name: names.pod,
+      namespace: options.namespace,
+      labels: sessionLabels(descriptor),
+    },
+    spec: {
+      restartPolicy: "Never",
+      containers: [
+        {
+          name: POD_CONTAINER,
+          image: options.image,
+          imagePullPolicy: "IfNotPresent",
+          env: [
+            { name: "SESSION_ID", value: descriptor.id },
+            { name: "SESSION_PROFILE", value: descriptor.profile },
+            { name: "SESSION_TARGET", value: descriptor.target },
+            {
+              name: "CONTROL_PLANE_ENDPOINT",
+              value: options.controlPlaneEndpoint,
+            },
+            { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
+          ],
+          volumeMounts: [
+            { name: PVC_VOLUME, mountPath: descriptor.workspacePath },
+          ],
+          ...(Object.keys(resourceLimits).length > 0 ||
+          Object.keys(resourceRequests).length > 0
+            ? {
+                resources: {
+                  ...(Object.keys(resourceRequests).length > 0
+                    ? { requests: resourceRequests }
+                    : {}),
+                  ...(Object.keys(resourceLimits).length > 0
+                    ? { limits: resourceLimits }
+                    : {}),
+                },
+              }
+            : {}),
+        },
+      ],
+      volumes: [
+        {
+          name: PVC_VOLUME,
+          persistentVolumeClaim: { claimName: names.pvc },
+        },
+      ],
+    },
+  };
+}

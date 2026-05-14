@@ -64,3 +64,19 @@ export class InMemoryProvisioner implements SessionProvisioner {
     return phase ? { phase } : undefined;
   }
 }
+
+export { K8sSessionProvisioner } from "./k8s/provisioner.js";
+export type { K8sProvisionerOptions } from "./k8s/provisioner.js";
+export { KubernetesObjectApiClient } from "./k8s/object-api-client.js";
+export type { K8sClient, K8sResourceRef } from "./k8s/client.js";
+export {
+  DEFAULT_BUILDER_OPTIONS,
+  buildSessionPodSpec,
+  buildSessionPvcSpec,
+  resourceNames,
+  sessionLabels,
+  type K8sPodSpec,
+  type K8sPvcSpec,
+  type ResourceQuantities,
+  type SpecBuilderOptions,
+} from "./k8s/spec.js";
