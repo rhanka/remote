@@ -1,1 +1,1 @@
-export const packageName = "@remote-controle/approval-core";
+export const packageName = "@sentropic/remote-approval-core";

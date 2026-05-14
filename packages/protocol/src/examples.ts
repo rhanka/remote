@@ -57,7 +57,7 @@ export const approvalRequestedEventExample = {
     expiresAt: "2026-05-11T12:05:00.000Z",
     subject: "npm publish",
     proposedAction: "npm publish --access public",
-    context: { packageName: "@remote-controle/protocol" },
+    context: { packageName: "@sentropic/remote-protocol" },
   },
 } satisfies RemoteEventEnvelope;
 

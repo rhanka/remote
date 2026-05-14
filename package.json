@@ -1,5 +1,5 @@
 {
-  "name": "remote-controle",
+  "name": "sentropic-remote",
   "private": true,
   "type": "module",
   "packageManager": "npm@11.14.1",
@@ -13,8 +13,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "dev": "npm run dev -w @remote-controle/control-plane",
-    "dev:ui": "npm run dev -w @remote-controle/operator-ui",
+    "dev": "npm run dev -w @sentropic/remote-control-plane",
+    "dev:ui": "npm run dev -w @sentropic/remote-operator-ui",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "npm run lint --workspaces --if-present",

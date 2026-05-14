@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CLI_PROFILES } from "@remote-controle/protocol";
+  import { CLI_PROFILES } from "@sentropic/remote-protocol";
 
   const sessions = [
     { id: "session-001", label: "Codex k3s", status: "ready", profile: "codex" },

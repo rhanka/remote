@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { REMOTE_PROTOCOL_VERSION } from "@remote-controle/protocol";
+import { REMOTE_PROTOCOL_VERSION } from "@sentropic/remote-protocol";
 import { Hono } from "hono";
 
 import { buildOpenApiDocument } from "./openapi.js";
@@ -13,7 +13,7 @@ export function createControlPlane(): Hono<{ Variables: ValidationVars }> {
   app.get("/healthz", (c) =>
     c.json({
       ok: true,
-      service: "remote-controle-control-plane",
+      service: "sentropic-remote-control-plane",
       protocolVersion: REMOTE_PROTOCOL_VERSION,
     }),
   );

@@ -68,7 +68,7 @@ Create these files:
 - `packages/browser-bridge/tsconfig.json`: package TS config.
 - `packages/browser-bridge/src/index.ts`: exported package metadata.
 
-The package names use the temporary scaffold scope `@remote-controle/*`. The validated publishing family is `@sentropic/remote-*`; rename package manifests after npm scope access is confirmed.
+The package names use the temporary scaffold scope `@sentropic/remote-*`. The validated publishing family is `@sentropic/remote-*`; rename package manifests after npm scope access is confirmed.
 
 ## Task 1: Root Workspace
 
@@ -96,8 +96,8 @@ Write `package.json`:
   },
   "scripts": {
     "build": "corepack pnpm -r --if-present build",
-    "dev": "corepack pnpm --filter @remote-controle/control-plane dev",
-    "dev:ui": "corepack pnpm --filter @remote-controle/operator-ui dev",
+    "dev": "corepack pnpm --filter @sentropic/remote-control-plane dev",
+    "dev:ui": "corepack pnpm --filter @sentropic/remote-operator-ui dev",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "corepack pnpm -r --if-present lint",
@@ -209,7 +209,7 @@ Expected:
 
 ```json
 {
-  "name": "@remote-controle/protocol",
+  "name": "@sentropic/remote-protocol",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -336,7 +336,7 @@ describe("protocol constants", () => {
 Run:
 
 ```bash
-pnpm --filter @remote-controle/protocol test
+pnpm --filter @sentropic/remote-protocol test
 ```
 
 Expected:
@@ -370,7 +370,7 @@ Expected:
 
 ```json
 {
-  "name": "@remote-controle/control-plane",
+  "name": "@sentropic/remote-control-plane",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -384,7 +384,7 @@ Expected:
   "dependencies": {
     "@fastify/websocket": "^11.2.0",
     "@kubernetes/client-node": "^1.4.0",
-    "@remote-controle/protocol": "workspace:*",
+    "@sentropic/remote-protocol": "workspace:*",
     "fastify": "^5.8.5",
     "zod": "^4.4.3"
   },
@@ -416,14 +416,14 @@ Write `apps/control-plane/src/index.ts`:
 
 ```ts
 import Fastify, { type FastifyInstance } from "fastify";
-import { REMOTE_CONTROLE_PROTOCOL_VERSION } from "@remote-controle/protocol";
+import { REMOTE_CONTROLE_PROTOCOL_VERSION } from "@sentropic/remote-protocol";
 
 export function createControlPlane(): FastifyInstance {
   const app = Fastify({ logger: true });
 
   app.get("/healthz", async () => ({
     ok: true,
-    service: "remote-controle-control-plane",
+    service: "sentropic-remote-control-plane",
     protocolVersion: REMOTE_CONTROLE_PROTOCOL_VERSION,
   }));
 
@@ -458,7 +458,7 @@ describe("control plane", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       ok: true,
-      service: "remote-controle-control-plane",
+      service: "sentropic-remote-control-plane",
       protocolVersion: "0.0.0",
     });
 
@@ -472,7 +472,7 @@ describe("control plane", () => {
 Run:
 
 ```bash
-pnpm --filter @remote-controle/control-plane test
+pnpm --filter @sentropic/remote-control-plane test
 ```
 
 Expected:
@@ -531,7 +531,7 @@ Write `packages/<name>/package.json`, replacing `<name>` with the package direct
 
 ```json
 {
-  "name": "@remote-controle/<name>",
+  "name": "@sentropic/remote-<name>",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -548,7 +548,7 @@ Write `packages/<name>/package.json`, replacing `<name>` with the package direct
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@remote-controle/protocol": "workspace:*"
+    "@sentropic/remote-protocol": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.1"
@@ -560,7 +560,7 @@ The literal `<name>` must not remain in any written file. Example for `packages/
 
 ```json
 {
-  "name": "@remote-controle/k8s-orchestrator",
+  "name": "@sentropic/remote-k8s-orchestrator",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -577,7 +577,7 @@ The literal `<name>` must not remain in any written file. Example for `packages/
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@remote-controle/protocol": "workspace:*"
+    "@sentropic/remote-protocol": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.4.0"
@@ -609,34 +609,34 @@ For each package directory from Step 1, write `src/index.ts` with the exact pack
 Example for `packages/k8s-orchestrator/src/index.ts`:
 
 ```ts
-export const packageName = "@remote-controle/k8s-orchestrator";
+export const packageName = "@sentropic/remote-k8s-orchestrator";
 ```
 
 Use these exact contents:
 
 ```ts
 // packages/session-agent/src/index.ts
-export const packageName = "@remote-controle/session-agent";
+export const packageName = "@sentropic/remote-session-agent";
 ```
 
 ```ts
 // packages/approval-core/src/index.ts
-export const packageName = "@remote-controle/approval-core";
+export const packageName = "@sentropic/remote-approval-core";
 ```
 
 ```ts
 // packages/secret-broker/src/index.ts
-export const packageName = "@remote-controle/secret-broker";
+export const packageName = "@sentropic/remote-secret-broker";
 ```
 
 ```ts
 // packages/terminal-transport/src/index.ts
-export const packageName = "@remote-controle/terminal-transport";
+export const packageName = "@sentropic/remote-terminal-transport";
 ```
 
 ```ts
 // packages/browser-bridge/src/index.ts
-export const packageName = "@remote-controle/browser-bridge";
+export const packageName = "@sentropic/remote-browser-bridge";
 ```
 
 - [ ] **Step 4: Verify no template marker remains**
@@ -683,7 +683,7 @@ The native build-script allowlist is limited to `esbuild` plus `voxtral-transcri
 
 ```json
 {
-  "name": "@remote-controle/operator-ui",
+  "name": "@sentropic/remote-operator-ui",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -695,7 +695,7 @@ The native build-script allowlist is limited to `esbuild` plus `voxtral-transcri
     "typecheck": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@remote-controle/protocol": "workspace:*",
+    "@sentropic/remote-protocol": "workspace:*",
     "@sent-tech/components-svelte": "0.1.0",
     "@sveltejs/adapter-node": "^5.5.4",
     "@sveltejs/kit": "^2.59.1",
@@ -784,7 +784,7 @@ Write `apps/operator-ui/src/routes/+page.svelte`:
 
 ```svelte
 <script lang="ts">
-  import { CLI_PROFILES } from "@remote-controle/protocol";
+  import { CLI_PROFILES } from "@sentropic/remote-protocol";
 
   const sessions = [
     { id: "session-001", label: "Codex k3s", status: "ready", profile: "codex" },
@@ -1161,8 +1161,8 @@ Expected:
   - Generated files must not contain unresolved work markers or vague implementation steps.
   - The literal marker `<name>` is checked with `rg "<name>" packages`.
 - Type consistency:
-  - Package scope is consistently `@remote-controle/*`.
+  - Package scope is consistently `@sentropic/remote-*`.
   - Protocol exports use `CliProfile`, `Capability`, and `SessionDescriptor`.
-  - Backend imports `REMOTE_CONTROLE_PROTOCOL_VERSION` from `@remote-controle/protocol`.
+  - Backend imports `REMOTE_CONTROLE_PROTOCOL_VERSION` from `@sentropic/remote-protocol`.
 - pnpm build scripts:
   - pnpm 11 allows only `esbuild` build scripts because Vite, Vitest, and tsup depend on it.

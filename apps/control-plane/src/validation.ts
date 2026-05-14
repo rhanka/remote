@@ -1,4 +1,4 @@
-import { remoteOpenApiComponents } from "@remote-controle/protocol";
+import { remoteOpenApiComponents } from "@sentropic/remote-protocol";
 import { Ajv, type ValidateFunction } from "ajv";
 import addFormatsModule, { type FormatsPlugin } from "ajv-formats";
 import type { Context, MiddlewareHandler } from "hono";

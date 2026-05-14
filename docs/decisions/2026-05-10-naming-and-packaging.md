@@ -16,7 +16,7 @@ The target npm package family is:
 
 The existing GitHub repository may remain `rhanka/remote-controle` as the historical codename until a separate repository rename decision is made.
 
-The current scaffold package manifests may remain temporarily under `@remote-controle/*`. They are private scaffold names and should be renamed only when the team is ready to publish or test publishing under the `@sentropic` npm scope.
+The current scaffold package manifests may remain temporarily under `@sentropic/remote-*`. They are private scaffold names and should be renamed only when the team is ready to publish or test publishing under the `@sentropic` npm scope.
 
 ## Rationale
 
@@ -48,5 +48,5 @@ The final names can still be refined before publication, but they should keep th
 
 - Confirm npm publishing access for `@sentropic`.
 - Decide whether to rename the GitHub repository to `sentropic-remote`.
-- Rename package manifests and workspace imports from `@remote-controle/*` to the final `@sentropic/remote-*` family in a dedicated change.
+- Rename package manifests and workspace imports from `@sentropic/remote-*` to the final `@sentropic/remote-*` family in a dedicated change.
 - Keep implementation plans explicit about whether they target temporary scaffold names or final publication names.

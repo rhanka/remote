@@ -1,1 +1,1 @@
-export const packageName = "@remote-controle/session-agent";
+export const packageName = "@sentropic/remote-session-agent";

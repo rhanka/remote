@@ -1,5 +1,5 @@
 {
-  "name": "@remote-controle/control-plane",
+  "name": "@sentropic/remote-control-plane",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,7 @@
   "dependencies": {
     "@hono/node-server": "^1.19.5",
     "@kubernetes/client-node": "^1.4.0",
-    "@remote-controle/protocol": "*",
+    "@sentropic/remote-protocol": "*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "hono": "^4.12.18"

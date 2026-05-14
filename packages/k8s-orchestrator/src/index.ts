@@ -1,1 +1,1 @@
-export const packageName = "@remote-controle/k8s-orchestrator";
+export const packageName = "@sentropic/remote-k8s-orchestrator";

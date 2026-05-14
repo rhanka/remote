@@ -1,1 +1,1 @@
-export const packageName = "@remote-controle/browser-bridge";
+export const packageName = "@sentropic/remote-browser-bridge";

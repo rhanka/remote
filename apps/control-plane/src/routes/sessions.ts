@@ -12,7 +12,7 @@ import {
   type SessionDescriptor,
   type StopSessionRequest,
   type StopSessionResponse,
-} from "@remote-controle/protocol";
+} from "@sentropic/remote-protocol";
 import type { Ajv } from "ajv";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";

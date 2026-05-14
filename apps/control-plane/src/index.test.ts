@@ -15,7 +15,7 @@ import {
   sendInstructionResponseSchema,
   sessionDescriptorSchema,
   stopSessionResponseSchema,
-} from "@remote-controle/protocol";
+} from "@sentropic/remote-protocol";
 import { Ajv } from "ajv";
 import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
@@ -54,7 +54,7 @@ describe("control plane", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       ok: true,
-      service: "remote-controle-control-plane",
+      service: "sentropic-remote-control-plane",
       protocolVersion: "0.1.0",
     });
   });

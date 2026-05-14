@@ -1,1 +1,1 @@
-export const packageName = "@remote-controle/terminal-transport";
+export const packageName = "@sentropic/remote-terminal-transport";

@@ -1,7 +1,7 @@
 import {
   REMOTE_PROTOCOL_VERSION,
   remoteOpenApiComponents,
-} from "@remote-controle/protocol";
+} from "@sentropic/remote-protocol";
 
 const ref = (name: string) => ({
   $ref: `#/components/schemas/${name}`,

@@ -1,4 +1,4 @@
-import type { SessionDescriptor } from "@remote-controle/protocol";
+import type { SessionDescriptor } from "@sentropic/remote-protocol";
 
 export class SessionStore {
   private readonly sessions = new Map<string, SessionDescriptor>();

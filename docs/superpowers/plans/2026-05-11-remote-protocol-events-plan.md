@@ -19,7 +19,7 @@ Current package state:
 - `packages/protocol/src/index.ts` exposes only version/profile/capability constants and a tiny `SessionDescriptor`.
 - `apps/control-plane/src/index.ts` imports `REMOTE_CONTROLE_PROTOCOL_VERSION`.
 - `apps/operator-ui/src/routes/+page.svelte` imports `CLI_PROFILES`.
-- Temporary package name remains `@remote-controle/protocol` until a dedicated package rename plan changes it to `@sentropic/remote-protocol`.
+- Temporary package name remains `@sentropic/remote-protocol` until a dedicated package rename plan changes it to `@sentropic/remote-protocol`.
 
 Implementation decisions:
 
@@ -64,8 +64,8 @@ Implementation decisions:
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol add json-schema-to-ts
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol add -D ajv
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol add json-schema-to-ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol add -D ajv
 ```
 
 Expected:
@@ -131,7 +131,7 @@ describe("protocol constants", () => {
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/index.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/index.test.ts
 ```
 
 Expected: FAIL with missing exports such as `REMOTE_PROTOCOL_VERSION` or `EVENT_TYPES`.
@@ -262,7 +262,7 @@ export interface SessionDescriptor {
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/index.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/index.test.ts
 ```
 
 Expected: PASS.
@@ -376,7 +376,7 @@ describe("session JSON Schemas", () => {
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts
 ```
 
 Expected: FAIL because `./index.js` under `src/schemas` does not exist.
@@ -696,7 +696,7 @@ export type * from "./types.js";
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts
 ```
 
 Expected: PASS.
@@ -706,7 +706,7 @@ Expected: PASS.
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol typecheck
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol typecheck
 ```
 
 Expected: PASS.
@@ -826,7 +826,7 @@ describe("approval, secret, and error JSON Schemas", () => {
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts
 ```
 
 Expected: FAIL with missing approval, secret, or error schema exports.
@@ -1075,8 +1075,8 @@ export type RemoteError = FromSchema<typeof remoteErrorSchema>;
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol typecheck
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol typecheck
 ```
 
 Expected: both PASS.
@@ -1171,7 +1171,7 @@ describe("terminal, browser, and UAT JSON Schemas", () => {
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts
 ```
 
 Expected: FAIL with missing terminal/browser/UAT schema exports.
@@ -1452,8 +1452,8 @@ export type UatRouteExpired = FromSchema<typeof uatRouteExpiredSchema>;
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol typecheck
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol typecheck
 ```
 
 Expected: both PASS.
@@ -1562,7 +1562,7 @@ describe("remoteOpenApiComponents", () => {
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts src/openapi.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts src/openapi.test.ts
 ```
 
 Expected: FAIL with missing `remoteEventEnvelopeSchema`, examples, or `remoteOpenApiComponents`.
@@ -1773,8 +1773,8 @@ export * from "./openapi.js";
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test -- src/schemas/schema-validation.test.ts src/openapi.test.ts
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol typecheck
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test -- src/schemas/schema-validation.test.ts src/openapi.test.ts
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol typecheck
 ```
 
 Expected: both PASS.
@@ -1813,7 +1813,7 @@ Expected before fixes: either PASS or FAIL only on imports still using `REMOTE_C
 Modify `apps/control-plane/src/index.ts` import:
 
 ```ts
-import { REMOTE_PROTOCOL_VERSION } from "@remote-controle/protocol";
+import { REMOTE_PROTOCOL_VERSION } from "@sentropic/remote-protocol";
 ```
 
 Modify the health response:
@@ -1831,7 +1831,7 @@ The expected assertion should be:
 ```ts
 expect(payload).toMatchObject({
   ok: true,
-  service: "remote-controle-control-plane",
+  service: "sentropic-remote-control-plane",
   protocolVersion: "0.1.0",
 });
 ```
@@ -1851,8 +1851,8 @@ This allows older scaffold code to compile while new code migrates to `REMOTE_PR
 Run:
 
 ```bash
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/protocol test
-corepack pnpm --dir /tmp/remote-controle-plan0 --filter @remote-controle/control-plane test
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-protocol test
+corepack pnpm --dir /tmp/remote-controle-plan0 --filter @sentropic/remote-control-plane test
 ```
 
 Expected: both PASS.

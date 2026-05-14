@@ -1,1 +1,1 @@
-export const packageName = "@remote-controle/secret-broker";
+export const packageName = "@sentropic/remote-secret-broker";

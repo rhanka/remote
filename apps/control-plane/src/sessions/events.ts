@@ -4,7 +4,7 @@ import {
   REMOTE_SCHEMA_VERSION,
   type Actor,
   type RemoteEventEnvelope,
-} from "@remote-controle/protocol";
+} from "@sentropic/remote-protocol";
 
 type EventType = (typeof EVENT_TYPES)[number];
 
