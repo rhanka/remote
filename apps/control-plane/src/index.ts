@@ -2,8 +2,13 @@ import { serve } from "@hono/node-server";
 import { REMOTE_PROTOCOL_VERSION } from "@remote-controle/protocol";
 import { Hono } from "hono";
 
-export function createControlPlane(): Hono {
-  const app = new Hono();
+import { buildOpenApiDocument } from "./openapi.js";
+import { createSessionsRouter } from "./routes/sessions.js";
+import { createAjv, type ValidationVars } from "./validation.js";
+
+export function createControlPlane(): Hono<{ Variables: ValidationVars }> {
+  const app = new Hono<{ Variables: ValidationVars }>();
+  const ajv = createAjv();
 
   app.get("/healthz", (c) =>
     c.json({
@@ -12,6 +17,10 @@ export function createControlPlane(): Hono {
       protocolVersion: REMOTE_PROTOCOL_VERSION,
     }),
   );
+
+  app.get("/openapi.json", (c) => c.json(buildOpenApiDocument()));
+
+  app.route("/sessions", createSessionsRouter(ajv));
 
   return app;
 }
