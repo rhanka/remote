@@ -6,3 +6,5 @@ allowBuilds:
   onnxruntime-node: true
   protobufjs: true
   sharp: true
+overrides:
+  cookie: ^0.7.2
