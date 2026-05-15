@@ -35,17 +35,14 @@ RUN npm install -g \
         @google/gemini-cli@${GEMINI_VERSION} \
     && npm cache clean --force
 
+# Copy the entire installed workspace (with hoisted node_modules) plus the
+# compiled dist outputs. node-pty's native binary built in the builder stage
+# is preserved this way without rerunning native compilation.
 COPY --from=builder /workspace/package.json /workspace/package-lock.json ./
+COPY --from=builder /workspace/node_modules ./node_modules
 COPY --from=builder /workspace/packages/protocol/package.json packages/protocol/
 COPY --from=builder /workspace/packages/protocol/dist packages/protocol/dist
 COPY --from=builder /workspace/packages/session-agent/package.json packages/session-agent/
 COPY --from=builder /workspace/packages/session-agent/dist packages/session-agent/dist
-COPY --from=builder /workspace/packages/session-agent/node_modules/node-pty packages/session-agent/node_modules/node-pty
-COPY --from=builder /workspace/packages/session-agent/node_modules/ws packages/session-agent/node_modules/ws
-COPY --from=builder /workspace/node_modules/@sentropic packages/session-agent/node_modules/@sentropic
-
-RUN corepack enable && \
-    corepack prepare npm@11.14.1 --activate && \
-    npm install -w @sentropic/remote-protocol -w @sentropic/remote-session-agent --include-workspace-root --omit=dev --ignore-scripts
 
 CMD ["node", "packages/session-agent/dist/index.js"]

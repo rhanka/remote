@@ -4,18 +4,60 @@ import { pathToFileURL } from "node:url";
 
 import { Command } from "commander";
 
+import { attach, createRemoteSession } from "./attach.js";
 import { run } from "./run.js";
 
 export const packageName = "@sentropic/remote-cli";
 
 export { run } from "./run.js";
 export type { RunOptions, RunResult } from "./run.js";
+export { attach, createRemoteSession } from "./attach.js";
+export type { AttachOptions, AttachResult } from "./attach.js";
 export {
   resolveProfile,
   isCliProfile,
   withResume,
   type ProfileConfig,
 } from "./profiles.js";
+
+type ProfileOpts = {
+  resume?: string;
+  port?: number;
+  remote?: string;
+};
+
+async function runProfile(
+  profileName: string,
+  opts: ProfileOpts,
+): Promise<void> {
+  if (opts.remote) {
+    const sessionId =
+      opts.resume ??
+      (
+        await createRemoteSession(opts.remote, {
+          profile: profileName,
+          target: "k3s",
+        })
+      ).id;
+    process.stderr.write(
+      `[remote] attached to ${opts.remote}/sessions/${sessionId}\n`,
+    );
+    const session = await attach({ baseUrl: opts.remote, sessionId });
+    await session.finished;
+    return;
+  }
+  const runOptions: import("./run.js").RunOptions = {
+    profile: profileName,
+    ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+    ...(opts.port !== undefined ? { port: opts.port } : {}),
+  };
+  const result = await run(runOptions);
+  process.stderr.write(
+    `[remote] session ${result.sessionId} attach at http://127.0.0.1:${result.port}\n`,
+  );
+  const { exitCode } = await result.exit;
+  process.exitCode = exitCode;
+}
 
 export async function main(argv: ReadonlyArray<string>): Promise<number> {
   const program = new Command();
@@ -42,21 +84,26 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "expose the in-process control-plane on this port",
         (value) => Number(value),
       )
-      .action(async (opts: { resume?: string; port?: number }) => {
-        const runOptions: import("./run.js").RunOptions = {
-          profile: profileName,
-          ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
-          ...(opts.port !== undefined ? { port: opts.port } : {}),
-        };
-        const result = await run(runOptions);
-        process.stderr.write(
-          `[remote] session ${result.sessionId} attach at http://127.0.0.1:${result.port}\n`,
-        );
-        const { exitCode } = await result.exit;
-        process.exitCode = exitCode;
+      .option(
+        "--remote <url>",
+        "create the session on a remote control-plane and attach instead of running locally",
+      )
+      .action(async (opts: ProfileOpts) => {
+        await runProfile(profileName, opts);
       });
     if (alias) cmd.alias(alias);
   }
+
+  program
+    .command("attach <url> <sessionId>")
+    .description("Attach to an existing session on a remote control-plane")
+    .action(async (url: string, sessionId: string) => {
+      process.stderr.write(
+        `[remote] attaching to ${url}/sessions/${sessionId}\n`,
+      );
+      const session = await attach({ baseUrl: url, sessionId });
+      await session.finished;
+    });
 
   await program.parseAsync([...argv]);
   const code = process.exitCode;
