@@ -31,6 +31,7 @@ export type SpawnerOptions = {
 
 export interface ProcessHandle {
   write(data: string): void;
+  resize?(cols: number, rows: number): void;
   kill(signal?: string): void;
   readonly exited: Promise<{ exitCode: number | null; signal?: string }>;
 }
@@ -57,11 +58,11 @@ const AGENT_ACTOR: Actor = {
 const PROFILE_COMMANDS: Readonly<
   Record<string, { command: string; args: ReadonlyArray<string> }>
 > = {
-  shell: { command: "/bin/sh", args: [] },
-  codex: { command: "/bin/sh", args: [] },
-  opencode: { command: "/bin/sh", args: [] },
-  "claude-code": { command: "/bin/sh", args: [] },
-  "gemini-cli": { command: "/bin/sh", args: [] },
+  shell: { command: "/bin/bash", args: [] },
+  codex: { command: "codex", args: [] },
+  opencode: { command: "opencode", args: [] },
+  "claude-code": { command: "claude", args: [] },
+  "gemini-cli": { command: "gemini", args: [] },
 };
 
 function defaultRandomId(prefix: string): string {
@@ -137,6 +138,17 @@ export class SessionAgent {
       const payload = envelope.payload as { data?: string };
       if (typeof payload.data === "string" && this.process) {
         this.process.write(payload.data);
+      }
+      return;
+    }
+    if (envelope.type === "terminal.resized") {
+      const payload = envelope.payload as { columns?: number; rows?: number };
+      if (
+        typeof payload.columns === "number" &&
+        typeof payload.rows === "number" &&
+        this.process?.resize
+      ) {
+        this.process.resize(payload.columns, payload.rows);
       }
     }
   }

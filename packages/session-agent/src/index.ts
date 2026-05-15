@@ -1,4 +1,5 @@
 import { SessionAgent } from "./agent.js";
+import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
 
@@ -14,6 +15,7 @@ export type {
   SpawnerOptions,
 } from "./agent.js";
 export { childProcessSpawner } from "./spawner.js";
+export { ptySpawner } from "./pty-spawner.js";
 export { connectWebSocketTransport } from "./websocket-transport.js";
 
 function requireEnv(name: string): string {
@@ -37,12 +39,17 @@ export async function main(): Promise<void> {
     `${wsUrl}/sessions/${sessionId}/agent`,
   );
 
+  const spawner =
+    process.env.SESSION_AGENT_SPAWNER === "child-process"
+      ? childProcessSpawner
+      : ptySpawner;
+
   const agent = new SessionAgent({
     sessionId,
     profile,
     workspacePath,
     transport,
-    spawner: childProcessSpawner,
+    spawner,
     env: process.env as Record<string, string>,
   });
 
