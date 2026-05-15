@@ -1,57 +1,75 @@
-# Scaleway Kapsule deployment
+# Scaleway Kapsule deployment (tenant)
 
-Manifests overlay for Sentropic Remote on a Scaleway Kapsule cluster.
+This directory ships **only the tenant-owned manifests** for the
+`sentropic-remote` workload on a shared Scaleway Kapsule cluster:
+
+- `10-rbac.yaml` — ServiceAccount + Role + RoleBinding (namespace-scoped, so
+  the control-plane Pod can create/delete Pods, PVCs and Secrets for sessions
+  *inside its namespace only*).
+- `20-control-plane.yaml` — Deployment + ClusterIP Service for the
+  control-plane.
+- `30-ingress.yaml` — optional Traefik Ingress (apply with `SCW_INGRESS=1`).
+
+The **namespace, ResourceQuota, LimitRange and NetworkPolicy baseline** are
+owned by the cluster operator and live in
+[`poc-k8s/tenants/sentropic-remote/`](https://github.com/rhanka/poc-k8s/tree/main/tenants/sentropic-remote).
+Apply them first; this Makefile won't touch them.
 
 ## Differences vs `deploy/k3s/`
 
-- `imagePullPolicy: Always` — Kapsule pulls from GHCR every roll, no local image import.
-- `SESSION_STORAGE_CLASS=scw-bssd` env so the control-plane provisions PVCs
-  with Scaleway's Block Storage (the default `scw-bssd` storage class is
-  pre-installed on Kapsule, ReadWriteOnce SSD-backed).
-- Resource requests/limits sized for a real workload (100m/128Mi -> 500m/512Mi).
-- Optional `30-ingress.yaml` Traefik Ingress with cert-manager TLS.
+- `imagePullPolicy: Always` so Kapsule pulls from GHCR every rollout.
+- `SESSION_STORAGE_CLASS=scw-bssd` env (Scaleway Block Storage, ReadWriteOnce).
+- Resource requests/limits sized for a real workload (100m/128Mi → 500m/512Mi).
+- Optional Ingress via Traefik + cert-manager Let's Encrypt.
 
-## Prerequisites
-
-1. **Kapsule cluster created** (Scaleway console or `scw k8s cluster create`).
-2. **kubeconfig fetched**: `scw k8s kubeconfig get <cluster-id> > ~/.kube/scw.yaml && export KUBECONFIG=~/.kube/scw.yaml`.
-3. **Images pushed to GHCR** at the tags referenced in `20-control-plane.yaml`
-   and the `SESSION_AGENT_IMAGE` env (see `.github/workflows/build-and-push.yml`
-   for the release pipeline; you can also push manually:
-   `docker login ghcr.io && docker push ghcr.io/rhanka/sentropic-remote-control-plane:v0.1.1`
-   and the session-agent image).
-4. **cert-manager + ClusterIssuer `letsencrypt`** if you want HTTPS via the
-   Ingress; otherwise drop `30-ingress.yaml`.
-
-## Deploy
+## Prerequisites (cluster operator-side, in `~/src/poc-k8s/`)
 
 ```bash
-export KUBECONFIG=~/.kube/scw.yaml
-kubectl apply -f deploy/scw/00-namespace.yaml
-kubectl apply -f deploy/scw/10-rbac.yaml
-kubectl apply -f deploy/scw/20-control-plane.yaml
-kubectl apply -f deploy/scw/30-ingress.yaml  # optional
-kubectl -n sentropic-remote rollout status deploy/control-plane --timeout=180s
+make kubeconfig                     # ~/.kube/poc.yaml
+make apply-platform apply-sentropic-remote
 ```
+
+## Deploy this tenant
+
+From `~/src/remote/` :
+
+```bash
+KUBECONFIG=~/.kube/poc.yaml make scw-deploy             # RBAC + Deployment + Service
+KUBECONFIG=~/.kube/poc.yaml make scw-deploy SCW_INGRESS=1  # + the Ingress
+```
+
+`make scw-deploy` does not create the namespace; that's the cluster operator's
+job (see `poc-k8s/tenants/sentropic-remote/`).
 
 ## Usage from your laptop
 
-If you exposed Ingress on `remote.sentropic.dev` :
+Either through Ingress (DNS) :
 
 ```bash
 remote codex --remote https://remote.sentropic.dev
 ```
 
-Otherwise port-forward the Service through your laptop :
+…or via port-forward (delegated to `poc-k8s`'s `tenant-port-forward` helper) :
 
 ```bash
-kubectl -n sentropic-remote port-forward svc/sentropic-remote-control-plane 8080:8080
+make -C ../poc-k8s tenant-port-forward \
+  TENANT=sentropic-remote SVC=sentropic-remote-control-plane PORT=8080
 remote codex --remote http://localhost:8080
 ```
 
 The CLI bundles your local `~/.codex/auth.json` (and equivalents for claude /
 gemini) as a per-session K8s Secret mounted readonly in the Pod, so the agent
 CLI starts already logged in.
+
+## Pause / resume the workload
+
+This is delegated to `poc-k8s` so the cluster operator stays the source of
+truth for node-level lifecycle (autoscaler-driven scale-to-zero) :
+
+```bash
+make -C ../poc-k8s tenant-pause  TENANT=sentropic-remote DEPLOY=control-plane
+make -C ../poc-k8s tenant-resume TENANT=sentropic-remote DEPLOY=control-plane
+```
 
 ## Image tags and rollouts
 
@@ -63,11 +81,8 @@ The release workflow tags both images on every git tag matching `v*` :
 Update the `image:` and `SESSION_AGENT_IMAGE` values in
 `20-control-plane.yaml` to bump versions on Kapsule.
 
-## Cleanup
+## Cleanup (tenant workload only — namespace + quota stay)
 
 ```bash
-kubectl delete -f deploy/scw/30-ingress.yaml --ignore-not-found
-kubectl delete -f deploy/scw/20-control-plane.yaml --ignore-not-found
-kubectl delete -f deploy/scw/10-rbac.yaml --ignore-not-found
-kubectl delete -f deploy/scw/00-namespace.yaml --ignore-not-found
+KUBECONFIG=~/.kube/poc.yaml make scw-undeploy
 ```
