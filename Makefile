@@ -10,6 +10,7 @@ PORT ?= 8080
 	images images-control-plane images-session-agent \
 	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
 	demo demo-down \
+	scw-deploy scw-undeploy scw-port-forward \
 	cli-build cli-link cli-unlink
 
 help:
@@ -30,6 +31,11 @@ help:
 	@echo "  wait-ready           wait for the control-plane Deployment rollout"
 	@echo "  port-forward         expose the control-plane on http://localhost:$(PORT)"
 	@echo "  undeploy / k3d-down  individual cleanup"
+	@echo ""
+	@echo "Scaleway Kapsule (export KUBECONFIG=~/.kube/scw.yaml first):"
+	@echo "  scw-deploy           kubectl apply -f deploy/scw/ (add SCW_INGRESS=1 for the Ingress)"
+	@echo "  scw-port-forward     expose the Kapsule control-plane locally on $(PORT)"
+	@echo "  scw-undeploy         remove the Kapsule deployment"
 
 install:
 	corepack npm install
@@ -92,6 +98,25 @@ demo: k3d-up k3d-load deploy wait-ready
 	@echo "        -d '{\"profile\":\"codex\",\"target\":\"k3s\"}'"
 
 demo-down: undeploy k3d-down
+
+# --- Scaleway Kapsule -----------------------------------------------------
+# Apply deploy/scw/ on the cluster pointed to by $KUBECONFIG. Skips the
+# optional Ingress manifest unless SCW_INGRESS=1 is set.
+scw-deploy:
+	kubectl apply -f deploy/scw/00-namespace.yaml
+	kubectl apply -f deploy/scw/10-rbac.yaml
+	kubectl apply -f deploy/scw/20-control-plane.yaml
+	@if [ "$(SCW_INGRESS)" = "1" ]; then kubectl apply -f deploy/scw/30-ingress.yaml; fi
+	kubectl -n $(NAMESPACE) rollout status deploy/control-plane --timeout=180s
+
+scw-undeploy:
+	-kubectl delete -f deploy/scw/30-ingress.yaml --ignore-not-found
+	-kubectl delete -f deploy/scw/20-control-plane.yaml --ignore-not-found
+	-kubectl delete -f deploy/scw/10-rbac.yaml --ignore-not-found
+	-kubectl delete -f deploy/scw/00-namespace.yaml --ignore-not-found
+
+scw-port-forward:
+	kubectl -n $(NAMESPACE) port-forward svc/sentropic-remote-control-plane $(PORT):8080
 
 cli-build:
 	corepack npm run -w @sentropic/remote-protocol build

@@ -73,9 +73,18 @@ export function createControlPlane(
 export function provisionerFromEnv(): SessionProvisioner {
   const namespace = process.env.K8S_NAMESPACE;
   if (!namespace) return new InMemoryProvisioner();
-  const overrides: { namespace: string; image?: string } = { namespace };
+  const overrides: {
+    namespace: string;
+    image?: string;
+    storageClassName?: string;
+    controlPlaneEndpoint?: string;
+  } = { namespace };
   if (process.env.SESSION_AGENT_IMAGE)
     overrides.image = process.env.SESSION_AGENT_IMAGE;
+  if (process.env.SESSION_STORAGE_CLASS)
+    overrides.storageClassName = process.env.SESSION_STORAGE_CLASS;
+  if (process.env.CONTROL_PLANE_ENDPOINT)
+    overrides.controlPlaneEndpoint = process.env.CONTROL_PLANE_ENDPOINT;
   return new K8sSessionProvisioner(
     KubernetesObjectApiClient.fromDefault(),
     overrides,
