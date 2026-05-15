@@ -105,6 +105,11 @@ describe("K8sSessionProvisioner", () => {
         kind: "PersistentVolumeClaim",
         name: "session-sess-test1-workspace",
       },
+      {
+        op: "delete",
+        kind: "Secret",
+        name: "session-sess-test1-auth",
+      },
     ]);
     expect(events.map((event) => event.payload.nextState)).toEqual([
       "stopping",
@@ -130,6 +135,25 @@ describe("K8sSessionProvisioner", () => {
     const provisioner = new K8sSessionProvisioner(client);
     await provisioner.destroy("sess-missing", () => {});
     expect(calls).toBeGreaterThan(0);
+  });
+
+  it("creates a Secret before the Pod when credentials are passed", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "demo-ns",
+    });
+    await provisioner.provision(descriptor, () => {}, {
+      credentials: {
+        ".codex/auth.json": "BASE64==",
+        ".claude/.credentials.json": "BASE64==",
+      },
+    });
+    expect(ops.map((op) => `${op.op}:${op.kind}`)).toEqual([
+      "create:Secret",
+      "create:PersistentVolumeClaim",
+      "create:Pod",
+    ]);
+    expect(ops[0]!.name).toBe("session-sess-test1-auth");
   });
 
   it("ensures KubernetesListObject typing surface stays usable", () => {

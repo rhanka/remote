@@ -84,8 +84,36 @@ describe("k8s spec builders", () => {
     ).toBe(DEFAULT_BUILDER_OPTIONS.controlPlaneEndpoint);
 
     const volume = pod.spec.volumes[0]!;
-    expect(volume.persistentVolumeClaim.claimName).toBe(
-      resourceNames(baseDescriptor).pvc,
+    expect("persistentVolumeClaim" in volume).toBe(true);
+    if ("persistentVolumeClaim" in volume) {
+      expect(volume.persistentVolumeClaim.claimName).toBe(
+        resourceNames(baseDescriptor).pvc,
+      );
+    }
+  });
+
+  it("mounts the auth Secret per credential path when authPaths is set", () => {
+    const pod = buildSessionPodSpec(baseDescriptor, DEFAULT_BUILDER_OPTIONS, [
+      ".codex/auth.json",
+      ".claude/.credentials.json",
+    ]);
+    const container = pod.spec.containers[0]!;
+    const authMounts = container.volumeMounts.filter(
+      (mount) => mount.name === "auth",
     );
+    expect(authMounts).toHaveLength(2);
+    expect(authMounts[0]!.mountPath).toBe("/root/.codex/auth.json");
+    expect(authMounts[0]!.subPath).toBe("codex_auth.json");
+    expect(authMounts[0]!.readOnly).toBe(true);
+    expect(authMounts[1]!.mountPath).toBe("/root/.claude/.credentials.json");
+
+    const authVolume = pod.spec.volumes.find((vol) => vol.name === "auth");
+    expect(authVolume).toBeDefined();
+    expect("secret" in authVolume!).toBe(true);
+    if ("secret" in authVolume!) {
+      expect(authVolume.secret.secretName).toBe(
+        resourceNames(baseDescriptor).authSecret,
+      );
+    }
   });
 });

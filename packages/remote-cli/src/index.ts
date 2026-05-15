@@ -5,6 +5,8 @@ import { pathToFileURL } from "node:url";
 import { Command } from "commander";
 
 import { attach, createRemoteSession } from "./attach.js";
+import { collectProfileAuth } from "./auth-bundle.js";
+import { isCliProfile } from "./profiles.js";
 import { run } from "./run.js";
 
 export const packageName = "@sentropic/remote-cli";
@@ -13,6 +15,8 @@ export { run } from "./run.js";
 export type { RunOptions, RunResult } from "./run.js";
 export { attach, createRemoteSession } from "./attach.js";
 export type { AttachOptions, AttachResult } from "./attach.js";
+export { collectProfileAuth } from "./auth-bundle.js";
+export type { AuthBundle } from "./auth-bundle.js";
 export {
   resolveProfile,
   isCliProfile,
@@ -24,6 +28,7 @@ type ProfileOpts = {
   resume?: string;
   port?: number;
   remote?: string;
+  auth?: boolean;
 };
 
 async function runProfile(
@@ -31,14 +36,25 @@ async function runProfile(
   opts: ProfileOpts,
 ): Promise<void> {
   if (opts.remote) {
+    let credentials: Readonly<Record<string, string>> | undefined;
+    if (opts.auth !== false && isCliProfile(profileName)) {
+      const bundle = await collectProfileAuth(profileName);
+      if (Object.keys(bundle).length > 0) credentials = bundle;
+    }
     const sessionId =
       opts.resume ??
       (
         await createRemoteSession(opts.remote, {
           profile: profileName,
           target: "k3s",
+          ...(credentials ? { credentials } : {}),
         })
       ).id;
+    if (credentials) {
+      process.stderr.write(
+        `[remote] bundled ${Object.keys(credentials).length} auth file(s) for ${profileName}\n`,
+      );
+    }
     process.stderr.write(
       `[remote] attached to ${opts.remote}/sessions/${sessionId}\n`,
     );
@@ -87,6 +103,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       .option(
         "--remote <url>",
         "create the session on a remote control-plane and attach instead of running locally",
+      )
+      .option(
+        "--no-auth",
+        "skip bundling local credentials when running with --remote",
       )
       .action(async (opts: ProfileOpts) => {
         await runProfile(profileName, opts);

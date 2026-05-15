@@ -154,6 +154,7 @@ export async function createRemoteSession(
     target?: string;
     resume?: string;
     displayName?: string;
+    credentials?: Readonly<Record<string, string>>;
   },
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ id: string }> {
@@ -163,6 +164,8 @@ export async function createRemoteSession(
   };
   if (body.displayName) payload.displayName = body.displayName;
   if (body.resume) payload.metadata = { resume: body.resume };
+  if (body.credentials && Object.keys(body.credentials).length > 0)
+    payload.credentials = body.credentials;
 
   const response = await fetchImpl(joinUrl(baseUrl, "/sessions"), {
     method: "POST",

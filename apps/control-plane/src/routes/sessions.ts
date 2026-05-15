@@ -126,12 +126,19 @@ export function createSessionsRouter(
   }
 
   router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
-    const req = validatedBody<CreateSessionRequest>(c);
+    const req = validatedBody<
+      CreateSessionRequest & {
+        credentials?: Record<string, string>;
+      }
+    >(c);
     const descriptor = store.put(buildDescriptor(req));
     bus.publish(descriptor.id, "session.lifecycle.changed", {
       nextState: "requested",
     });
-    void provisioner.provision(descriptor, emit);
+    const provisionOptions = req.credentials
+      ? { credentials: req.credentials }
+      : {};
+    void provisioner.provision(descriptor, emit, provisionOptions);
     const response: CreateSessionResponse = { session: descriptor };
     return c.json(response, 201);
   });

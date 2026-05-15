@@ -1,9 +1,14 @@
 import type { SessionDescriptor } from "@sentropic/remote-protocol";
 
-import type { ProvisionerEmit, SessionProvisioner } from "../index.js";
+import type {
+  ProvisionerEmit,
+  ProvisionOptions,
+  SessionProvisioner,
+} from "../index.js";
 import type { K8sClient } from "./client.js";
 import {
   DEFAULT_BUILDER_OPTIONS,
+  buildSessionAuthSecret,
   buildSessionPodSpec,
   buildSessionPvcSpec,
   resourceNames,
@@ -26,6 +31,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
   async provision(
     descriptor: SessionDescriptor,
     emit: ProvisionerEmit,
+    options: ProvisionOptions = {},
   ): Promise<void> {
     this.phases.set(descriptor.id, "provisioning");
     emit(descriptor.id, "session.lifecycle.changed", {
@@ -33,8 +39,19 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       nextState: "provisioning",
     });
 
+    const credentials = options.credentials ?? {};
+    const authPaths = Object.keys(credentials);
+
+    if (authPaths.length > 0) {
+      await this.client.create(
+        buildSessionAuthSecret(descriptor, credentials, this.options),
+      );
+    }
+
     await this.client.create(buildSessionPvcSpec(descriptor, this.options));
-    await this.client.create(buildSessionPodSpec(descriptor, this.options));
+    await this.client.create(
+      buildSessionPodSpec(descriptor, this.options, authPaths),
+    );
 
     this.phases.set(descriptor.id, "starting");
     emit(descriptor.id, "session.lifecycle.changed", {
@@ -65,6 +82,13 @@ export class K8sSessionProvisioner implements SessionProvisioner {
         apiVersion: "v1",
         kind: "PersistentVolumeClaim",
         metadata: { name: names.pvc, namespace },
+      })
+      .catch(() => {});
+    await this.client
+      .delete({
+        apiVersion: "v1",
+        kind: "Secret",
+        metadata: { name: names.authSecret, namespace },
       })
       .catch(() => {});
 

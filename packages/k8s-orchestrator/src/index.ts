@@ -13,10 +13,15 @@ export type ProvisionerEmit = (
   payload: Record<string, unknown>,
 ) => void;
 
+export type ProvisionOptions = {
+  readonly credentials?: Readonly<Record<string, string>>;
+};
+
 export interface SessionProvisioner {
   provision(
     descriptor: SessionDescriptor,
     emit: ProvisionerEmit,
+    options?: ProvisionOptions,
   ): Promise<void>;
   destroy(sessionId: string, emit: ProvisionerEmit): Promise<void>;
   inspect(sessionId: string): Promise<{ phase: string } | undefined>;
@@ -73,10 +78,15 @@ export {
   DEFAULT_BUILDER_OPTIONS,
   buildSessionPodSpec,
   buildSessionPvcSpec,
+  buildSessionAuthSecret,
+  credentialSecretKey,
   resourceNames,
   sessionLabels,
   type K8sPodSpec,
   type K8sPvcSpec,
+  type K8sSecretSpec,
+  type K8sVolume,
+  type K8sVolumeMount,
   type ResourceQuantities,
   type SpecBuilderOptions,
 } from "./k8s/spec.js";

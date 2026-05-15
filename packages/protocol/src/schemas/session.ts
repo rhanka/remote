@@ -67,6 +67,23 @@ export const sessionDescriptorSchema = {
 
 const embeddedSessionDescriptorSchema = stripSchemaIds(sessionDescriptorSchema);
 
+export const sessionCredentialsSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/session-credentials.schema.json`,
+  title: "SessionCredentials",
+  description:
+    "Map of HOME-relative file paths to base64-encoded payloads. The session-agent Pod mounts these as a Kubernetes Secret under the container HOME so a CLI's auth.json / .credentials.json / oauth_creds.json files are pre-populated.",
+  type: "object",
+  additionalProperties: {
+    type: "string",
+    contentEncoding: "base64",
+    minLength: 1,
+  },
+} as const;
+
+const embeddedSessionCredentialsSchema = stripSchemaIds(
+  sessionCredentialsSchema,
+);
+
 export const createSessionRequestSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/create-session-request.schema.json`,
   title: "CreateSessionRequest",
@@ -85,6 +102,7 @@ export const createSessionRequestSchema = {
       uniqueItems: true,
     },
     metadata: metadataSchema,
+    credentials: embeddedSessionCredentialsSchema,
   },
 } as const;
 
