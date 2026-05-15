@@ -35,7 +35,7 @@ export type K8sPodSpec = {
     readonly containers: ReadonlyArray<{
       readonly name: string;
       readonly image: string;
-      readonly imagePullPolicy: "IfNotPresent";
+      readonly imagePullPolicy: "Always";
       readonly env: ReadonlyArray<{
         readonly name: string;
         readonly value: string;
@@ -92,7 +92,7 @@ const POD_CONTAINER = "session-agent";
 
 export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
   namespace: "sentropic-remote",
-  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.1.0",
+  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.1.1",
   defaultWorkspaceSize: "1Gi",
   controlPlaneEndpoint: "http://sentropic-remote-control-plane:8080",
   home: "/root",
@@ -237,7 +237,7 @@ export function buildSessionPodSpec(
         {
           name: POD_CONTAINER,
           image: options.image,
-          imagePullPolicy: "IfNotPresent",
+          imagePullPolicy: "Always",
           env: [
             { name: "SESSION_ID", value: descriptor.id },
             { name: "SESSION_PROFILE", value: descriptor.profile },
