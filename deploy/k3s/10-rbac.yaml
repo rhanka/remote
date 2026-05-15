@@ -11,7 +11,8 @@ metadata:
   namespace: sentropic-remote
 rules:
   - apiGroups: [""]
-    resources: ["pods", "persistentvolumeclaims", "services", "secrets", "events"]
+    resources:
+      ["pods", "persistentvolumeclaims", "services", "secrets", "events"]
     verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
   - apiGroups: [""]
     resources: ["pods/log", "pods/exec"]

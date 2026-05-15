@@ -18,7 +18,7 @@ Manifests overlay for Sentropic Remote on a Scaleway Kapsule cluster.
 3. **Images pushed to GHCR** at the tags referenced in `20-control-plane.yaml`
    and the `SESSION_AGENT_IMAGE` env (see `.github/workflows/build-and-push.yml`
    for the release pipeline; you can also push manually:
-   `docker login ghcr.io && docker push ghcr.io/sentropic/remote-control-plane:0.1.0`
+   `docker login ghcr.io && docker push ghcr.io/rhanka/sentropic-remote-control-plane:0.1.0`
    and the session-agent image).
 4. **cert-manager + ClusterIssuer `letsencrypt`** if you want HTTPS via the
    Ingress; otherwise drop `30-ingress.yaml`.
@@ -57,8 +57,8 @@ CLI starts already logged in.
 
 The release workflow tags both images on every git tag matching `v*` :
 
-- `ghcr.io/sentropic/remote-control-plane:<tag>` and `:latest`
-- `ghcr.io/sentropic/remote-session-agent:<tag>` and `:latest`
+- `ghcr.io/rhanka/sentropic-remote-control-plane:<tag>` and `:latest`
+- `ghcr.io/rhanka/sentropic-remote-session-agent:<tag>` and `:latest`
 
 Update the `image:` and `SESSION_AGENT_IMAGE` values in
 `20-control-plane.yaml` to bump versions on Kapsule.

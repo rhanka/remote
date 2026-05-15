@@ -20,10 +20,10 @@ jobs:
         include:
           - name: control-plane
             dockerfile: apps/control-plane/Dockerfile
-            image: ghcr.io/sentropic/remote-control-plane
+            image: ghcr.io/rhanka/sentropic-remote-control-plane
           - name: session-agent
             dockerfile: packages/session-agent/Dockerfile
-            image: ghcr.io/sentropic/remote-session-agent
+            image: ghcr.io/rhanka/sentropic-remote-session-agent
     steps:
       - uses: actions/checkout@v4
 
