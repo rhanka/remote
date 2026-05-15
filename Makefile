@@ -11,6 +11,7 @@ PORT ?= 8080
 	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
 	demo demo-down \
 	scw-deploy scw-undeploy scw-port-forward \
+	scw-pause scw-resume scw-status \
 	cli-build cli-link cli-unlink
 
 help:
@@ -32,10 +33,13 @@ help:
 	@echo "  port-forward         expose the control-plane on http://localhost:$(PORT)"
 	@echo "  undeploy / k3d-down  individual cleanup"
 	@echo ""
-	@echo "Scaleway Kapsule (export KUBECONFIG=~/.kube/scw.yaml first):"
+	@echo "Scaleway Kapsule (export KUBECONFIG=~/.kube/poc.yaml first):"
 	@echo "  scw-deploy           kubectl apply -f deploy/scw/ (add SCW_INGRESS=1 for the Ingress)"
 	@echo "  scw-port-forward     expose the Kapsule control-plane locally on $(PORT)"
-	@echo "  scw-undeploy         remove the Kapsule deployment"
+	@echo "  scw-pause            scale control-plane to 0 (autoscaler tears down the node ~10 min later)"
+	@echo "  scw-resume           scale control-plane back to 1 (autoscaler brings a node back in 1-2 min)"
+	@echo "  scw-status           show deploy, pods, nodes and remaining session Pods"
+	@echo "  scw-undeploy         remove the Kapsule deployment (keeps the namespace + quota)"
 
 install:
 	corepack npm install
@@ -117,6 +121,30 @@ scw-undeploy:
 
 scw-port-forward:
 	kubectl -n $(NAMESPACE) port-forward svc/sentropic-remote-control-plane $(PORT):8080
+
+# Pause: scale the workload to 0 so the cluster-autoscaler can evict the node.
+# (Session Pods provisioned by the control-plane are NOT touched here; stop
+# them first via `remote stop` if you want a clean zero. Otherwise an existing
+# session Pod will keep the node alive.)
+scw-pause:
+	kubectl -n $(NAMESPACE) scale deploy/control-plane --replicas=0
+	@SESSIONS=$$(kubectl -n $(NAMESPACE) get pods -l app.kubernetes.io/component=session-agent --no-headers 2>/dev/null | wc -l); \
+	if [ "$$SESSIONS" -gt 0 ]; then \
+	  echo "==> WARN: $$SESSIONS session-agent Pod(s) still running; stop them or the autoscaler will keep the node up."; \
+	  kubectl -n $(NAMESPACE) get pods -l app.kubernetes.io/component=session-agent --no-headers; \
+	else \
+	  echo "==> control-plane scaled to 0. Autoscaler will evict the node within ~10 min (ScaleDownUnneededTime)."; \
+	fi
+
+scw-resume:
+	kubectl -n $(NAMESPACE) scale deploy/control-plane --replicas=1
+	kubectl -n $(NAMESPACE) rollout status deploy/control-plane --timeout=300s
+	@echo "==> control-plane is back. /healthz reachable via 'make scw-port-forward'."
+
+scw-status:
+	@echo "=== Deployment ===" ; kubectl -n $(NAMESPACE) get deploy/control-plane -o wide 2>/dev/null || true
+	@echo "" ; echo "=== Pods ($(NAMESPACE)) ===" ; kubectl -n $(NAMESPACE) get pods -o wide 2>/dev/null || true
+	@echo "" ; echo "=== Nodes ===" ; kubectl get nodes -o wide 2>/dev/null || true
 
 cli-build:
 	corepack npm run -w @sentropic/remote-protocol build
