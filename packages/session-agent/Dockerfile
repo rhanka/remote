@@ -24,6 +24,19 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# bookworm-slim strips ca-certificates and the basic shell tools the CLIs
+# expect at runtime. Reinstall the minimum so Node's TLS stack finds the
+# root CA bundle (chatgpt.com / api.anthropic.com / etc), and so sessions
+# get curl/git/openssh available for the usual codex workflows.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        openssh-client \
+        tini \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install the agent CLIs available system-wide so any session profile maps to
 # a real binary on $PATH. Versions are pinned at image build time.
 ARG CODEX_VERSION=0.130.0
