@@ -8,11 +8,16 @@ PORT ?= 8080
 
 .PHONY: help install build typecheck test verify format format-write \
 	images images-control-plane images-session-agent \
-	k3d-up k3d-down k3d-load deploy undeploy port-forward \
+	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
+	demo demo-down \
 	cli-build cli-link cli-unlink
 
 help:
-	@echo "Targets:"
+	@echo "One-shot:"
+	@echo "  make demo            cluster + images + deploy + wait-ready (then run 'make port-forward' separately)"
+	@echo "  make demo-down       tear it all down (deploy + cluster)"
+	@echo ""
+	@echo "Steps:"
 	@echo "  install              npm install (workspaces)"
 	@echo "  build / typecheck / test / verify / format / format-write"
 	@echo "  cli-build            build @sentropic/remote-cli"
@@ -22,8 +27,9 @@ help:
 	@echo "  k3d-up               create the local k3d cluster ($(CLUSTER))"
 	@echo "  k3d-load             import images into the k3d cluster"
 	@echo "  deploy               apply deploy/k3s manifests"
+	@echo "  wait-ready           wait for the control-plane Deployment rollout"
 	@echo "  port-forward         expose the control-plane on http://localhost:$(PORT)"
-	@echo "  undeploy / k3d-down  cleanup"
+	@echo "  undeploy / k3d-down  individual cleanup"
 
 install:
 	corepack npm install
@@ -72,6 +78,20 @@ undeploy:
 
 port-forward:
 	kubectl -n $(NAMESPACE) port-forward svc/sentropic-remote-control-plane $(PORT):8080
+
+wait-ready:
+	kubectl -n $(NAMESPACE) rollout status deploy/control-plane --timeout=180s
+
+demo: k3d-up k3d-load deploy wait-ready
+	@echo ""
+	@echo "==> Cluster $(CLUSTER) is ready with control-plane deployed."
+	@echo "    Run 'make port-forward' in another shell, then:"
+	@echo "      curl http://localhost:$(PORT)/healthz"
+	@echo "      curl -X POST http://localhost:$(PORT)/sessions \\"
+	@echo "        -H 'content-type: application/json' \\"
+	@echo "        -d '{\"profile\":\"codex\",\"target\":\"k3s\"}'"
+
+demo-down: undeploy k3d-down
 
 cli-build:
 	corepack npm run -w @sentropic/remote-protocol build
