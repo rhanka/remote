@@ -58,16 +58,9 @@ jobs:
           tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
-
-      - name: Make package public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eu
-          pkg="${{ matrix.image }}"
-          name="${pkg##*/}"
-          # Idempotent: PATCH succeeds whether the package is already public.
-          gh api -X PATCH "/user/packages/container/${name}/visibility" \
-            -f visibility=public \
-            || gh api -X PATCH "/user/packages/container/${name}" \
-                 -f visibility=public
+          # NOTE: GHCR packages default to private on first push under a user
+          # account; GITHUB_TOKEN cannot flip the visibility (PATCH endpoint is
+          # /user/packages/... and requires an admin:packages PAT). One-time
+          # manual action by the repo owner via
+          # https://github.com/users/rhanka/packages/container/<name>/settings
+          # → Change visibility → Public. Tracked in poc-k8s/requests/.
