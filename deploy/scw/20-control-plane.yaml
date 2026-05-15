@@ -21,7 +21,7 @@ spec:
       serviceAccountName: sentropic-remote-control-plane
       containers:
         - name: control-plane
-          image: ghcr.io/rhanka/sentropic-remote-control-plane:0.1.0
+          image: ghcr.io/rhanka/sentropic-remote-control-plane:v0.1.0
           imagePullPolicy: Always
           env:
             - name: PORT
@@ -33,7 +33,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: SESSION_AGENT_IMAGE
-              value: "ghcr.io/rhanka/sentropic-remote-session-agent:0.1.0"
+              value: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.1.0"
             - name: SESSION_STORAGE_CLASS
               value: "scw-bssd"
           ports:
