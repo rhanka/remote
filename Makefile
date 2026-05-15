@@ -8,12 +8,16 @@ PORT ?= 8080
 
 .PHONY: help install build typecheck test verify format format-write \
 	images images-control-plane images-session-agent \
-	k3d-up k3d-down k3d-load deploy undeploy port-forward
+	k3d-up k3d-down k3d-load deploy undeploy port-forward \
+	cli-build cli-link cli-unlink
 
 help:
 	@echo "Targets:"
 	@echo "  install              npm install (workspaces)"
 	@echo "  build / typecheck / test / verify / format / format-write"
+	@echo "  cli-build            build @sentropic/remote-cli"
+	@echo "  cli-link             install 'remote' into \$$PATH via npm link"
+	@echo "  cli-unlink           remove the 'remote' link"
 	@echo "  images               build both docker images"
 	@echo "  k3d-up               create the local k3d cluster ($(CLUSTER))"
 	@echo "  k3d-load             import images into the k3d cluster"
@@ -68,3 +72,14 @@ undeploy:
 
 port-forward:
 	kubectl -n $(NAMESPACE) port-forward svc/sentropic-remote-control-plane $(PORT):8080
+
+cli-build:
+	corepack npm run -w @sentropic/remote-protocol build
+	corepack npm run -w @sentropic/remote-cli build
+
+cli-link: cli-build
+	corepack npm link -w @sentropic/remote-cli
+	@echo "==> 'remote' is now in PATH. Try: remote --help"
+
+cli-unlink:
+	corepack npm unlink -g @sentropic/remote-cli 2>/dev/null || true

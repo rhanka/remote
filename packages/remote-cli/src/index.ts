@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
 import { Command } from "commander";
 
 import { run } from "./run.js";
@@ -60,8 +63,17 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   return typeof code === "number" ? code : 0;
 }
 
-const entrypoint = process.argv[1] ?? "";
-if (entrypoint.endsWith("remote-cli/dist/index.js")) {
+function isEntryPoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(argv1)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main(process.argv).catch((error: unknown) => {
     console.error("[remote] fatal:", error);
     process.exitCode = 1;
