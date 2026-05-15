@@ -2,6 +2,8 @@ import { serve } from "@hono/node-server";
 import { createNodeWebSocket } from "@hono/node-ws";
 import {
   InMemoryProvisioner,
+  K8sSessionProvisioner,
+  KubernetesObjectApiClient,
   type SessionProvisioner,
 } from "@sentropic/remote-k8s-orchestrator";
 import { REMOTE_PROTOCOL_VERSION } from "@sentropic/remote-protocol";
@@ -68,8 +70,20 @@ export function createControlPlane(
   return app;
 }
 
+export function provisionerFromEnv(): SessionProvisioner {
+  const namespace = process.env.K8S_NAMESPACE;
+  if (!namespace) return new InMemoryProvisioner();
+  const overrides: { namespace: string; image?: string } = { namespace };
+  if (process.env.SESSION_AGENT_IMAGE)
+    overrides.image = process.env.SESSION_AGENT_IMAGE;
+  return new K8sSessionProvisioner(
+    KubernetesObjectApiClient.fromDefault(),
+    overrides,
+  );
+}
+
 export async function startControlPlane(): Promise<void> {
-  const app = createControlPlane();
+  const app = createControlPlane({ provisioner: provisionerFromEnv() });
   const port = Number(process.env.PORT ?? "8080");
   const hostname = process.env.HOST ?? "0.0.0.0";
 
