@@ -4,7 +4,12 @@ import { pathToFileURL } from "node:url";
 
 import { Command } from "commander";
 
-import { attach, createRemoteSession } from "./attach.js";
+import {
+  attach,
+  createRemoteSession,
+  listRemoteSessions,
+  stopRemoteSession,
+} from "./attach.js";
 import { collectProfileAuth } from "./auth-bundle.js";
 import { isCliProfile } from "./profiles.js";
 import { run } from "./run.js";
@@ -13,7 +18,12 @@ export const packageName = "@sentropic/remote-cli";
 
 export { run } from "./run.js";
 export type { RunOptions, RunResult } from "./run.js";
-export { attach, createRemoteSession } from "./attach.js";
+export {
+  attach,
+  createRemoteSession,
+  listRemoteSessions,
+  stopRemoteSession,
+} from "./attach.js";
 export type { AttachOptions, AttachResult } from "./attach.js";
 export { collectProfileAuth } from "./auth-bundle.js";
 export type { AuthBundle } from "./auth-bundle.js";
@@ -124,6 +134,38 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const session = await attach({ baseUrl: url, sessionId });
       await session.finished;
     });
+
+  program
+    .command("ls <url>")
+    .description("List sessions on a remote control-plane")
+    .action(async (url: string) => {
+      const sessions = await listRemoteSessions(url);
+      if (sessions.length === 0) {
+        process.stderr.write("[remote] no sessions\n");
+        return;
+      }
+      const rows = sessions.map((s) =>
+        [s.id, s.profile, s.target, s.createdAt, s.displayName ?? ""].join(
+          "\t",
+        ),
+      );
+      process.stdout.write(
+        ["ID\tPROFILE\tTARGET\tCREATED\tDISPLAY", ...rows].join("\n") + "\n",
+      );
+    });
+
+  program
+    .command("stop <url> <sessionId>")
+    .description("Stop a session on a remote control-plane")
+    .option("--reason <reason>", "reason recorded with the stop")
+    .action(
+      async (url: string, sessionId: string, opts: { reason?: string }) => {
+        const result = await stopRemoteSession(url, sessionId, opts.reason);
+        process.stderr.write(
+          `[remote] stop ${result.accepted ? "accepted" : "rejected"} for ${sessionId}\n`,
+        );
+      },
+    );
 
   await program.parseAsync([...argv]);
   const code = process.exitCode;

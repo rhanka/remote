@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { attach, createRemoteSession } from "./attach.js";
+import {
+  attach,
+  createRemoteSession,
+  listRemoteSessions,
+  stopRemoteSession,
+} from "./attach.js";
 
 type Captured = {
   readonly url: string;
@@ -153,6 +158,52 @@ describe("attach", () => {
     expect(input!.method).toBe("POST");
     const body = JSON.parse(input!.body as string) as { data: string };
     expect(body.data).toBe("ls\n");
+  });
+
+  it("listRemoteSessions GETs /sessions and returns the array", async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          sessions: [
+            {
+              id: "sess-1",
+              profile: "codex",
+              target: "k3s",
+              createdAt: "now",
+            },
+            {
+              id: "sess-2",
+              profile: "claude-code",
+              target: "k3s",
+              createdAt: "now",
+            },
+          ],
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    const sessions = await listRemoteSessions(
+      "http://localhost:8080",
+      fetchImpl,
+    );
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]!.id).toBe("sess-1");
+  });
+
+  it("stopRemoteSession POSTs the reason and returns accepted", async () => {
+    let body: string | undefined;
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      body = init?.body as string;
+      return new Response(JSON.stringify({ accepted: true }), { status: 200 });
+    }) as typeof fetch;
+    const result = await stopRemoteSession(
+      "http://localhost:8080",
+      "sess-zzz",
+      "uat",
+      fetchImpl,
+    );
+    expect(result.accepted).toBe(true);
+    const parsed = JSON.parse(body!) as { reason: string };
+    expect(parsed.reason).toBe("uat");
   });
 
   it("createRemoteSession posts profile + target and returns the new id", async () => {

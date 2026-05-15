@@ -147,6 +147,61 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
   return { close, finished };
 }
 
+export async function listRemoteSessions(
+  baseUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<
+  ReadonlyArray<{
+    id: string;
+    profile: string;
+    target: string;
+    createdAt: string;
+    displayName?: string;
+  }>
+> {
+  const response = await fetchImpl(joinUrl(baseUrl, "/sessions"));
+  if (!response.ok) {
+    throw new Error(
+      `listRemoteSessions: ${response.status} ${response.statusText}`,
+    );
+  }
+  const json = (await response.json()) as {
+    sessions: Array<{
+      id: string;
+      profile: string;
+      target: string;
+      createdAt: string;
+      displayName?: string;
+    }>;
+  };
+  return json.sessions;
+}
+
+export async function stopRemoteSession(
+  baseUrl: string,
+  sessionId: string,
+  reason?: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ accepted: boolean }> {
+  const body: Record<string, unknown> = {};
+  if (reason) body.reason = reason;
+  const response = await fetchImpl(
+    joinUrl(baseUrl, `/sessions/${sessionId}/stop`),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `stopRemoteSession: ${response.status} ${response.statusText}`,
+    );
+  }
+  const json = (await response.json()) as { accepted: boolean };
+  return { accepted: json.accepted };
+}
+
 export async function createRemoteSession(
   baseUrl: string,
   body: {
