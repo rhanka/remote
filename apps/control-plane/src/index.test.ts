@@ -230,6 +230,62 @@ describe("control plane", () => {
     ]);
   });
 
+  it("forwards terminal.input through the agent registry to the connected agent", async () => {
+    const sent: RemoteEventEnvelope[] = [];
+    const { AgentRegistry } = await import("./agents/registry.js");
+    const registry = new AgentRegistry();
+    const app = createControlPlane({ registry });
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    registry.register(id, {
+      send(envelope) {
+        sent.push(envelope);
+      },
+      close() {},
+    });
+
+    const response = await app.request(`/sessions/${id}/terminal/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        terminalId: "term-1",
+        data: "ls\n",
+        encoding: "utf8",
+      }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.type).toBe("terminal.input");
+    expect(sent[0]!.sessionId).toBe(id);
+    expect(sent[0]!.payload).toMatchObject({
+      terminalId: "term-1",
+      data: "ls\n",
+      encoding: "utf8",
+    });
+  });
+
+  it("returns terminal.unavailable when no agent is connected", async () => {
+    const app = createControlPlane();
+    const created = await createSession(app);
+    const response = await app.request(
+      `/sessions/${created.session.id}/terminal/input`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          terminalId: "term-x",
+          data: "ls\n",
+          encoding: "utf8",
+        }),
+      },
+    );
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.code).toBe("terminal.unavailable");
+  });
+
   it("returns session.not_found for unknown ids", async () => {
     const app = createControlPlane();
     const response = await app.request("/sessions/missing");

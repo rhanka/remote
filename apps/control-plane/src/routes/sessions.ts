@@ -4,9 +4,12 @@ import {
   type SessionProvisioner,
 } from "@sentropic/remote-k8s-orchestrator";
 import {
+  REMOTE_PROTOCOL_VERSION,
+  REMOTE_SCHEMA_VERSION,
   createSessionRequestSchema,
   sendInstructionRequestSchema,
   stopSessionRequestSchema,
+  terminalInputSchema,
   type CreateSessionRequest,
   type CreateSessionResponse,
   type GetSessionResponse,
@@ -22,6 +25,7 @@ import type { Ajv } from "ajv";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 
+import { AgentRegistry } from "../agents/registry.js";
 import { SessionEventBus } from "../sessions/events.js";
 import { SessionStore } from "../sessions/store.js";
 import {
@@ -74,17 +78,52 @@ function notFound(c: { json: (body: unknown, status: number) => Response }) {
   );
 }
 
+export type SessionsRouterDeps = {
+  readonly ajv: Ajv;
+  readonly store?: SessionStore;
+  readonly bus?: SessionEventBus;
+  readonly provisioner?: SessionProvisioner;
+  readonly registry?: AgentRegistry;
+};
+
 export function createSessionsRouter(
-  ajv: Ajv,
-  store: SessionStore = new SessionStore(),
-  bus: SessionEventBus = new SessionEventBus(),
-  provisioner: SessionProvisioner = new InMemoryProvisioner(),
+  deps: SessionsRouterDeps,
 ): Hono<{ Variables: ValidationVars }> {
+  const ajv = deps.ajv;
+  const store = deps.store ?? new SessionStore();
+  const bus = deps.bus ?? new SessionEventBus();
+  const provisioner = deps.provisioner ?? new InMemoryProvisioner();
+  const registry = deps.registry ?? new AgentRegistry();
+
   const router = new Hono<{ Variables: ValidationVars }>();
 
   const emit: ProvisionerEmit = (sessionId, type, payload) => {
     bus.publish(sessionId, type, payload);
   };
+
+  const controlPlaneActor = {
+    id: "control-plane",
+    kind: "control-plane" as const,
+    displayName: "Control Plane",
+  };
+
+  function buildTerminalInputEnvelope(
+    sessionId: string,
+    payload: Record<string, unknown>,
+  ): RemoteEventEnvelope {
+    return {
+      protocolVersion: REMOTE_PROTOCOL_VERSION,
+      schemaVersion: REMOTE_SCHEMA_VERSION,
+      eventId: randomId("evt"),
+      sessionId,
+      sequence: 0,
+      type: "terminal.input",
+      occurredAt: new Date().toISOString(),
+      correlationId: `op-${randomId("input")}`,
+      actor: controlPlaneActor,
+      payload,
+    };
+  }
 
   router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
     const req = validatedBody<CreateSessionRequest>(c);
@@ -149,6 +188,29 @@ export function createSessionsRouter(
         accepted: true,
       };
       return c.json(response, 202);
+    },
+  );
+
+  router.post(
+    "/:id/terminal/input",
+    validateJsonBody(ajv, terminalInputSchema),
+    (c) => {
+      const id = c.req.param("id");
+      if (!store.get(id)) return notFound(c);
+      const body = validatedBody<Record<string, unknown>>(c);
+      const envelope = buildTerminalInputEnvelope(id, body);
+      const delivered = registry.send(id, envelope);
+      if (!delivered) {
+        return c.json(
+          {
+            code: "terminal.unavailable",
+            message: "No session-agent connected",
+            retryable: true,
+          },
+          503,
+        );
+      }
+      return c.json({ accepted: true }, 202);
     },
   );
 
