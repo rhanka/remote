@@ -8,6 +8,7 @@ import {
 } from "@sentropic/remote-k8s-orchestrator";
 import { REMOTE_PROTOCOL_VERSION } from "@sentropic/remote-protocol";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 
 import { AgentRegistry } from "./agents/registry.js";
 import { buildOpenApiDocument } from "./openapi.js";
@@ -42,6 +43,18 @@ export function createControlPlane(
   const provisioner = options.provisioner ?? new InMemoryProvisioner();
   const registry = options.registry ?? new AgentRegistry();
   const nodeWs = createNodeWebSocket({ app });
+
+  // Permissive CORS for the POC operator-UI. Tighten origin allowlist before
+  // exposing the control-plane to a public Ingress.
+  app.use(
+    "*",
+    cors({
+      origin: (origin) => origin ?? "*",
+      allowMethods: ["GET", "POST", "OPTIONS"],
+      allowHeaders: ["Content-Type", "Authorization"],
+      credentials: false,
+    }),
+  );
 
   app.get("/healthz", (c) =>
     c.json({
