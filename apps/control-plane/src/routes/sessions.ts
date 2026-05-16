@@ -10,6 +10,7 @@ import {
   sendInstructionRequestSchema,
   stopSessionRequestSchema,
   terminalInputSchema,
+  terminalResizeSchema,
   type CreateSessionRequest,
   type CreateSessionResponse,
   type GetSessionResponse,
@@ -125,6 +126,24 @@ export function createSessionsRouter(
     };
   }
 
+  function buildTerminalResizeEnvelope(
+    sessionId: string,
+    payload: Record<string, unknown>,
+  ): RemoteEventEnvelope {
+    return {
+      protocolVersion: REMOTE_PROTOCOL_VERSION,
+      schemaVersion: REMOTE_SCHEMA_VERSION,
+      eventId: randomId("evt"),
+      sessionId,
+      sequence: 0,
+      type: "terminal.resized",
+      occurredAt: new Date().toISOString(),
+      correlationId: `op-${randomId("resize")}`,
+      actor: controlPlaneActor,
+      payload,
+    };
+  }
+
   router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
     const req = validatedBody<
       CreateSessionRequest & {
@@ -206,6 +225,29 @@ export function createSessionsRouter(
       if (!store.get(id)) return notFound(c);
       const body = validatedBody<Record<string, unknown>>(c);
       const envelope = buildTerminalInputEnvelope(id, body);
+      const delivered = registry.send(id, envelope);
+      if (!delivered) {
+        return c.json(
+          {
+            code: "terminal.unavailable",
+            message: "No session-agent connected",
+            retryable: true,
+          },
+          503,
+        );
+      }
+      return c.json({ accepted: true }, 202);
+    },
+  );
+
+  router.post(
+    "/:id/terminal/resize",
+    validateJsonBody(ajv, terminalResizeSchema),
+    (c) => {
+      const id = c.req.param("id");
+      if (!store.get(id)) return notFound(c);
+      const body = validatedBody<Record<string, unknown>>(c);
+      const envelope = buildTerminalResizeEnvelope(id, body);
       const delivered = registry.send(id, envelope);
       if (!delivered) {
         return c.json(

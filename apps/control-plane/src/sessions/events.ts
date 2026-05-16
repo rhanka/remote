@@ -16,6 +16,8 @@ const controlPlaneActor: Actor = {
   displayName: "Control Plane",
 };
 
+const DEFAULT_REPLAY_CAPACITY = 128;
+
 function randomId(prefix: string): string {
   const random = Math.floor(Math.random() * 1e12)
     .toString(36)
@@ -23,17 +25,44 @@ function randomId(prefix: string): string {
   return `${prefix}-${random}`;
 }
 
+export type SessionEventBusOptions = {
+  /** Last-N envelopes kept per session so late subscribers can backfill. */
+  readonly replayCapacity?: number;
+};
+
 export class SessionEventBus {
   private readonly subscribers = new Map<string, Set<EventSubscriber>>();
   private readonly sequences = new Map<string, number>();
+  private readonly history = new Map<string, RemoteEventEnvelope[]>();
+  private readonly replayCapacity: number;
 
-  subscribe(sessionId: string, subscriber: EventSubscriber): () => void {
+  constructor(options: SessionEventBusOptions = {}) {
+    this.replayCapacity = options.replayCapacity ?? DEFAULT_REPLAY_CAPACITY;
+  }
+
+  /**
+   * Subscribe to a session's event stream. When `replay` is true (default),
+   * the subscriber receives the buffered backlog of envelopes for the
+   * session synchronously before any future event.
+   */
+  subscribe(
+    sessionId: string,
+    subscriber: EventSubscriber,
+    options: { replay?: boolean } = {},
+  ): () => void {
     let set = this.subscribers.get(sessionId);
     if (!set) {
       set = new Set();
       this.subscribers.set(sessionId, set);
     }
     set.add(subscriber);
+
+    if (options.replay !== false) {
+      const past = this.history.get(sessionId);
+      if (past) {
+        for (const envelope of past) subscriber(envelope);
+      }
+    }
 
     return () => {
       set?.delete(subscriber);
@@ -64,11 +93,29 @@ export class SessionEventBus {
       payload,
     };
 
+    if (this.replayCapacity > 0) {
+      let buffer = this.history.get(sessionId);
+      if (!buffer) {
+        buffer = [];
+        this.history.set(sessionId, buffer);
+      }
+      buffer.push(envelope);
+      if (buffer.length > this.replayCapacity) {
+        buffer.splice(0, buffer.length - this.replayCapacity);
+      }
+    }
+
     const set = this.subscribers.get(sessionId);
     if (set) {
       for (const subscriber of set) subscriber(envelope);
     }
 
     return envelope;
+  }
+
+  /** Drop all buffered events for a session (used when a session is stopped). */
+  forget(sessionId: string): void {
+    this.history.delete(sessionId);
+    this.sequences.delete(sessionId);
   }
 }

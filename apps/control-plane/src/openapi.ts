@@ -139,6 +139,40 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           },
         },
       },
+      "/sessions/{id}/terminal/resize": {
+        post: {
+          summary: "Propagate a terminal resize to the session-agent",
+          parameters: [
+            {
+              name: "id",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
+            },
+          ],
+          requestBody: jsonBody(ref("TerminalResize")),
+          responses: {
+            "202": {
+              description: "Resize accepted",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["accepted"],
+                    properties: { accepted: { type: "boolean" } },
+                  },
+                },
+              },
+            },
+            "400": validationError,
+            "404": notFoundError,
+            "503": jsonResponse(
+              "No session-agent connected",
+              ref("RemoteError"),
+            ),
+          },
+        },
+      },
       "/sessions/{id}/events": {
         get: {
           summary: "Stream protocol events for a session as SSE",

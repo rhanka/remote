@@ -106,11 +106,14 @@ describe("control plane", () => {
     const reader = sseResponse.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    // Read until we receive an instruction.received event (the bus now
+    // replays the lifecycle backlog so the first chunk is not the one we
+    // assert against).
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      if (buffer.includes("\n\n")) break;
+      if (buffer.includes("session.instruction.received")) break;
     }
 
     const instructionResponse = await instructionPromise;
@@ -118,15 +121,19 @@ describe("control plane", () => {
     controller.abort();
     await reader.cancel().catch(() => {});
 
-    const dataLine = buffer
+    const envelopes = buffer
       .split("\n")
-      .find((line) => line.startsWith("data: "));
-    expect(dataLine).toBeDefined();
-    const envelope = JSON.parse(dataLine!.slice(6)) as RemoteEventEnvelope;
-    expect(strictAjv().compile(remoteEventEnvelopeSchema)(envelope)).toBe(true);
-    expect(envelope.type).toBe("session.instruction.received");
-    expect(envelope.sessionId).toBe(id);
-    expect((envelope.payload as { instruction: string }).instruction).toBe(
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as RemoteEventEnvelope);
+    expect(envelopes.length).toBeGreaterThan(0);
+    const validate = strictAjv().compile(remoteEventEnvelopeSchema);
+    for (const envelope of envelopes) expect(validate(envelope)).toBe(true);
+    const instruction = envelopes.find(
+      (envelope) => envelope.type === "session.instruction.received",
+    );
+    expect(instruction).toBeDefined();
+    expect(instruction!.sessionId).toBe(id);
+    expect((instruction!.payload as { instruction: string }).instruction).toBe(
       "echo hello",
     );
   });
@@ -264,6 +271,74 @@ describe("control plane", () => {
       data: "ls\n",
       encoding: "utf8",
     });
+  });
+
+  it("forwards terminal.resize to the connected agent", async () => {
+    const sent: RemoteEventEnvelope[] = [];
+    const { AgentRegistry } = await import("./agents/registry.js");
+    const registry = new AgentRegistry();
+    const app = createControlPlane({ registry });
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    registry.register(id, {
+      send(envelope) {
+        sent.push(envelope);
+      },
+      close() {},
+    });
+
+    const response = await app.request(`/sessions/${id}/terminal/resize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        terminalId: "term-1",
+        columns: 132,
+        rows: 50,
+      }),
+    });
+
+    expect(response.status).toBe(202);
+    const resize = sent.find(
+      (envelope) => envelope.type === "terminal.resized",
+    );
+    expect(resize).toBeDefined();
+    expect(resize!.payload).toMatchObject({
+      terminalId: "term-1",
+      columns: 132,
+      rows: 50,
+    });
+  });
+
+  it("replays buffered events to a late SSE subscriber", async () => {
+    const app = createControlPlane();
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    // Wait a tick so the create-time lifecycle event lands in the buffer.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const controller = new AbortController();
+    const sseResponse = await app.fetch(
+      new Request(`http://localhost/sessions/${id}/events`, {
+        signal: controller.signal,
+      }),
+    );
+    expect(sseResponse.status).toBe(200);
+
+    const reader = sseResponse.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.includes("session.lifecycle.changed")) break;
+    }
+    controller.abort();
+    await reader.cancel().catch(() => {});
+
+    expect(buffer).toContain("session.lifecycle.changed");
   });
 
   it("returns terminal.unavailable when no agent is connected", async () => {
