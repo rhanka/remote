@@ -63,6 +63,14 @@ curl http://localhost:8080/healthz
 remote codex --remote http://localhost:8080
 ```
 
+Smoke automatisé live :
+
+```bash
+KUBECONFIG=~/.kube/poc.yaml make scw-port-forward
+# Dans un autre shell :
+REMOTE_E2E_BASE_URL=http://localhost:8080 npm run test:e2e:live
+```
+
 ## Étape 4 : Vérifier le quota et l'usage
 
 ```bash
