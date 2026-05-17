@@ -133,7 +133,7 @@ kubectl -n sentropic-remote get pods,pvc,secrets | grep <sid>
 - **Gemini auth refresh** : pas de commande de statut non interactive fiable observée localement ; pour l'instant on continue à bundler `~/.gemini/oauth_creds.json` / `~/.gemini/google_accounts.json` et l'UAT Gemini doit confirmer le comportement.
 - **Claude paste flow** : sur gcloud console ça a marché ; à confirmer ici via l'UAT scénario 5.
 - **Limites de fichiers bundlés** : seulement les paths connus dans `PROFILE_AUTH_FILES` (`packages/remote-cli/src/auth-bundle.ts`). Si un CLI utilise d'autres paths, l'enrichir.
-- **Pas de TTY resize remote → agent** : un futur `POST /sessions/:id/terminal/resize` est planifié.
+- **TTY resize remote → agent** : l'Operator UI et `remote attach` propagent maintenant `POST /sessions/:id/terminal/resize`; à valider visuellement pendant les UAT Codex/Claude/Gemini.
 - **Pas de réplay d'events** : un subscriber SSE arrivé tard manque les premiers events lifecycle.
 
 ## Cleanup

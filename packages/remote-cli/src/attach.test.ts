@@ -66,8 +66,12 @@ function stubStdin(): NodeJS.ReadStream & {
   };
 }
 
-function stubStdout(): NodeJS.WriteStream & { written: string[] } {
+function stubStdout(): NodeJS.WriteStream & {
+  emit: (event: string) => void;
+  written: string[];
+} {
   const written: string[] = [];
+  const resizeListeners: Array<() => void> = [];
   return {
     columns: 100,
     rows: 30,
@@ -75,11 +79,27 @@ function stubStdout(): NodeJS.WriteStream & { written: string[] } {
       written.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
       return true;
     },
-    on() {
+    on(event: string, listener: () => void) {
+      if (event === "resize") resizeListeners.push(listener);
       return this as unknown as NodeJS.WriteStream;
     },
+    off(event: string, listener: () => void) {
+      if (event === "resize") {
+        const index = resizeListeners.indexOf(listener);
+        if (index >= 0) resizeListeners.splice(index, 1);
+      }
+      return this as unknown as NodeJS.WriteStream;
+    },
+    emit(event: string) {
+      if (event === "resize")
+        for (const listener of [...resizeListeners]) listener();
+      return true;
+    },
     written,
-  } as unknown as NodeJS.WriteStream & { written: string[] };
+  } as unknown as NodeJS.WriteStream & {
+    emit: (event: string) => void;
+    written: string[];
+  };
 }
 
 describe("attach", () => {
@@ -205,6 +225,53 @@ describe("attach", () => {
     expect(input!.method).toBe("POST");
     const body = JSON.parse(input!.body as string) as { data: string };
     expect(body.data).toBe("ls\n");
+  });
+
+  it("forwards terminal resize through POST /terminal/resize", async () => {
+    const stdout = stubStdout();
+    const stdin = stubStdin();
+    const calls: Captured[] = [];
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({
+        url: url.toString(),
+        method: init?.method ?? "GET",
+        body: init?.body,
+      });
+      if (url.toString().endsWith("/events")) {
+        return new Response(streamFromString(""), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response('{"accepted":true}', { status: 202 });
+    }) as typeof fetch;
+
+    const session = await attach({
+      baseUrl: "http://localhost:8080",
+      sessionId: "sess-resize",
+      stdin,
+      stdout,
+      fetchImpl,
+    });
+
+    stdout.columns = 132;
+    stdout.rows = 50;
+    stdout.emit("resize");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await session.close();
+
+    const resize = calls.find((call) => call.url.endsWith("/terminal/resize"));
+    expect(resize).toBeDefined();
+    expect(resize!.method).toBe("POST");
+    const body = JSON.parse(resize!.body as string) as {
+      columns: number;
+      rows: number;
+    };
+    expect(body).toMatchObject({
+      terminalId: "operator",
+      columns: 132,
+      rows: 50,
+    });
   });
 
   it("listRemoteSessions GETs /sessions and returns the array", async () => {

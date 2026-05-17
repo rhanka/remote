@@ -95,11 +95,36 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
     }
   };
 
+  const sendResize = async () => {
+    const columns = Math.max(1, stdout.columns ?? 80);
+    const rows = Math.max(1, stdout.rows ?? 24);
+    try {
+      await doFetch(
+        joinUrl(baseUrl, `/sessions/${sessionId}/terminal/resize`),
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            terminalId: "operator",
+            columns,
+            rows,
+          }),
+        },
+      );
+    } catch (error) {
+      stderr.write(`[remote] resize failed: ${String(error)}\n`);
+    }
+  };
+
   const onStdin = (chunk: Buffer | string) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
     void sendInput(text);
   };
+  const onResize = () => {
+    void sendResize();
+  };
   stdin.on("data", onStdin);
+  stdout.on?.("resize", onResize);
 
   let closed = false;
   const close = async () => {
@@ -107,6 +132,7 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
     closed = true;
     controller.abort();
     stdin.off?.("data", onStdin);
+    stdout.off?.("resize", onResize);
     if (stdin.isTTY) stdin.setRawMode?.(wasRaw);
     stdin.pause();
     finishedResolve();
