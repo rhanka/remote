@@ -14,6 +14,7 @@ Au premier push, les images `ghcr.io/rhanka/sentropic-remote-{control-plane,sess
 ### Option A — Rendre publiques (recommandé pour POC)
 
 Via UI :
+
 - <https://github.com/users/rhanka/packages/container/sentropic-remote-control-plane/settings> → bas de page → **Change visibility** → Public
 - pareil pour `sentropic-remote-session-agent`
 

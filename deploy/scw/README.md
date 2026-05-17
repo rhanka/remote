@@ -5,7 +5,7 @@ This directory ships **only the tenant-owned manifests** for the
 
 - `10-rbac.yaml` — ServiceAccount + Role + RoleBinding (namespace-scoped, so
   the control-plane Pod can create/delete Pods, PVCs and Secrets for sessions
-  *inside its namespace only*).
+  _inside its namespace only_).
 - `20-control-plane.yaml` — Deployment + ClusterIP Service for the
   control-plane.
 - `30-ingress.yaml` — optional Traefik Ingress (apply with `SCW_INGRESS=1`).
