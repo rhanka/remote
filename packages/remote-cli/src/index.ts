@@ -10,6 +10,7 @@ import {
   listRemoteSessions,
   stopRemoteSession,
 } from "./attach.js";
+import { AuthRefreshError, ensureProfileAuthFresh } from "./auth-refresh.js";
 import { collectProfileAuth } from "./auth-bundle.js";
 import { isCliProfile } from "./profiles.js";
 import { run } from "./run.js";
@@ -25,6 +26,7 @@ export {
   stopRemoteSession,
 } from "./attach.js";
 export type { AttachOptions, AttachResult } from "./attach.js";
+export { AuthRefreshError, ensureProfileAuthFresh } from "./auth-refresh.js";
 export { collectProfileAuth } from "./auth-bundle.js";
 export type { AuthBundle } from "./auth-bundle.js";
 export {
@@ -39,6 +41,7 @@ type ProfileOpts = {
   port?: number;
   remote?: string;
   auth?: boolean;
+  authRefresh?: boolean;
 };
 
 async function runProfile(
@@ -48,6 +51,12 @@ async function runProfile(
   if (opts.remote) {
     let credentials: Readonly<Record<string, string>> | undefined;
     if (opts.auth !== false && isCliProfile(profileName)) {
+      if (opts.authRefresh !== false) {
+        const result = await ensureProfileAuthFresh(profileName);
+        if (result.checked) {
+          process.stderr.write(`[remote] auth status ok: ${result.command}\n`);
+        }
+      }
       const bundle = await collectProfileAuth(profileName);
       if (Object.keys(bundle).length > 0) credentials = bundle;
     }
@@ -118,6 +127,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "--no-auth",
         "skip bundling local credentials when running with --remote",
       )
+      .option(
+        "--no-auth-refresh",
+        "skip local auth status preflight before bundling credentials",
+      )
       .action(async (opts: ProfileOpts) => {
         await runProfile(profileName, opts);
       });
@@ -184,7 +197,11 @@ function isEntryPoint(): boolean {
 
 if (isEntryPoint()) {
   main(process.argv).catch((error: unknown) => {
-    console.error("[remote] fatal:", error);
+    if (error instanceof AuthRefreshError) {
+      console.error(error.message);
+    } else {
+      console.error("[remote] fatal:", error);
+    }
     process.exitCode = 1;
   });
 }

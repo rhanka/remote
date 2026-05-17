@@ -57,6 +57,7 @@ remote codex --remote http://localhost:8080
 
 **Attendu :**
 
+- `[remote] auth status ok: codex login status`.
 - `[remote] bundled N auth file(s) for codex` (N = 2 si `~/.codex/auth.json` et `~/.codex/config.toml` existent).
 - `[remote] attached to http://localhost:8080/sessions/sess-xxx`.
 - Pod `session-sess-xxx` créé (`kubectl -n sentropic-remote get pods` dans un 3e shell).
@@ -128,7 +129,8 @@ kubectl -n sentropic-remote get pods,pvc,secrets | grep <sid>
 
 ## Limitations connues
 
-- **OAuth callback localhost** : codex/gemini ne peuvent pas re-authentifier dans le Pod sans port-forward inverse. Workaround : pré-provisioner les credentials via `--remote` (par défaut). Si tes tokens locaux sont expirés, refresh d'abord avec `codex login` en local, puis relance.
+- **OAuth callback localhost** : codex/gemini ne peuvent pas re-authentifier dans le Pod sans port-forward inverse. Workaround : pré-provisioner les credentials via `--remote` (par défaut). `remote codex --remote ...` lance maintenant `codex login status` localement avant de bundler les fichiers, et `remote claude --remote ...` lance `claude auth status`. Si le preflight échoue, relance `codex login` ou `claude auth login` localement puis réessaie. Pour bypasser le preflight : `--no-auth-refresh`.
+- **Gemini auth refresh** : pas de commande de statut non interactive fiable observée localement ; pour l'instant on continue à bundler `~/.gemini/oauth_creds.json` / `~/.gemini/google_accounts.json` et l'UAT Gemini doit confirmer le comportement.
 - **Claude paste flow** : sur gcloud console ça a marché ; à confirmer ici via l'UAT scénario 5.
 - **Limites de fichiers bundlés** : seulement les paths connus dans `PROFILE_AUTH_FILES` (`packages/remote-cli/src/auth-bundle.ts`). Si un CLI utilise d'autres paths, l'enrichir.
 - **Pas de TTY resize remote → agent** : un futur `POST /sessions/:id/terminal/resize` est planifié.
