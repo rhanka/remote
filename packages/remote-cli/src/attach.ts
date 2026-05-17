@@ -122,7 +122,12 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
         const { events, rest } = parseSseEvents(buffer);
         buffer = rest;
         for (const ev of events) {
-          if (ev.event && ev.event !== "terminal.output") continue;
+          if (
+            ev.event &&
+            ev.event !== "terminal.output" &&
+            ev.event !== "terminal.exited"
+          )
+            continue;
           try {
             const envelope = JSON.parse(ev.data) as RemoteEventEnvelope;
             if (envelope.type === "terminal.output") {

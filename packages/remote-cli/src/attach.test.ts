@@ -122,6 +122,53 @@ describe("attach", () => {
     expect(calls[0]!.url).toBe("http://localhost:8080/sessions/sess-1/events");
   });
 
+  it("closes on terminal.exited even when the SSE stream stays open", async () => {
+    const stdout = stubStdout();
+    const stdin = stubStdin();
+    const encoder = new TextEncoder();
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    const fetchImpl = (async (url: string | URL) => {
+      if (url.toString().endsWith("/events")) {
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response('{"accepted":true}', { status: 202 });
+    }) as typeof fetch;
+
+    const session = await attach({
+      baseUrl: "http://localhost:8080",
+      sessionId: "sess-exit",
+      stdin,
+      stdout,
+      fetchImpl,
+    });
+    streamController.enqueue(
+      encoder.encode(
+        ssePayload([
+          {
+            type: "terminal.exited",
+            payload: { exitCode: 0 },
+          },
+        ]),
+      ),
+    );
+
+    const finished = await Promise.race([
+      session.finished.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+    ]);
+    if (!finished) await session.close();
+
+    expect(finished).toBe(true);
+  });
+
   it("forwards stdin data through POST /terminal/input", async () => {
     const stdout = stubStdout();
     const stdin = stubStdin();
