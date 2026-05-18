@@ -62,6 +62,20 @@ Shell A :
 make port-forward
 ```
 
+Shell B (smoke non interactif, recommandé avant TUI) :
+
+```bash
+remote smoke codex --remote http://localhost:8080
+remote smoke claude --remote http://localhost:8080
+```
+
+**Attendu :**
+
+- création d'une session remote avec credentials bundlés ;
+- réception de `terminal.opened` depuis le Pod ;
+- stop automatique de la session ;
+- sortie sans contenu de secret : `profile`, `session`, `terminal`, `shell`, `stopped: true`.
+
 Shell B (interactif) :
 
 ```bash

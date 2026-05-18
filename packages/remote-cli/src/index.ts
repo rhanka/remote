@@ -22,6 +22,7 @@ import {
 } from "./auth-bundle.js";
 import { coerceCliProfileName, isCliProfile } from "./profiles.js";
 import { run } from "./run.js";
+import { smokeRemoteProfile } from "./smoke.js";
 
 export const packageName = "@sentropic/remote-cli";
 
@@ -53,6 +54,11 @@ export {
   withResume,
   type ProfileConfig,
 } from "./profiles.js";
+export { smokeRemoteProfile } from "./smoke.js";
+export type {
+  SmokeRemoteProfileOptions,
+  SmokeRemoteProfileResult,
+} from "./smoke.js";
 
 type ProfileOpts = {
   resume?: string;
@@ -63,6 +69,14 @@ type ProfileOpts = {
 };
 
 type AuthDiagnosticOpts = {
+  authRefresh?: boolean;
+};
+
+type SmokeOpts = {
+  remote: string;
+  target?: "k3s" | "scaleway-kapsule" | "gke";
+  timeout?: number;
+  auth?: boolean;
   authRefresh?: boolean;
 };
 
@@ -192,6 +206,55 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       for (const file of result.bundledFiles) {
         process.stdout.write(`- ${file}\n`);
       }
+    });
+
+  program
+    .command("smoke <profile>")
+    .description(
+      "Create a remote profile session, wait for terminal.opened, then stop it",
+    )
+    .requiredOption(
+      "--remote <url>",
+      "remote control-plane base URL, for example http://localhost:8080",
+    )
+    .option(
+      "--target <target>",
+      "remote session target: k3s, scaleway-kapsule, or gke",
+      "k3s",
+    )
+    .option(
+      "--timeout <ms>",
+      "milliseconds to wait for terminal.opened",
+      (value) => Number(value),
+      120_000,
+    )
+    .option("--no-auth", "skip bundling local credentials")
+    .option(
+      "--no-auth-refresh",
+      "skip local auth status preflight before bundling credentials",
+    )
+    .action(async (profileName: string, opts: SmokeOpts) => {
+      const profile = coerceCliProfileName(profileName);
+      if (!profile) {
+        throw new Error(
+          `Unknown profile "${profileName}". Known: codex, claude, claude-code, gemini, gemini-cli, opencode, shell`,
+        );
+      }
+      const result = await smokeRemoteProfile({
+        profile,
+        baseUrl: opts.remote,
+        target: opts.target ?? "k3s",
+        timeoutMs: opts.timeout ?? 120_000,
+        ...(opts.auth !== undefined ? { auth: opts.auth } : {}),
+        ...(opts.authRefresh !== undefined
+          ? { authRefresh: opts.authRefresh }
+          : {}),
+      });
+      process.stdout.write(`profile: ${result.profile}\n`);
+      process.stdout.write(`session: ${result.sessionId}\n`);
+      process.stdout.write(`terminal: ${result.terminalId}\n`);
+      process.stdout.write(`shell: ${result.shell}\n`);
+      process.stdout.write("stopped: true\n");
     });
 
   program
