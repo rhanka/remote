@@ -43,6 +43,19 @@ remote codex --resume <sid>   # reprend une session codex existante (--continue 
 
 ### 2. Mode remote (Pod k3s, credentials auto-bundlés)
 
+Préflight local sans création de Pod :
+
+```bash
+remote auth codex
+remote auth claude
+```
+
+**Attendu :**
+
+- `auth status: ok: ...`
+- `bundled files: N` avec N > 0 pour Codex/Claude.
+- Aucun contenu de secret affiché.
+
 Shell A :
 
 ```bash

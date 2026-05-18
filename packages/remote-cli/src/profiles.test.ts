@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { isCliProfile, resolveProfile, withResume } from "./profiles.js";
+import {
+  coerceCliProfileName,
+  isCliProfile,
+  resolveProfile,
+  withResume,
+} from "./profiles.js";
 
 describe("profiles", () => {
   it("resolves known profiles to their binary command", () => {
@@ -26,5 +31,12 @@ describe("profiles", () => {
   it("isCliProfile narrows known names", () => {
     expect(isCliProfile("codex")).toBe(true);
     expect(isCliProfile("not-real")).toBe(false);
+  });
+
+  it("coerces CLI aliases to canonical profile names", () => {
+    expect(coerceCliProfileName("claude")).toBe("claude-code");
+    expect(coerceCliProfileName("gemini")).toBe("gemini-cli");
+    expect(coerceCliProfileName("codex")).toBe("codex");
+    expect(coerceCliProfileName("not-real")).toBeUndefined();
   });
 });

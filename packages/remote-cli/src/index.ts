@@ -10,13 +10,17 @@ import {
   listRemoteSessions,
   stopRemoteSession,
 } from "./attach.js";
+import {
+  inspectProfileAuth,
+  type AuthDiagnosticsStatus,
+} from "./auth-diagnostics.js";
 import { AuthRefreshError, ensureProfileAuthFresh } from "./auth-refresh.js";
 import {
   AuthBundleMissingError,
   assertRequiredAuthBundle,
   collectProfileAuth,
 } from "./auth-bundle.js";
-import { isCliProfile } from "./profiles.js";
+import { coerceCliProfileName, isCliProfile } from "./profiles.js";
 import { run } from "./run.js";
 
 export const packageName = "@sentropic/remote-cli";
@@ -30,6 +34,11 @@ export {
   stopRemoteSession,
 } from "./attach.js";
 export type { AttachOptions, AttachResult } from "./attach.js";
+export { inspectProfileAuth } from "./auth-diagnostics.js";
+export type {
+  AuthDiagnosticsResult,
+  AuthDiagnosticsStatus,
+} from "./auth-diagnostics.js";
 export { AuthRefreshError, ensureProfileAuthFresh } from "./auth-refresh.js";
 export {
   AuthBundleMissingError,
@@ -39,6 +48,7 @@ export {
 export type { AuthBundle } from "./auth-bundle.js";
 export {
   resolveProfile,
+  coerceCliProfileName,
   isCliProfile,
   withResume,
   type ProfileConfig,
@@ -51,6 +61,15 @@ type ProfileOpts = {
   auth?: boolean;
   authRefresh?: boolean;
 };
+
+type AuthDiagnosticOpts = {
+  authRefresh?: boolean;
+};
+
+function describeAuthStatus(status: AuthDiagnosticsStatus): string {
+  if (status.checked) return `ok: ${status.command}`;
+  return `skipped: ${status.reason}`;
+}
 
 async function runProfile(
   profileName: string,
@@ -145,6 +164,35 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       });
     if (alias) cmd.alias(alias);
   }
+
+  program
+    .command("auth <profile>")
+    .description("Check local auth status and bundled credential files")
+    .option(
+      "--no-auth-refresh",
+      "skip local auth status preflight and only inspect bundled files",
+    )
+    .action(async (profileName: string, opts: AuthDiagnosticOpts) => {
+      const profile = coerceCliProfileName(profileName);
+      if (!profile) {
+        throw new Error(
+          `Unknown profile "${profileName}". Known: codex, claude, claude-code, gemini, gemini-cli, opencode, shell`,
+        );
+      }
+      const result = await inspectProfileAuth(profile, {
+        ...(opts.authRefresh !== undefined
+          ? { authRefresh: opts.authRefresh }
+          : {}),
+      });
+      process.stdout.write(`profile: ${result.profile}\n`);
+      process.stdout.write(
+        `auth status: ${describeAuthStatus(result.authStatus)}\n`,
+      );
+      process.stdout.write(`bundled files: ${result.bundledFiles.length}\n`);
+      for (const file of result.bundledFiles) {
+        process.stdout.write(`- ${file}\n`);
+      }
+    });
 
   program
     .command("attach <url> <sessionId>")

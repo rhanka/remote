@@ -30,8 +30,18 @@ const DEFAULT_PROFILES: Readonly<Record<CliProfile, ProfileConfig>> = {
   },
 };
 
+const PROFILE_ALIASES: Readonly<Record<string, CliProfile>> = {
+  claude: "claude-code",
+  gemini: "gemini-cli",
+};
+
 export function isCliProfile(value: string): value is CliProfile {
   return (CLI_PROFILES as ReadonlyArray<string>).includes(value);
+}
+
+export function coerceCliProfileName(value: string): CliProfile | undefined {
+  if (isCliProfile(value)) return value;
+  return PROFILE_ALIASES[value];
 }
 
 export function resolveProfile(name: string): ProfileConfig {
