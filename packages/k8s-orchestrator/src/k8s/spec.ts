@@ -92,7 +92,7 @@ const POD_CONTAINER = "session-agent";
 
 export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
   namespace: "sentropic-remote",
-  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.1.2",
+  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.1.3",
   defaultWorkspaceSize: "1Gi",
   controlPlaneEndpoint: "http://sentropic-remote-control-plane:8080",
   home: "/root",
