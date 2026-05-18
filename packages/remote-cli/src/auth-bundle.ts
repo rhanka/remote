@@ -20,6 +20,26 @@ const PROFILE_AUTH_FILES: Readonly<Record<CliProfile, ReadonlyArray<string>>> =
 
 export type AuthBundle = Readonly<Record<string, string>>;
 
+const REQUIRED_AUTH_BUNDLE_PROFILES: Partial<Record<CliProfile, string>> = {
+  codex: "codex login",
+  "claude-code": "claude auth login",
+};
+
+export class AuthBundleMissingError extends Error {
+  constructor(
+    readonly profile: CliProfile,
+    readonly knownPaths: ReadonlyArray<string>,
+    readonly refreshHint: string,
+  ) {
+    super(
+      `[remote] No local auth files found for ${profile}. ` +
+        `Expected at least one of: ${knownPaths.join(", ")}. ` +
+        `Run \`${refreshHint}\` locally, then retry; or use --no-auth to start without bundled credentials.`,
+    );
+    this.name = "AuthBundleMissingError";
+  }
+}
+
 export type CollectAuthOptions = {
   readonly home?: string;
   readonly readFileImpl?: (path: string) => Promise<Uint8Array | Buffer>;
@@ -45,4 +65,17 @@ export async function collectProfileAuth(
     }
   }
   return bundle;
+}
+
+export function assertRequiredAuthBundle(
+  profile: CliProfile,
+  bundle: AuthBundle,
+): void {
+  const refreshHint = REQUIRED_AUTH_BUNDLE_PROFILES[profile];
+  if (!refreshHint || Object.keys(bundle).length > 0) return;
+  throw new AuthBundleMissingError(
+    profile,
+    PROFILE_AUTH_FILES[profile] ?? [],
+    refreshHint,
+  );
 }

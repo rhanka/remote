@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { collectProfileAuth } from "./auth-bundle.js";
+import {
+  AuthBundleMissingError,
+  assertRequiredAuthBundle,
+  collectProfileAuth,
+} from "./auth-bundle.js";
 
 const codexAuthJson = JSON.stringify({ tokens: { access_token: "abc" } });
 const claudeCredsJson = JSON.stringify({
@@ -61,5 +65,29 @@ describe("collectProfileAuth", () => {
       },
     });
     expect(bundle).toEqual({});
+  });
+});
+
+describe("assertRequiredAuthBundle", () => {
+  it("throws an actionable error when codex has no bundled auth files", () => {
+    expect(() => assertRequiredAuthBundle("codex", {})).toThrow(
+      AuthBundleMissingError,
+    );
+    expect(() => assertRequiredAuthBundle("codex", {})).toThrow(
+      "No local auth files found for codex",
+    );
+  });
+
+  it("accepts claude when at least one known credential file was bundled", () => {
+    expect(() =>
+      assertRequiredAuthBundle("claude-code", {
+        ".claude/.credentials.json": "base64",
+      }),
+    ).not.toThrow();
+  });
+
+  it("does not require auth files for shell or gemini", () => {
+    expect(() => assertRequiredAuthBundle("shell", {})).not.toThrow();
+    expect(() => assertRequiredAuthBundle("gemini-cli", {})).not.toThrow();
   });
 });

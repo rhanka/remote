@@ -11,7 +11,11 @@ import {
   stopRemoteSession,
 } from "./attach.js";
 import { AuthRefreshError, ensureProfileAuthFresh } from "./auth-refresh.js";
-import { collectProfileAuth } from "./auth-bundle.js";
+import {
+  AuthBundleMissingError,
+  assertRequiredAuthBundle,
+  collectProfileAuth,
+} from "./auth-bundle.js";
 import { isCliProfile } from "./profiles.js";
 import { run } from "./run.js";
 
@@ -27,7 +31,11 @@ export {
 } from "./attach.js";
 export type { AttachOptions, AttachResult } from "./attach.js";
 export { AuthRefreshError, ensureProfileAuthFresh } from "./auth-refresh.js";
-export { collectProfileAuth } from "./auth-bundle.js";
+export {
+  AuthBundleMissingError,
+  assertRequiredAuthBundle,
+  collectProfileAuth,
+} from "./auth-bundle.js";
 export type { AuthBundle } from "./auth-bundle.js";
 export {
   resolveProfile,
@@ -58,6 +66,7 @@ async function runProfile(
         }
       }
       const bundle = await collectProfileAuth(profileName);
+      assertRequiredAuthBundle(profileName, bundle);
       if (Object.keys(bundle).length > 0) credentials = bundle;
     }
     const sessionId =
@@ -197,7 +206,10 @@ function isEntryPoint(): boolean {
 
 if (isEntryPoint()) {
   main(process.argv).catch((error: unknown) => {
-    if (error instanceof AuthRefreshError) {
+    if (
+      error instanceof AuthRefreshError ||
+      error instanceof AuthBundleMissingError
+    ) {
       console.error(error.message);
     } else {
       console.error("[remote] fatal:", error);
