@@ -64,6 +64,7 @@ type ProfileOpts = {
   resume?: string;
   port?: number;
   remote?: string;
+  target?: "k3s" | "scaleway-kapsule" | "gke";
   auth?: boolean;
   authRefresh?: boolean;
 };
@@ -107,7 +108,7 @@ async function runProfile(
       (
         await createRemoteSession(opts.remote, {
           profile: profileName,
-          target: "k3s",
+          target: opts.target ?? "k3s",
           ...(credentials ? { credentials } : {}),
         })
       ).id;
@@ -164,6 +165,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       .option(
         "--remote <url>",
         "create the session on a remote control-plane and attach instead of running locally",
+      )
+      .option(
+        "--target <target>",
+        "remote session target: k3s, scaleway-kapsule, or gke",
+        "k3s",
       )
       .option(
         "--no-auth",
