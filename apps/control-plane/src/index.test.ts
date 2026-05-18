@@ -21,6 +21,7 @@ import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
 
 import { createControlPlane } from "./index.js";
+import { SessionEventBus } from "./sessions/events.js";
 
 const validRequest: CreateSessionRequest = {
   profile: "codex",
@@ -339,6 +340,33 @@ describe("control plane", () => {
     await reader.cancel().catch(() => {});
 
     expect(buffer).toContain("session.lifecycle.changed");
+  });
+
+  it("forgets buffered events after a session is stopped", async () => {
+    const bus = new SessionEventBus();
+    const app = createControlPlane({ bus });
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    await app.request(`/sessions/${id}/instructions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ instruction: "echo before-stop" }),
+    });
+    await app.request(`/sessions/${id}/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "test" }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const replayed: RemoteEventEnvelope[] = [];
+    const unsubscribe = bus.subscribe(id, (envelope) =>
+      replayed.push(envelope),
+    );
+    unsubscribe();
+
+    expect(replayed).toEqual([]);
   });
 
   it("returns terminal.unavailable when no agent is connected", async () => {

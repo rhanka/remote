@@ -183,7 +183,12 @@ export function createSessionsRouter(
       if (!session) return notFound(c);
       validatedBody<StopSessionRequest>(c);
       store.delete(id);
-      void provisioner.destroy(id, emit);
+      void provisioner
+        .destroy(id, emit)
+        .catch((error: unknown) => {
+          console.error("[control-plane] session destroy failed:", error);
+        })
+        .finally(() => bus.forget(id));
       const response: StopSessionResponse = { sessionId: id, accepted: true };
       return c.json(response);
     },
