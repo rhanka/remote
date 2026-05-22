@@ -20,6 +20,8 @@
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:e2e:live": "vitest run e2e/live-remote-smoke.test.ts --testTimeout=240000",
+    "uat:laggy": "node e2e/uat-laggy-proxy.mjs",
+    "uat:rtt": "node e2e/uat-keystroke-rtt.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "verify": "npm run format && npm run lint && npm run typecheck && npm run build && npm run test"
   },

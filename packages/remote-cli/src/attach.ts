@@ -1,5 +1,11 @@
 import type { RemoteEventEnvelope } from "@sentropic/remote-protocol";
 
+export type InputRetryOptions = {
+  readonly maxAttempts?: number;
+  readonly baseDelayMs?: number;
+  readonly maxDelayMs?: number;
+};
+
 export type AttachOptions = {
   readonly baseUrl: string;
   readonly sessionId: string;
@@ -7,6 +13,13 @@ export type AttachOptions = {
   readonly stdout?: NodeJS.WriteStream;
   readonly stderr?: NodeJS.WriteStream;
   readonly fetchImpl?: typeof fetch;
+  readonly inputRetry?: InputRetryOptions;
+};
+
+const DEFAULT_INPUT_RETRY: Required<InputRetryOptions> = {
+  maxAttempts: 6,
+  baseDelayMs: 200,
+  maxDelayMs: 1600,
 };
 
 export type AttachResult = {
@@ -79,20 +92,57 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
   if (stdin.isTTY) stdin.setRawMode?.(true);
   stdin.resume();
 
-  const sendInput = async (data: string) => {
-    try {
-      await doFetch(joinUrl(baseUrl, `/sessions/${sessionId}/terminal/input`), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          terminalId: "operator",
-          data,
-          encoding: "utf8",
-        }),
-      });
-    } catch (error) {
-      stderr.write(`[remote] input failed: ${String(error)}\n`);
+  const retry = { ...DEFAULT_INPUT_RETRY, ...(options.inputRetry ?? {}) };
+  let aborted = false;
+  let queueTail: Promise<void> = Promise.resolve();
+
+  const postInput = async (data: string): Promise<void> => {
+    for (let attempt = 1; attempt <= retry.maxAttempts; attempt++) {
+      if (aborted) return;
+      try {
+        const response = await doFetch(
+          joinUrl(baseUrl, `/sessions/${sessionId}/terminal/input`),
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              terminalId: "operator",
+              data,
+              encoding: "utf8",
+            }),
+          },
+        );
+        if (response.ok) return;
+        if (response.status < 500) {
+          stderr.write(
+            `[remote] input rejected (${response.status} ${response.statusText}); not retried\n`,
+          );
+          return;
+        }
+      } catch (error) {
+        if (aborted) return;
+        if (attempt === retry.maxAttempts) {
+          stderr.write(
+            `[remote] input abandoned after ${retry.maxAttempts} attempts: ${String(error)}\n`,
+          );
+          return;
+        }
+      }
+      if (attempt < retry.maxAttempts) {
+        const delay = Math.min(
+          retry.maxDelayMs,
+          retry.baseDelayMs * 2 ** (attempt - 1),
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
+    stderr.write(
+      `[remote] input abandoned after ${retry.maxAttempts} attempts\n`,
+    );
+  };
+
+  const enqueueInput = (data: string): void => {
+    queueTail = queueTail.then(() => postInput(data));
   };
 
   const sendResize = async () => {
@@ -118,7 +168,7 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
 
   const onStdin = (chunk: Buffer | string) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    void sendInput(text);
+    enqueueInput(text);
   };
   const onResize = () => {
     void sendResize();
@@ -130,8 +180,14 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
   const close = async () => {
     if (closed) return;
     closed = true;
-    controller.abort();
     stdin.off?.("data", onStdin);
+    // Give already-queued inputs a brief window to finish before aborting retries
+    await Promise.race([
+      queueTail.catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 500).unref?.()),
+    ]);
+    aborted = true;
+    controller.abort();
     stdout.off?.("resize", onResize);
     if (stdin.isTTY) stdin.setRawMode?.(wasRaw);
     stdin.pause();

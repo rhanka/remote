@@ -320,6 +320,86 @@ describe("attach", () => {
     expect(parsed.reason).toBe("uat");
   });
 
+  it("retries POST /terminal/input on transient 5xx until it succeeds", async () => {
+    const stdout = stubStdout();
+    const stdin = stubStdin();
+    let inputCalls = 0;
+    const fetchImpl = (async (url: string | URL) => {
+      const href = url.toString();
+      if (href.endsWith("/events")) {
+        return new Response(streamFromString(""), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      if (href.endsWith("/terminal/input")) {
+        inputCalls++;
+        if (inputCalls < 3) {
+          return new Response("", { status: 502 });
+        }
+        return new Response('{"accepted":true}', { status: 202 });
+      }
+      return new Response('{"accepted":true}', { status: 202 });
+    }) as typeof fetch;
+
+    const session = await attach({
+      baseUrl: "http://localhost:8080",
+      sessionId: "sess-retry",
+      stdin,
+      stdout,
+      fetchImpl,
+      inputRetry: { maxAttempts: 5, baseDelayMs: 1, maxDelayMs: 4 },
+    });
+
+    stdin.emit("data", Buffer.from("x", "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await session.close();
+
+    expect(inputCalls).toBe(3);
+  });
+
+  it("preserves keystroke order when an earlier POST is retried", async () => {
+    const stdout = stubStdout();
+    const stdin = stubStdin();
+    const ordered: string[] = [];
+    let firstAttempt = true;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      const href = url.toString();
+      if (href.endsWith("/events")) {
+        return new Response(streamFromString(""), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      if (href.endsWith("/terminal/input")) {
+        const body = JSON.parse(init?.body as string) as { data: string };
+        if (body.data === "A" && firstAttempt) {
+          firstAttempt = false;
+          return new Response("", { status: 502 });
+        }
+        ordered.push(body.data);
+        return new Response('{"accepted":true}', { status: 202 });
+      }
+      return new Response('{"accepted":true}', { status: 202 });
+    }) as typeof fetch;
+
+    const session = await attach({
+      baseUrl: "http://localhost:8080",
+      sessionId: "sess-order",
+      stdin,
+      stdout,
+      fetchImpl,
+      inputRetry: { maxAttempts: 5, baseDelayMs: 1, maxDelayMs: 4 },
+    });
+
+    stdin.emit("data", Buffer.from("A", "utf8"));
+    stdin.emit("data", Buffer.from("B", "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await session.close();
+
+    expect(ordered).toEqual(["A", "B"]);
+  });
+
   it("createRemoteSession posts profile + target and returns the new id", async () => {
     let captured: { url: string; body: string } | null = null;
     const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
