@@ -40,7 +40,9 @@ import {
   terminalOutputSchema,
   terminalResizeSchema,
   uatRouteCreatedSchema,
+  h2aBridgeProfileSchema,
 } from "./index.js";
+import { H2A_BRIDGE_PROFILE_V1 } from "./h2a-bridge.js";
 
 const addFormats = addFormatsModule.default as unknown as FormatsPlugin;
 const ajv = new Ajv({ allErrors: true, strict: true });
@@ -311,6 +313,30 @@ describe("approval, secret, and error JSON Schemas", () => {
         details: { capability: "publish-npm" },
       }),
     ).toBe(true);
+  });
+});
+
+describe("h2a host bridge JSON Schema", () => {
+  it("validates the canonical V1 bridge profile", () => {
+    const validate = ajv.compile(h2aBridgeProfileSchema);
+    expect(validate(H2A_BRIDGE_PROFILE_V1)).toBe(true);
+  });
+
+  it("rejects a profile with an unexpected hostId", () => {
+    const validate = ajv.compile(h2aBridgeProfileSchema);
+    expect(
+      validate({ ...H2A_BRIDGE_PROFILE_V1, hostId: "some-other-host" }),
+    ).toBe(false);
+  });
+
+  it("rejects a profile that claims to enforce resource limits", () => {
+    const validate = ajv.compile(h2aBridgeProfileSchema);
+    expect(
+      validate({
+        ...H2A_BRIDGE_PROFILE_V1,
+        resourceLimits: { reflected: true, enforced: true },
+      }),
+    ).toBe(false);
   });
 });
 
