@@ -229,6 +229,83 @@ describe("attach", () => {
     expect(body.data).toBe("ls\n");
   });
 
+  it("detaches on Ctrl+P Ctrl+Q without forwarding the sequence", async () => {
+    const stdout = stubStdout();
+    const stdin = stubStdin();
+    const calls: Captured[] = [];
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({
+        url: url.toString(),
+        method: init?.method ?? "GET",
+        body: init?.body,
+      });
+      if (url.toString().endsWith("/events")) {
+        return new Response(streamFromString(""), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response('{"accepted":true}', { status: 202 });
+    }) as typeof fetch;
+
+    const session = await attach({
+      baseUrl: "http://localhost:8080",
+      sessionId: "sess-detach",
+      stdin,
+      stdout,
+      fetchImpl,
+    });
+
+    stdin.emit("data", Buffer.from([0x10, 0x11]));
+    await session.finished;
+
+    const inputs = calls.filter((c) => c.url.endsWith("/terminal/input"));
+    expect(inputs).toHaveLength(0);
+    const stop = calls.find((c) => c.url.endsWith("/stop"));
+    expect(stop).toBeUndefined();
+  });
+
+  it("forwards a lone Ctrl+P after the detach timeout when no Ctrl+Q follows", async () => {
+    const stdout = stubStdout();
+    const stdin = stubStdin();
+    const calls: Captured[] = [];
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({
+        url: url.toString(),
+        method: init?.method ?? "GET",
+        body: init?.body,
+      });
+      if (url.toString().endsWith("/events")) {
+        return new Response(streamFromString(""), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response('{"accepted":true}', { status: 202 });
+    }) as typeof fetch;
+
+    const session = await attach({
+      baseUrl: "http://localhost:8080",
+      sessionId: "sess-detach-partial",
+      stdin,
+      stdout,
+      fetchImpl,
+    });
+
+    stdin.emit("data", Buffer.from([0x10]));
+    stdin.emit("data", Buffer.from("a", "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await session.close();
+
+    const inputs = calls.filter((c) => c.url.endsWith("/terminal/input"));
+    expect(inputs.length).toBeGreaterThanOrEqual(1);
+    const combined = inputs
+      .map((c) => JSON.parse(c.body as string).data as string)
+      .join("");
+    expect(combined).toContain("\x10");
+    expect(combined).toContain("a");
+  });
+
   it("forwards terminal resize through POST /terminal/resize", async () => {
     const stdout = stubStdout();
     const stdin = stubStdin();

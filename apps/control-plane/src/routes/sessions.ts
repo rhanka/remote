@@ -147,6 +147,40 @@ export function createSessionsRouter(
     };
   }
 
+  function stopSessionInternal(
+    id: string,
+    reason: string | undefined,
+  ): boolean {
+    if (!store.get(id)) return false;
+    store.delete(id);
+    void provisioner
+      .destroy(id, emit)
+      .catch((error: unknown) => {
+        console.error(
+          `[control-plane] session destroy failed (${reason ?? "unspecified"}):`,
+          error,
+        );
+      })
+      .finally(() => bus.forget(id));
+    return true;
+  }
+
+  function watchForTerminalExited(sessionId: string): void {
+    const unsubscribe = bus.subscribe(
+      sessionId,
+      (envelope) => {
+        if (envelope.type !== "terminal.exited") return;
+        unsubscribe();
+        // Defer the destroy so the SSE subscribers see the exit event first.
+        setImmediate(() => {
+          if (!store.get(sessionId)) return;
+          stopSessionInternal(sessionId, "terminal.exited");
+        });
+      },
+      { replay: false },
+    );
+  }
+
   router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
     const req = validatedBody<
       CreateSessionRequest & {
@@ -157,6 +191,7 @@ export function createSessionsRouter(
     bus.publish(descriptor.id, "session.lifecycle.changed", {
       nextState: "requested",
     });
+    watchForTerminalExited(descriptor.id);
     const provisionOptions = req.credentials
       ? { credentials: req.credentials }
       : {};
@@ -199,16 +234,9 @@ export function createSessionsRouter(
     validateJsonBody(ajv, stopSessionRequestSchema),
     (c) => {
       const id = c.req.param("id");
-      const session = store.get(id);
-      if (!session) return notFound(c);
-      validatedBody<StopSessionRequest>(c);
-      store.delete(id);
-      void provisioner
-        .destroy(id, emit)
-        .catch((error: unknown) => {
-          console.error("[control-plane] session destroy failed:", error);
-        })
-        .finally(() => bus.forget(id));
+      const req = validatedBody<StopSessionRequest>(c);
+      const stopped = stopSessionInternal(id, req.reason);
+      if (!stopped) return notFound(c);
       const response: StopSessionResponse = { sessionId: id, accepted: true };
       return c.json(response);
     },

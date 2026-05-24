@@ -242,6 +242,45 @@ describe("control plane", () => {
     ]);
   });
 
+  it("auto-destroys the session when the agent publishes terminal.exited", async () => {
+    type Call =
+      | { op: "provision"; sessionId: string }
+      | { op: "destroy"; sessionId: string };
+    const calls: Call[] = [];
+    const provisioner = {
+      async provision(descriptor: { id: string }) {
+        calls.push({ op: "provision", sessionId: descriptor.id });
+      },
+      async refresh(_descriptor: { id: string }) {
+        return undefined;
+      },
+      async destroy(sessionId: string) {
+        calls.push({ op: "destroy", sessionId });
+      },
+      async inspect() {
+        return undefined;
+      },
+    };
+    const { AgentRegistry } = await import("./agents/registry.js");
+    const registry = new AgentRegistry();
+    const bus = new SessionEventBus();
+    const app = createControlPlane({ provisioner, registry, bus });
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    bus.publish(id, "terminal.exited", { exitCode: 0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(calls).toEqual([
+      { op: "provision", sessionId: id },
+      { op: "destroy", sessionId: id },
+    ]);
+    const listed = await app.request("/sessions");
+    const body = (await listed.json()) as { sessions: Array<unknown> };
+    expect(body.sessions).toHaveLength(0);
+  });
+
   it("refreshes session credentials through the provisioner", async () => {
     type Call =
       | { op: "provision"; sessionId: string }

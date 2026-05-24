@@ -92,6 +92,12 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
   if (stdin.isTTY) stdin.setRawMode?.(true);
   stdin.resume();
 
+  if (stdin.isTTY) {
+    stderr.write(
+      "[remote] press Ctrl+P Ctrl+Q to detach (session keeps running)\n",
+    );
+  }
+
   const retry = { ...DEFAULT_INPUT_RETRY, ...(options.inputRetry ?? {}) };
   let aborted = false;
   let queueTail: Promise<void> = Promise.resolve();
@@ -166,9 +172,57 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
     }
   };
 
+  const CTRL_P = 0x10;
+  const CTRL_Q = 0x11;
+  const DETACH_TIMEOUT_MS = 1500;
+  let detachPending = false;
+  let detachTimer: NodeJS.Timeout | null = null;
+
   const onStdin = (chunk: Buffer | string) => {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    enqueueInput(text);
+    const bytes =
+      typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    const passthrough: number[] = [];
+    const flushPassthrough = () => {
+      if (passthrough.length === 0) return;
+      enqueueInput(Buffer.from(passthrough).toString("utf8"));
+      passthrough.length = 0;
+    };
+    for (let i = 0; i < bytes.length; i++) {
+      const byte = bytes[i]!;
+      if (detachPending) {
+        if (byte === CTRL_Q) {
+          detachPending = false;
+          if (detachTimer) {
+            clearTimeout(detachTimer);
+            detachTimer = null;
+          }
+          flushPassthrough();
+          if (stdin.isTTY) stderr.write("\n[remote] detached\n");
+          void close();
+          return;
+        }
+        detachPending = false;
+        if (detachTimer) {
+          clearTimeout(detachTimer);
+          detachTimer = null;
+        }
+        passthrough.push(CTRL_P, byte);
+        continue;
+      }
+      if (byte === CTRL_P) {
+        flushPassthrough();
+        detachPending = true;
+        detachTimer = setTimeout(() => {
+          if (!detachPending) return;
+          detachPending = false;
+          detachTimer = null;
+          enqueueInput("\x10");
+        }, DETACH_TIMEOUT_MS);
+        continue;
+      }
+      passthrough.push(byte);
+    }
+    flushPassthrough();
   };
   const onResize = () => {
     void sendResize();
@@ -180,6 +234,10 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
   const close = async () => {
     if (closed) return;
     closed = true;
+    if (detachTimer) {
+      clearTimeout(detachTimer);
+      detachTimer = null;
+    }
     stdin.off?.("data", onStdin);
     // Give already-queued inputs a brief window to finish before aborting retries
     await Promise.race([
