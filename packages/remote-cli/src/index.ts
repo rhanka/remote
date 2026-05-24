@@ -78,8 +78,8 @@ type ProfileOpts = {
   authRefresh?: boolean;
 };
 
-type ProfileCliOpts = Omit<ProfileOpts, "remote"> & {
-  remote?: string | boolean;
+type ProfileCliOpts = ProfileOpts & {
+  local?: boolean;
 };
 
 type AuthDiagnosticOpts = {
@@ -288,37 +288,33 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         (value) => Number(value),
       )
       .option(
-        "--remote [url]",
-        "create the session on a remote control-plane and attach instead of running locally; URL optional when a default remote is configured",
+        "--remote <url>",
+        "override the control-plane URL (defaults to the configured remote; `remote` is remote-first)",
+      )
+      .option(
+        "--local",
+        "run the CLI in-process via a local PTY instead of a remote session",
       )
       .option(
         "--target <target>",
         "remote session target: k3s, scaleway-kapsule, or gke",
         "k3s",
       )
-      .option(
-        "--no-auth",
-        "skip bundling local credentials when running with --remote",
-      )
+      .option("--no-auth", "skip bundling local credentials")
       .option(
         "--no-auth-refresh",
         "skip local auth status preflight before bundling credentials",
       )
       .action(async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {
-        const { remote: rawRemote, ...rest } = opts;
-        let remote: string | undefined;
-        if (rawRemote !== undefined) {
-          remote =
-            typeof rawRemote === "string" && rawRemote.length > 0
-              ? rawRemote
-              : getConfiguredRemote();
+        const { remote: remoteOverride, local, ...rest } = opts;
+        if (local) {
+          await runProfile(profileName, { ...rest }, commandArgs ?? []);
+          return;
         }
+        const remote = getConfiguredRemote(remoteOverride);
         await runProfile(
           profileName,
-          {
-            ...rest,
-            ...(remote !== undefined ? { remote } : {}),
-          },
+          { ...rest, remote },
           commandArgs ?? [],
         );
       });

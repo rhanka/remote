@@ -102,30 +102,55 @@ describe("main", () => {
     setDefaultRemote.mockImplementation((url: string) => url);
   });
 
-  it("uses configured default when --remote is passed without value", async () => {
+  it("is remote-first: bare profile command uses the configured default remote", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
-    const exitCode = await main(["node", "remote", "codex", "--remote"]);
+    const exitCode = await main(["node", "remote", "codex"]);
 
     expect(exitCode).toBe(0);
     expect(createRemoteSession).toHaveBeenCalledWith(
       "http://localhost:8080",
       expect.objectContaining({ profile: "codex" }),
     );
+    expect(run).not.toHaveBeenCalled();
   });
 
-  it("stays local when --remote is omitted, even if a default remote is configured", async () => {
+  it("--remote <url> overrides the configured default", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main([
+      "node",
+      "remote",
+      "codex",
+      "--remote",
+      "http://other:9090",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(createRemoteSession).toHaveBeenCalledWith(
+      "http://other:9090",
+      expect.objectContaining({ profile: "codex" }),
+    );
+  });
+
+  it("--local runs the in-process PTY instead of a remote session", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
     run.mockResolvedValue({
       sessionId: "sess-local",
       port: 12345,
       exit: Promise.resolve({ exitCode: 0 }),
     });
-    const exitCode = await main(["node", "remote", "codex"]);
+    const exitCode = await main(["node", "remote", "codex", "--local"]);
 
     expect(exitCode).toBe(0);
     expect(createRemoteSession).not.toHaveBeenCalled();
     expect(run).toHaveBeenCalledWith(
       expect.objectContaining({ profile: "codex" }),
+    );
+  });
+
+  it("errors with guidance when no remote is configured and not --local", async () => {
+    getDefaultRemote.mockReturnValue(undefined);
+    await expect(main(["node", "remote", "codex"])).rejects.toThrow(
+      /No remote URL configured/,
     );
   });
 
