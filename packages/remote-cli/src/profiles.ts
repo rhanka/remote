@@ -16,23 +16,23 @@ const DEFAULT_PROFILES: Readonly<Record<CliProfile, ProfileConfig>> = {
     resumeFlag: "--continue",
   },
   opencode: { profile: "opencode", command: "opencode", args: [] },
-  "claude-code": {
-    profile: "claude-code",
+  claude: {
+    profile: "claude",
     command: "claude",
     args: [],
     resumeFlag: "--resume",
   },
-  "gemini-cli": {
-    profile: "gemini-cli",
-    command: "gemini",
+  agy: {
+    profile: "agy",
+    command: "agy",
     args: [],
-    resumeFlag: "--resume",
+    resumeFlag: "--continue",
   },
 };
 
 const PROFILE_ALIASES: Readonly<Record<string, CliProfile>> = {
-  claude: "claude-code",
-  gemini: "gemini-cli",
+  "claude-code": "claude",
+  antigravity: "agy",
 };
 
 export function isCliProfile(value: string): value is CliProfile {
@@ -56,11 +56,14 @@ export function resolveProfile(name: string): ProfileConfig {
 
 export function withResume(
   config: ProfileConfig,
-  sessionId?: string,
+  sessionId?: string | true,
 ): ProfileConfig {
-  if (!sessionId || !config.resumeFlag) return config;
+  if (sessionId === undefined) return config;
+  if (!config.resumeFlag) return config;
+  const flag = config.resumeFlag;
+  const extra = sessionId === true ? [flag] : [flag, sessionId];
   return {
     ...config,
-    args: [...config.args, config.resumeFlag, sessionId],
+    args: [...config.args, ...extra],
   };
 }

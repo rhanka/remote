@@ -13,10 +13,11 @@ import { nodePtySpawner, type PtyHandle, type PtySpawner } from "./pty.js";
 
 export type RunOptions = {
   readonly profile: string;
-  readonly resume?: string | undefined;
+  readonly resume?: string | true | undefined;
   readonly port?: number;
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
+  readonly startupArgs?: ReadonlyArray<string>;
   readonly stdin?: NodeJS.ReadStream;
   readonly stdout?: NodeJS.WriteStream;
   readonly spawner?: PtySpawner;
@@ -91,10 +92,11 @@ export async function run(options: RunOptions): Promise<RunResult> {
   const cwd = options.cwd ?? process.cwd();
   const initialCols = options.initialSize?.cols ?? stdout.columns ?? 80;
   const initialRows = options.initialSize?.rows ?? stdout.rows ?? 24;
+  const startupArgs = options.startupArgs ?? [];
 
   const handle = spawner({
     command: profile.command,
-    args: profile.args,
+    args: [...profile.args, ...startupArgs],
     cwd,
     env: { ...(options.env ?? (process.env as Record<string, string>)) },
     cols: initialCols,

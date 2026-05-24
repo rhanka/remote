@@ -131,6 +131,30 @@ describe("run", () => {
     });
   });
 
+  it("appends startup args to the resolved command", async () => {
+    let captured: { command: string; args: ReadonlyArray<string> } | null = null;
+    const { pty } = stubSpawner();
+    const spy: PtySpawner = (options) => {
+      captured = { command: options.command, args: options.args };
+      return pty;
+    };
+    const result = await run({
+      profile: "codex",
+      startupArgs: ["config", "install"],
+      port: 0,
+      spawner: spy,
+      stdin: stubStdin(),
+      stdout: stubStdout(),
+      initialSize: { cols: 80, rows: 24 },
+    });
+    pty.emitExit(0);
+    await result.exit;
+    expect(captured).toEqual({
+      command: "codex",
+      args: ["config", "install"],
+    });
+  });
+
   it("forwards stdin data into the PTY write stream", async () => {
     const { spawner, pty } = stubSpawner();
     const stdin = stubStdin();

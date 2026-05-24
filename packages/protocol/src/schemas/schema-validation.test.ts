@@ -30,6 +30,8 @@ import {
   sendInstructionResponseSchema,
   sessionDescriptorSchema,
   secretDeliverySchema,
+  refreshSessionCredentialsRequestSchema,
+  refreshSessionCredentialsResponseSchema,
   secretGrantResponseSchema,
   secretGrantStatusSchema,
   secretRequestSchema,
@@ -119,6 +121,21 @@ describe("session JSON Schemas", () => {
     expect(
       ajv.compile(createSessionResponseSchema)({
         session: minimalSession,
+      }),
+    ).toBe(true);
+  });
+
+  it("validates refresh session credentials request and response payloads", () => {
+    expect(
+      ajv.compile(refreshSessionCredentialsRequestSchema)({
+        ".codex/auth.json": "YmFzZTY0Cg==",
+        ".claude/.credentials.json": "bW9yZS1iYXNlNjQ=",
+      }),
+    ).toBe(true);
+    expect(
+      ajv.compile(refreshSessionCredentialsResponseSchema)({
+        sessionId: "session_001",
+        accepted: true,
       }),
     ).toBe(true);
   });
@@ -268,7 +285,7 @@ describe("approval, secret, and error JSON Schemas", () => {
       requestedAt: "2026-05-11T12:00:00.000Z",
       expiresAt: "2026-05-11T12:10:00.000Z",
       delivery: "kubernetes-secret",
-      context: { repository: "rhanka/remote-controle" },
+      context: { repository: "rhanka/remote" },
     };
 
     const grant = {

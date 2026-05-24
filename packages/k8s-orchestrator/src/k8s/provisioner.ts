@@ -20,6 +20,7 @@ export type K8sProvisionerOptions = Partial<SpecBuilderOptions>;
 export class K8sSessionProvisioner implements SessionProvisioner {
   private readonly options: SpecBuilderOptions;
   private readonly phases = new Map<string, string>();
+  private readonly credentials = new Map<string, Readonly<Record<string, string>>>();
 
   constructor(
     private readonly client: K8sClient,
@@ -41,6 +42,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
 
     const credentials = options.credentials ?? {};
     const authPaths = Object.keys(credentials);
+    this.credentials.set(descriptor.id, { ...credentials });
 
     if (authPaths.length > 0) {
       await this.client.create(
@@ -57,6 +59,60 @@ export class K8sSessionProvisioner implements SessionProvisioner {
     emit(descriptor.id, "session.lifecycle.changed", {
       previousState: "provisioning",
       nextState: "starting",
+    });
+  }
+
+  async refresh(
+    descriptor: SessionDescriptor,
+    emit: ProvisionerEmit,
+    options: ProvisionOptions = {},
+  ): Promise<void> {
+    const incoming = options.credentials ?? {};
+    if (Object.keys(incoming).length === 0) return;
+
+    const nextCredentials = {
+      ...(this.credentials.get(descriptor.id) ?? {}),
+      ...incoming,
+    };
+    this.credentials.set(descriptor.id, nextCredentials);
+    const authPaths = Object.keys(nextCredentials);
+
+    const names = resourceNames(descriptor);
+    const namespace = this.options.namespace;
+    emit(descriptor.id, "session.lifecycle.changed", {
+      previousState: this.phases.get(descriptor.id) ?? "running",
+      nextState: "starting",
+    });
+
+    await this.client
+      .delete({
+        apiVersion: "v1",
+        kind: "Pod",
+        metadata: { name: names.pod, namespace },
+      })
+      .catch(() => {});
+
+    if (authPaths.length > 0) {
+      await this.client
+        .delete({
+          apiVersion: "v1",
+          kind: "Secret",
+          metadata: { name: names.authSecret, namespace },
+        })
+        .catch(() => {});
+      await this.client.create(
+        buildSessionAuthSecret(descriptor, nextCredentials, this.options),
+      );
+    }
+
+    await this.client.create(
+      buildSessionPodSpec(descriptor, this.options, authPaths),
+    );
+
+    this.phases.set(descriptor.id, "ready");
+    emit(descriptor.id, "session.lifecycle.changed", {
+      previousState: "starting",
+      nextState: "ready",
     });
   }
 
@@ -92,6 +148,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       })
       .catch(() => {});
 
+    this.credentials.delete(sessionId);
     this.phases.set(sessionId, "stopped");
     emit(sessionId, "session.lifecycle.changed", {
       previousState: "stopping",

@@ -14,15 +14,19 @@ const PROFILE_AUTH_FILES: Readonly<Record<CliProfile, ReadonlyArray<string>>> =
     shell: [],
     codex: [".codex/auth.json", ".codex/config.toml"],
     opencode: [],
-    "claude-code": [".claude/.credentials.json"],
-    "gemini-cli": [".gemini/oauth_creds.json", ".gemini/google_accounts.json"],
+    claude: [".claude/.credentials.json"],
+    agy: [
+      ".gemini/oauth_creds.json",
+      ".gemini/google_accounts.json",
+      ".gemini/antigravity-cli/settings.json",
+    ],
   };
 
 export type AuthBundle = Readonly<Record<string, string>>;
 
 const REQUIRED_AUTH_BUNDLE_PROFILES: Partial<Record<CliProfile, string>> = {
   codex: "codex login",
-  "claude-code": "claude auth login",
+  claude: "claude auth login",
 };
 
 export class AuthBundleMissingError extends Error {

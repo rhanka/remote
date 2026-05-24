@@ -117,6 +117,28 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           },
         },
       },
+      "/sessions/{id}/credentials": {
+        post: {
+          summary: "Refresh auth credentials for a running session",
+          parameters: [
+            {
+              name: "id",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
+            },
+          ],
+          requestBody: jsonBody(ref("RefreshSessionCredentialsRequest")),
+          responses: {
+            "200": jsonResponse(
+              "Credentials refresh accepted",
+              ref("RefreshSessionCredentialsResponse"),
+            ),
+            "400": validationError,
+            "404": notFoundError,
+          },
+        },
+      },
       "/sessions/{id}/instructions": {
         post: {
           summary: "Send an instruction to a session",

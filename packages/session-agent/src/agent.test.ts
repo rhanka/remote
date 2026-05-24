@@ -174,4 +174,27 @@ describe("SessionAgent", () => {
     expect(exited!.payload.signal).toBe("SIGTERM");
     expect(exited!.payload.exitCode).toBe(-1);
   });
+
+  it("appends startup args from SESSION_STARTUP_ARGS", async () => {
+    const { transport, sent } = stubTransport();
+    const proc = stubProcess();
+    let args: ReadonlyArray<string> | null = null;
+    const agent = new SessionAgent({
+      sessionId: "sess-startup",
+      profile: "codex",
+      workspacePath: "/workspace",
+      transport,
+      spawner: (options) => {
+        args = options.args;
+        return proc;
+      },
+      env: { SESSION_STARTUP_ARGS: JSON.stringify(["config", "install"]) },
+    });
+    agent.start();
+    proc.finish({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(args).toEqual(["config", "install"]);
+    expect(sent[0]!.payload.shell).toBe("codex");
+  });
 });

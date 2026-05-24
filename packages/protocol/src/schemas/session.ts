@@ -80,9 +80,33 @@ export const sessionCredentialsSchema = {
   },
 } as const;
 
-const embeddedSessionCredentialsSchema = stripSchemaIds(
-  sessionCredentialsSchema,
-);
+const embeddedSessionCredentialsSchema = stripSchemaIds(sessionCredentialsSchema);
+
+export const refreshSessionCredentialsRequestSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/refresh-session-credentials-request.schema.json`,
+  title: "RefreshSessionCredentialsRequest",
+  description:
+    "Map of HOME-relative file paths to base64-encoded payloads to update for an active session.",
+  type: "object",
+  additionalProperties: {
+    type: "string",
+    contentEncoding: "base64",
+    minLength: 1,
+  },
+  minProperties: 1,
+} as const;
+
+export const refreshSessionCredentialsResponseSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/refresh-session-credentials-response.schema.json`,
+  title: "RefreshSessionCredentialsResponse",
+  type: "object",
+  additionalProperties: false,
+  required: ["sessionId", "accepted"],
+  properties: {
+    sessionId: { type: "string", minLength: 1 },
+    accepted: { type: "boolean" },
+  },
+} as const;
 
 export const createSessionRequestSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/create-session-request.schema.json`,

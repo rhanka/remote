@@ -92,7 +92,20 @@ describe("k8s spec builders", () => {
     }
   });
 
-  it("mounts the auth Secret per credential path when authPaths is set", () => {
+  it("passes startup args metadata into SESSION_STARTUP_ARGS", () => {
+    const descriptor: SessionDescriptor = {
+      ...baseDescriptor,
+      metadata: {
+        startup: { args: ["config", "install"] },
+      },
+    };
+    const pod = buildSessionPodSpec(descriptor);
+    const env = pod.spec.containers[0]!.env;
+    const startupEnv = env.find((entry) => entry.name === "SESSION_STARTUP_ARGS");
+    expect(startupEnv?.value).toBe(JSON.stringify(["config", "install"]));
+  });
+
+  it("stages the auth Secret under /run/auth-bundle and advertises the paths via env", () => {
     const pod = buildSessionPodSpec(baseDescriptor, DEFAULT_BUILDER_OPTIONS, [
       ".codex/auth.json",
       ".claude/.credentials.json",
@@ -102,10 +115,23 @@ describe("k8s spec builders", () => {
       (mount) => mount.name === "auth",
     );
     expect(authMounts).toHaveLength(2);
-    expect(authMounts[0]!.mountPath).toBe("/root/.codex/auth.json");
+    expect(authMounts[0]!.mountPath).toBe("/run/auth-bundle/.codex/auth.json");
     expect(authMounts[0]!.subPath).toBe("codex_auth.json");
     expect(authMounts[0]!.readOnly).toBe(true);
-    expect(authMounts[1]!.mountPath).toBe("/root/.claude/.credentials.json");
+    expect(authMounts[1]!.mountPath).toBe(
+      "/run/auth-bundle/.claude/.credentials.json",
+    );
+
+    const stagingEnv = container.env.find(
+      (entry) => entry.name === "SESSION_AUTH_STAGING_DIR",
+    );
+    const pathsEnv = container.env.find(
+      (entry) => entry.name === "SESSION_AUTH_BUNDLE_PATHS",
+    );
+    expect(stagingEnv?.value).toBe("/run/auth-bundle");
+    expect(pathsEnv?.value).toBe(
+      ".codex/auth.json:.claude/.credentials.json",
+    );
 
     const authVolume = pod.spec.volumes.find((vol) => vol.name === "auth");
     expect(authVolume).toBeDefined();

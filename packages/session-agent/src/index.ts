@@ -1,9 +1,36 @@
+import { chmodSync, copyFileSync, mkdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 import { SessionAgent } from "./agent.js";
 import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
 
 export const packageName = "@sentropic/remote-session-agent";
+
+export function materializeAuthBundle(
+  stagingDir: string | undefined,
+  relPathsCsv: string | undefined,
+  home: string,
+): ReadonlyArray<string> {
+  if (!stagingDir || !relPathsCsv) return [];
+  const relPaths = relPathsCsv.split(":").filter((p) => p.length > 0);
+  const copied: string[] = [];
+  for (const relPath of relPaths) {
+    const src = join(stagingDir, relPath);
+    const dst = join(home, relPath);
+    try {
+      statSync(src);
+    } catch {
+      continue;
+    }
+    mkdirSync(dirname(dst), { recursive: true, mode: 0o700 });
+    copyFileSync(src, dst);
+    chmodSync(dst, 0o600);
+    copied.push(relPath);
+  }
+  return copied;
+}
 
 export { SessionAgent } from "./agent.js";
 export type {
@@ -31,6 +58,18 @@ export async function main(): Promise<void> {
   const profile = requireEnv("SESSION_PROFILE");
   const workspacePath = process.env.WORKSPACE_PATH ?? "/workspace";
   const controlPlaneEndpoint = requireEnv("CONTROL_PLANE_ENDPOINT");
+  const home = process.env.HOME ?? "/root";
+
+  const copied = materializeAuthBundle(
+    process.env.SESSION_AUTH_STAGING_DIR,
+    process.env.SESSION_AUTH_BUNDLE_PATHS,
+    home,
+  );
+  if (copied.length > 0) {
+    console.log(
+      `[session-agent] materialized ${copied.length} auth file(s) under ${home}`,
+    );
+  }
 
   const wsUrl = controlPlaneEndpoint
     .replace(/^http:/, "ws:")

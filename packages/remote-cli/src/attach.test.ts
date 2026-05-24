@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   attach,
   createRemoteSession,
+  getRemoteSession,
   listRemoteSessions,
+  refreshRemoteSession,
   stopRemoteSession,
 } from "./attach.js";
 
@@ -287,7 +289,7 @@ describe("attach", () => {
             },
             {
               id: "sess-2",
-              profile: "claude-code",
+              profile: "claude",
               target: "k3s",
               createdAt: "now",
             },
@@ -423,5 +425,82 @@ describe("attach", () => {
     expect(captured!.url).toBe("http://localhost:8080/sessions");
     const body = JSON.parse(captured!.body) as { profile: string };
     expect(body.profile).toBe("codex");
+  });
+
+  it("createRemoteSession forwards startup args into metadata.startup.args", async () => {
+    let captured: { url: string; body: string } | null = null;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      captured = {
+        url: url.toString(),
+        body: init?.body as string,
+      };
+      return new Response(
+        JSON.stringify({
+          session: { id: "sess-remote" },
+        }),
+        { status: 201 },
+      );
+    }) as typeof fetch;
+    await createRemoteSession(
+      "http://localhost:8080",
+      { profile: "codex", startupArgs: ["config", "install"] },
+      fetchImpl,
+    );
+    expect(captured).not.toBeNull();
+    const body = JSON.parse(captured!.body) as {
+      metadata?: {
+        startup?: {
+          args?: string[];
+        };
+      };
+    };
+    expect(body.metadata?.startup).toEqual({
+      args: ["config", "install"],
+    });
+    expect(body.metadata?.startup?.args).toHaveLength(2);
+  });
+
+  it("getRemoteSession GETs /sessions/:id and returns descriptor", async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({ session: { id: "sess-1", profile: "codex" } }),
+        { status: 200 },
+      )) as typeof fetch;
+    const result = await getRemoteSession(
+      "http://localhost:8080",
+      "sess-1",
+      fetchImpl,
+    );
+    expect(result.session.profile).toBe("codex");
+  });
+
+  it("refreshRemoteSession posts updated credentials and returns response", async () => {
+    let captured: { url: string; body: string } | null = null;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      captured = {
+        url: url.toString(),
+        body: init?.body as string,
+      };
+      return new Response(
+        JSON.stringify({
+          sessionId: "sess-refresh",
+          accepted: true,
+        }),
+        { status: 202 },
+      );
+    }) as typeof fetch;
+    const result = await refreshRemoteSession(
+      "http://localhost:8080",
+      "sess-refresh",
+      { ".codex/auth.json": "YXV0aA==" },
+      fetchImpl,
+    );
+    expect(result).toEqual({
+      sessionId: "sess-refresh",
+      accepted: true,
+    });
+    expect(captured!.url).toBe("http://localhost:8080/sessions/sess-refresh/credentials");
+    const body = JSON.parse(captured!.body) as Record<string, string>;
+    expect(body).toEqual({ ".codex/auth.json": "YXV0aA==" });
   });
 });

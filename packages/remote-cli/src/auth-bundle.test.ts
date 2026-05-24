@@ -31,7 +31,7 @@ describe("collectProfileAuth", () => {
   });
 
   it("bundles claude credentials when present", async () => {
-    const bundle = await collectProfileAuth("claude-code", {
+    const bundle = await collectProfileAuth("claude", {
       home: "/home/test",
       async readFileImpl(path) {
         if (path.endsWith(".credentials.json"))
@@ -48,7 +48,7 @@ describe("collectProfileAuth", () => {
   });
 
   it("returns an empty bundle when no files exist", async () => {
-    const bundle = await collectProfileAuth("gemini-cli", {
+    const bundle = await collectProfileAuth("agy", {
       home: "/home/test",
       async readFileImpl() {
         throw new Error("ENOENT");
@@ -80,14 +80,14 @@ describe("assertRequiredAuthBundle", () => {
 
   it("accepts claude when at least one known credential file was bundled", () => {
     expect(() =>
-      assertRequiredAuthBundle("claude-code", {
+      assertRequiredAuthBundle("claude", {
         ".claude/.credentials.json": "base64",
       }),
     ).not.toThrow();
   });
 
-  it("does not require auth files for shell or gemini", () => {
+  it("does not require auth files for shell or agy", () => {
     expect(() => assertRequiredAuthBundle("shell", {})).not.toThrow();
-    expect(() => assertRequiredAuthBundle("gemini-cli", {})).not.toThrow();
+    expect(() => assertRequiredAuthBundle("agy", {})).not.toThrow();
   });
 });

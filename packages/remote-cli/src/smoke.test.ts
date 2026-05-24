@@ -153,7 +153,7 @@ describe("remote profile smoke", () => {
     }) as unknown as typeof fetch;
 
     await smokeRemoteProfile({
-      profile: "claude-code",
+      profile: "claude",
       baseUrl: "http://control-plane.test",
       timeoutMs: 1_000,
       fetchImpl,
@@ -197,7 +197,7 @@ describe("remote profile smoke", () => {
 
     await expect(
       smokeRemoteProfile({
-        profile: "claude-code",
+        profile: "claude",
         baseUrl: "http://control-plane.test",
         timeoutMs: 1_000,
         fetchImpl,

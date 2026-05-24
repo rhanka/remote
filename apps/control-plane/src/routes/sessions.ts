@@ -7,12 +7,15 @@ import {
   REMOTE_PROTOCOL_VERSION,
   REMOTE_SCHEMA_VERSION,
   createSessionRequestSchema,
+  refreshSessionCredentialsRequestSchema,
   sendInstructionRequestSchema,
   stopSessionRequestSchema,
   terminalInputSchema,
   terminalResizeSchema,
   type CreateSessionRequest,
   type CreateSessionResponse,
+  type RefreshSessionCredentialsRequest,
+  type RefreshSessionCredentialsResponse,
   type GetSessionResponse,
   type ListSessionsResponse,
   type RemoteEventEnvelope,
@@ -173,6 +176,23 @@ export function createSessionsRouter(
     const response: GetSessionResponse = { session };
     return c.json(response);
   });
+
+  router.post(
+    "/:id/credentials",
+    validateJsonBody(ajv, refreshSessionCredentialsRequestSchema),
+    async (c) => {
+      const id = c.req.param("id");
+      const descriptor = store.get(id);
+      if (!descriptor) return notFound(c);
+      const body = validatedBody<RefreshSessionCredentialsRequest>(c);
+      await provisioner.refresh(descriptor, emit, { credentials: body });
+      const response: RefreshSessionCredentialsResponse = {
+        sessionId: id,
+        accepted: true,
+      };
+      return c.json(response);
+    },
+  );
 
   router.post(
     "/:id/stop",

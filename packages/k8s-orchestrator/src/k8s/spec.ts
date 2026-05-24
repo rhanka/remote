@@ -35,7 +35,7 @@ export type K8sPodSpec = {
     readonly containers: ReadonlyArray<{
       readonly name: string;
       readonly image: string;
-      readonly imagePullPolicy: "Always";
+      readonly imagePullPolicy: "Always" | "IfNotPresent" | "Never";
       readonly env: ReadonlyArray<{
         readonly name: string;
         readonly value: string;
@@ -80,6 +80,7 @@ export type K8sSecretSpec = {
 export type SpecBuilderOptions = {
   readonly namespace: string;
   readonly image: string;
+  readonly imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
   readonly storageClassName?: string;
   readonly defaultWorkspaceSize: string;
   readonly controlPlaneEndpoint: string;
@@ -89,6 +90,7 @@ export type SpecBuilderOptions = {
 const PVC_VOLUME = "workspace";
 const AUTH_VOLUME = "auth";
 const POD_CONTAINER = "session-agent";
+const AUTH_STAGING_DIR = "/run/auth-bundle";
 
 export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
   namespace: "sentropic-remote",
@@ -209,7 +211,7 @@ export function buildSessionPodSpec(
     for (const relPath of authPaths) {
       volumeMounts.push({
         name: AUTH_VOLUME,
-        mountPath: `${options.home.replace(/\/$/, "")}/${relPath}`,
+        mountPath: `${AUTH_STAGING_DIR}/${relPath}`,
         subPath: credentialSecretKey(relPath),
         readOnly: true,
       });
@@ -222,6 +224,14 @@ export function buildSessionPodSpec(
       },
     });
   }
+
+  const startupArgs = (() => {
+    const startup = descriptor.metadata?.startup;
+    if (!startup || typeof startup !== "object") return [];
+    const args = (startup as { args?: unknown }).args;
+    if (!Array.isArray(args)) return [];
+    return args.filter((value): value is string => typeof value === "string");
+  })();
 
   return {
     apiVersion: "v1",
@@ -237,7 +247,7 @@ export function buildSessionPodSpec(
         {
           name: POD_CONTAINER,
           image: options.image,
-          imagePullPolicy: "Always",
+          imagePullPolicy: options.imagePullPolicy ?? "Always",
           env: [
             { name: "SESSION_ID", value: descriptor.id },
             { name: "SESSION_PROFILE", value: descriptor.profile },
@@ -248,6 +258,21 @@ export function buildSessionPodSpec(
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: options.home },
+            ...(authPaths.length > 0
+              ? [
+                  {
+                    name: "SESSION_AUTH_STAGING_DIR",
+                    value: AUTH_STAGING_DIR,
+                  },
+                  {
+                    name: "SESSION_AUTH_BUNDLE_PATHS",
+                    value: authPaths.join(":"),
+                  },
+                ]
+              : []),
+            ...(startupArgs.length > 0
+              ? [{ name: "SESSION_STARTUP_ARGS", value: JSON.stringify(startupArgs) }]
+              : []),
           ],
           volumeMounts,
           ...(Object.keys(resourceLimits).length > 0 ||

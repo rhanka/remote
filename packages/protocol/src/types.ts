@@ -36,8 +36,11 @@ import type {
 import type {
   createSessionRequestSchema,
   createSessionResponseSchema,
+  refreshSessionCredentialsRequestSchema,
+  refreshSessionCredentialsResponseSchema,
   getSessionResponseSchema,
   listSessionsResponseSchema,
+  sessionCredentialsSchema,
   sendInstructionRequestSchema,
   sendInstructionResponseSchema,
   sessionDescriptorSchema,
@@ -54,6 +57,13 @@ import type {
 
 export type Actor = FromSchema<typeof actorSchema>;
 export type SessionDescriptor = FromSchema<typeof sessionDescriptorSchema>;
+export type SessionCredentials = FromSchema<typeof sessionCredentialsSchema>;
+export type RefreshSessionCredentialsRequest = FromSchema<
+  typeof refreshSessionCredentialsRequestSchema
+>;
+export type RefreshSessionCredentialsResponse = FromSchema<
+  typeof refreshSessionCredentialsResponseSchema
+>;
 export type CreateSessionRequest = FromSchema<
   typeof createSessionRequestSchema
 >;

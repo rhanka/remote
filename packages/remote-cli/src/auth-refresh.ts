@@ -14,7 +14,7 @@ const PROFILE_AUTH_STATUS: Partial<Record<CliProfile, AuthStatusCommand>> = {
     args: ["login", "status"],
     refreshHint: "codex login",
   },
-  "claude-code": {
+  claude: {
     command: "claude",
     args: ["auth", "status"],
     refreshHint: "claude auth login",

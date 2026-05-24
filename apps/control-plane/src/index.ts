@@ -89,11 +89,20 @@ export function provisionerFromEnv(): SessionProvisioner {
   const overrides: {
     namespace: string;
     image?: string;
+    imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
     storageClassName?: string;
     controlPlaneEndpoint?: string;
   } = { namespace };
   if (process.env.SESSION_AGENT_IMAGE)
     overrides.image = process.env.SESSION_AGENT_IMAGE;
+  const rawPullPolicy = process.env.SESSION_AGENT_IMAGE_PULL_POLICY;
+  if (
+    rawPullPolicy === "Always" ||
+    rawPullPolicy === "IfNotPresent" ||
+    rawPullPolicy === "Never"
+  ) {
+    overrides.imagePullPolicy = rawPullPolicy;
+  }
   if (process.env.SESSION_STORAGE_CLASS)
     overrides.storageClassName = process.env.SESSION_STORAGE_CLASS;
   if (process.env.CONTROL_PLANE_ENDPOINT)

@@ -41,12 +41,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # a real binary on $PATH. Versions are pinned at image build time.
 ARG CODEX_VERSION=0.130.0
 ARG CLAUDE_VERSION=2.1.142
-ARG GEMINI_VERSION=0.42.0
 RUN npm install -g \
         @openai/codex@${CODEX_VERSION} \
         @anthropic-ai/claude-code@${CLAUDE_VERSION} \
-        @google/gemini-cli@${GEMINI_VERSION} \
     && npm cache clean --force
+
+# Antigravity CLI (Google) is a self-contained Go binary. Install via the
+# official script straight into /usr/local/bin so it is on $PATH for every
+# user (the script detects Linux × amd64/arm64 × glibc/musl and resolves the
+# right release artifact).
+ARG ANTIGRAVITY_INSTALL_URL=https://antigravity.google/cli/install.sh
+RUN curl -fsSL "${ANTIGRAVITY_INSTALL_URL}" | bash -s -- --dir /usr/local/bin \
+ && agy --help >/dev/null
 
 # Copy the entire installed workspace (with hoisted node_modules) plus the
 # compiled dist outputs. node-pty's native binary built in the builder stage

@@ -58,8 +58,8 @@ remote codex --remote http://localhost:8080
 ```
 
 The CLI bundles your local `~/.codex/auth.json` (and equivalents for claude /
-gemini) as a per-session K8s Secret mounted readonly in the Pod, so the agent
-CLI starts already logged in.
+antigravity) as a per-session K8s Secret mounted readonly in the Pod, so the
+agent CLI starts already logged in.
 
 ## Pause / resume the workload
 

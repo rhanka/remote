@@ -8,8 +8,8 @@ export const CLI_PROFILES = [
   "shell",
   "codex",
   "opencode",
-  "claude-code",
-  "gemini-cli",
+  "claude",
+  "agy",
 ] as const;
 
 export const SESSION_TARGETS = ["k3s", "scaleway-kapsule", "gke"] as const;

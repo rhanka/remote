@@ -78,6 +78,7 @@ describe("control plane", () => {
     const paths = doc.paths as Record<string, unknown>;
     expect(paths).toHaveProperty("/sessions/{id}");
     expect(paths).toHaveProperty("/sessions/{id}/stop");
+    expect(paths).toHaveProperty("/sessions/{id}/credentials");
     expect(paths).toHaveProperty("/sessions/{id}/instructions");
     expect(paths).toHaveProperty("/sessions/{id}/events");
   });
@@ -215,6 +216,9 @@ describe("control plane", () => {
       async provision(descriptor: { id: string }) {
         calls.push({ op: "provision", sessionId: descriptor.id });
       },
+      async refresh(_descriptor: { id: string }) {
+        return undefined;
+      },
       async destroy(sessionId: string) {
         calls.push({ op: "destroy", sessionId });
       },
@@ -235,6 +239,50 @@ describe("control plane", () => {
     expect(calls).toEqual([
       { op: "provision", sessionId: id },
       { op: "destroy", sessionId: id },
+    ]);
+  });
+
+  it("refreshes session credentials through the provisioner", async () => {
+    type Call =
+      | { op: "provision"; sessionId: string }
+      | { op: "refresh"; sessionId: string; credentials: string[] };
+    const calls: Call[] = [];
+    const provisioner = {
+      async provision(descriptor: { id: string }) {
+        calls.push({ op: "provision", sessionId: descriptor.id });
+      },
+      async refresh(
+        _descriptor: { id: string },
+        _emit: unknown,
+        options?: { credentials?: Record<string, string> },
+      ) {
+        calls.push({
+          op: "refresh",
+          sessionId: _descriptor.id,
+          credentials: Object.keys(options?.credentials ?? {}),
+        });
+      },
+      async destroy() {
+        return undefined;
+      },
+      async inspect() {
+        return undefined;
+      },
+    };
+    const app = createControlPlane({ provisioner });
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    const response = await app.request(`/sessions/${id}/credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ".codex/auth.json": "Zm9v" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([
+      { op: "provision", sessionId: id },
+      { op: "refresh", sessionId: id, credentials: [".codex/auth.json"] },
     ]);
   });
 

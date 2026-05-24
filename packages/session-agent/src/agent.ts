@@ -61,8 +61,8 @@ const PROFILE_COMMANDS: Readonly<
   shell: { command: "/bin/bash", args: [] },
   codex: { command: "codex", args: [] },
   opencode: { command: "opencode", args: [] },
-  "claude-code": { command: "claude", args: [] },
-  "gemini-cli": { command: "gemini", args: [] },
+  claude: { command: "claude", args: [] },
+  agy: { command: "agy", args: [] },
 };
 
 function defaultRandomId(prefix: string): string {
@@ -70,6 +70,22 @@ function defaultRandomId(prefix: string): string {
     .toString(36)
     .padStart(8, "0");
   return `${prefix}-${random}`;
+}
+
+function parseStartupArgs(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((value): value is string => typeof value === "string")
+    ) {
+      return parsed;
+    }
+  } catch {
+    // ignore malformed payload
+  }
+  return [];
 }
 
 export class SessionAgent {
@@ -100,13 +116,15 @@ export class SessionAgent {
   start(): void {
     const profile =
       PROFILE_COMMANDS[this.profile] ?? PROFILE_COMMANDS["shell"]!;
+    const startupArgs = parseStartupArgs(this.env.SESSION_STARTUP_ARGS);
+    const args = [...profile.args, ...startupArgs];
     this.terminalId = this.randomId("term");
 
     this.transport.onMessage((envelope) => this.handleIncoming(envelope));
 
     const handle = this.spawner({
       command: profile.command,
-      args: profile.args,
+      args,
       cwd: this.workspacePath,
       env: { ...this.env, REMOTE_SESSION_ID: this.sessionId },
       onStdout: (chunk) => this.publishOutput("stdout", chunk),

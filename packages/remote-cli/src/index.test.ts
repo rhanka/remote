@@ -2,6 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const createRemoteSession = vi.fn();
 const attach = vi.fn();
+const getRemoteSession = vi.fn();
+const listRemoteSessions = vi.fn();
+const refreshRemoteSession = vi.fn();
+const stopRemoteSession = vi.fn();
+const getDefaultRemote = vi.fn();
+const setDefaultRemote = vi.fn();
+const clearDefaultRemote = vi.fn();
 const ensureProfileAuthFresh = vi.fn();
 const collectProfileAuth = vi.fn();
 const assertRequiredAuthBundle = vi.fn();
@@ -10,8 +17,10 @@ const run = vi.fn();
 vi.mock("./attach.js", () => ({
   attach,
   createRemoteSession,
-  listRemoteSessions: vi.fn(),
-  stopRemoteSession: vi.fn(),
+  getRemoteSession,
+  listRemoteSessions,
+  stopRemoteSession,
+  refreshRemoteSession,
 }));
 
 vi.mock("./auth-refresh.js", () => ({
@@ -23,6 +32,12 @@ vi.mock("./auth-bundle.js", () => ({
   AuthBundleMissingError: class AuthBundleMissingError extends Error {},
   assertRequiredAuthBundle,
   collectProfileAuth,
+}));
+
+vi.mock("./config.js", () => ({
+  clearDefaultRemote,
+  getDefaultRemote,
+  setDefaultRemote,
 }));
 
 vi.mock("./run.js", () => ({
@@ -47,9 +62,16 @@ describe("main", () => {
   beforeEach(() => {
     createRemoteSession.mockReset();
     attach.mockReset();
+    getRemoteSession.mockReset();
+    listRemoteSessions.mockReset();
+    refreshRemoteSession.mockReset();
+    stopRemoteSession.mockReset();
     ensureProfileAuthFresh.mockReset();
     collectProfileAuth.mockReset();
     assertRequiredAuthBundle.mockReset();
+    getDefaultRemote.mockReset();
+    setDefaultRemote.mockReset();
+    clearDefaultRemote.mockReset();
     run.mockReset();
     stderrWrite.mockClear();
     stdoutWrite.mockClear();
@@ -59,6 +81,17 @@ describe("main", () => {
       close: async () => {},
       finished: Promise.resolve(),
     });
+    refreshRemoteSession.mockResolvedValue({
+      accepted: true,
+      sessionId: "sess-refresh",
+    });
+    getRemoteSession.mockResolvedValue({
+      session: { profile: "codex" },
+    });
+    stopRemoteSession.mockResolvedValue({
+      accepted: true,
+      sessionId: "sess-stop",
+    });
     ensureProfileAuthFresh.mockResolvedValue({
       checked: true,
       command: "codex login status",
@@ -66,6 +99,34 @@ describe("main", () => {
     collectProfileAuth.mockResolvedValue({
       ".codex/auth.json": "BASE64",
     });
+    setDefaultRemote.mockImplementation((url: string) => url);
+  });
+
+  it("uses configured default when --remote is passed without value", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main(["node", "remote", "codex", "--remote"]);
+
+    expect(exitCode).toBe(0);
+    expect(createRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      expect.objectContaining({ profile: "codex" }),
+    );
+  });
+
+  it("stays local when --remote is omitted, even if a default remote is configured", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    run.mockResolvedValue({
+      sessionId: "sess-local",
+      port: 12345,
+      exit: Promise.resolve({ exitCode: 0 }),
+    });
+    const exitCode = await main(["node", "remote", "codex"]);
+
+    expect(exitCode).toBe(0);
+    expect(createRemoteSession).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ profile: "codex" }),
+    );
   });
 
   it("accepts --target on remote profile commands and forwards it to session creation", async () => {
@@ -87,5 +148,137 @@ describe("main", () => {
         target: "scaleway-kapsule",
       }),
     );
+  });
+
+  it("forwards wrapped profile args when running remote", async () => {
+    const exitCode = await main([
+      "node",
+      "remote",
+      "codex",
+      "--remote",
+      "http://localhost:8080",
+      "config",
+      "install",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(createRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      expect.objectContaining({
+        profile: "codex",
+        startupArgs: ["config", "install"],
+      }),
+    );
+  });
+
+  it("refreshes remote credentials for an explicit profile", async () => {
+    const exitCode = await main([
+      "node",
+      "remote",
+      "refresh",
+      "http://localhost:8080",
+      "sess-refresh",
+      "--profile",
+      "codex",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(ensureProfileAuthFresh).toHaveBeenCalledWith("codex");
+    expect(collectProfileAuth).toHaveBeenCalledWith("codex");
+    expect(refreshRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      "sess-refresh",
+      { ".codex/auth.json": "BASE64" },
+    );
+  });
+
+  it("derives profile from remote session when --profile is omitted", async () => {
+    getRemoteSession.mockResolvedValue({
+      session: { profile: "claude" },
+    });
+    const exitCode = await main([
+      "node",
+      "remote",
+      "refresh",
+      "http://localhost:8080",
+      "sess-refresh",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(getRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      "sess-refresh",
+    );
+    expect(refreshRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      "sess-refresh",
+      { ".codex/auth.json": "BASE64" },
+    );
+  });
+
+  it("stores default remote from config set", async () => {
+    setDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main([
+      "node",
+      "remote",
+      "config",
+      "set",
+      "http://localhost:8080",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(setDefaultRemote).toHaveBeenCalledWith("http://localhost:8080");
+  });
+
+  it("aliases remote install to set default remote", async () => {
+    setDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main([
+      "node",
+      "remote",
+      "install",
+      "http://localhost:8080",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(setDefaultRemote).toHaveBeenCalledWith("http://localhost:8080");
+  });
+
+  it("shows default remote when configured", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main(["node", "remote", "config", "show"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdoutWrite).toHaveBeenCalledWith("http://localhost:8080\n");
+  });
+
+  it("clears default remote", async () => {
+    const exitCode = await main(["node", "remote", "config", "clear"]);
+
+    expect(exitCode).toBe(0);
+    expect(clearDefaultRemote).toHaveBeenCalled();
+    expect(stderrWrite).toHaveBeenCalledWith("[remote] cleared default remote\n");
+  });
+
+  it("uses configured default remote for refresh when URL is omitted", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main(["node", "remote", "refresh", "sess-refresh"]);
+
+    expect(exitCode).toBe(0);
+    expect(refreshRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      "sess-refresh",
+      { ".codex/auth.json": "BASE64" },
+    );
+  });
+
+  it("uses configured default remote for attach when URL is omitted", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main(["node", "remote", "attach", "sess-attach"]);
+
+    expect(exitCode).toBe(0);
+    expect(attach).toHaveBeenCalledWith({
+      baseUrl: "http://localhost:8080",
+      sessionId: "sess-attach",
+    });
   });
 });

@@ -39,7 +39,7 @@ describe("inspectProfileAuth", () => {
     });
 
     await expect(
-      inspectProfileAuth("claude-code", {
+      inspectProfileAuth("claude", {
         home: "/home/test",
         runCommand,
         async readFileImpl() {
@@ -68,8 +68,8 @@ describe("inspectProfileAuth", () => {
     });
   });
 
-  it("does not require bundled files for gemini diagnostics", async () => {
-    const result = await inspectProfileAuth("gemini-cli", {
+  it("does not require bundled files for agy diagnostics", async () => {
+    const result = await inspectProfileAuth("agy", {
       home: "/home/test",
       async readFileImpl() {
         throw new Error("ENOENT");
@@ -77,7 +77,7 @@ describe("inspectProfileAuth", () => {
     });
 
     expect(result).toEqual({
-      profile: "gemini-cli",
+      profile: "agy",
       authStatus: { checked: false, reason: "no-status-command" },
       bundledFiles: [],
     });

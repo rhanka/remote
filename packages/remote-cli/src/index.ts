@@ -7,9 +7,16 @@ import { Command } from "commander";
 import {
   attach,
   createRemoteSession,
+  getRemoteSession,
   listRemoteSessions,
+  refreshRemoteSession,
   stopRemoteSession,
 } from "./attach.js";
+import {
+  clearDefaultRemote,
+  getDefaultRemote,
+  setDefaultRemote,
+} from "./config.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -20,7 +27,7 @@ import {
   assertRequiredAuthBundle,
   collectProfileAuth,
 } from "./auth-bundle.js";
-import { coerceCliProfileName, isCliProfile } from "./profiles.js";
+import { coerceCliProfileName, isCliProfile, resolveProfile } from "./profiles.js";
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
 
@@ -31,7 +38,9 @@ export type { RunOptions, RunResult } from "./run.js";
 export {
   attach,
   createRemoteSession,
+  getRemoteSession,
   listRemoteSessions,
+  refreshRemoteSession,
   stopRemoteSession,
 } from "./attach.js";
 export type { AttachOptions, AttachResult } from "./attach.js";
@@ -61,7 +70,7 @@ export type {
 } from "./smoke.js";
 
 type ProfileOpts = {
-  resume?: string;
+  resume?: string | true;
   port?: number;
   remote?: string;
   target?: "k3s" | "scaleway-kapsule" | "gke";
@@ -69,14 +78,24 @@ type ProfileOpts = {
   authRefresh?: boolean;
 };
 
+type ProfileCliOpts = Omit<ProfileOpts, "remote"> & {
+  remote?: string | boolean;
+};
+
 type AuthDiagnosticOpts = {
   authRefresh?: boolean;
 };
 
 type SmokeOpts = {
-  remote: string;
+  remote?: string;
   target?: "k3s" | "scaleway-kapsule" | "gke";
   timeout?: number;
+  auth?: boolean;
+  authRefresh?: boolean;
+};
+
+type RefreshOpts = {
+  profile?: string;
   auth?: boolean;
   authRefresh?: boolean;
 };
@@ -86,9 +105,17 @@ function describeAuthStatus(status: AuthDiagnosticsStatus): string {
   return `skipped: ${status.reason}`;
 }
 
+function resumeStartupArgs(profileName: string, resume: string | true): string[] {
+  if (!isCliProfile(profileName)) return [];
+  const config = resolveProfile(profileName);
+  if (!config.resumeFlag) return [];
+  return resume === true ? [config.resumeFlag] : [config.resumeFlag, resume];
+}
+
 async function runProfile(
   profileName: string,
   opts: ProfileOpts,
+  commandArgs: readonly string[] = [],
 ): Promise<void> {
   if (opts.remote) {
     let credentials: Readonly<Record<string, string>> | undefined;
@@ -103,31 +130,37 @@ async function runProfile(
       assertRequiredAuthBundle(profileName, bundle);
       if (Object.keys(bundle).length > 0) credentials = bundle;
     }
-    const sessionId =
-      opts.resume ??
-      (
-        await createRemoteSession(opts.remote, {
-          profile: profileName,
-          target: opts.target ?? "k3s",
-          ...(credentials ? { credentials } : {}),
-        })
-      ).id;
+    const resumeArgs =
+      opts.resume !== undefined
+        ? resumeStartupArgs(profileName, opts.resume)
+        : [];
+    const startupArgs = [...resumeArgs, ...commandArgs];
+    const session = await createRemoteSession(opts.remote, {
+      profile: profileName,
+      target: opts.target ?? "k3s",
+      ...(startupArgs.length > 0 ? { startupArgs } : {}),
+      ...(credentials ? { credentials } : {}),
+    });
     if (credentials) {
       process.stderr.write(
         `[remote] bundled ${Object.keys(credentials).length} auth file(s) for ${profileName}\n`,
       );
     }
     process.stderr.write(
-      `[remote] attached to ${opts.remote}/sessions/${sessionId}\n`,
+      `[remote] attached to ${opts.remote}/sessions/${session.id}\n`,
     );
-    const session = await attach({ baseUrl: opts.remote, sessionId });
-    await session.finished;
+    const attachSession = await attach({
+      baseUrl: opts.remote,
+      sessionId: session.id,
+    });
+    await attachSession.finished;
     return;
   }
   const runOptions: import("./run.js").RunOptions = {
     profile: profileName,
     ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
     ...(opts.port !== undefined ? { port: opts.port } : {}),
+    ...(commandArgs.length > 0 ? { startupArgs: commandArgs } : {}),
   };
   const result = await run(runOptions);
   process.stderr.write(
@@ -137,34 +170,126 @@ async function runProfile(
   process.exitCode = exitCode;
 }
 
+async function refreshProfileSession(
+  baseUrl: string,
+  sessionId: string,
+  opts: RefreshOpts,
+): Promise<void> {
+  const remoteProfile = (await getRemoteSession(baseUrl, sessionId)).session
+    .profile;
+  const requestedProfile = opts.profile ?? remoteProfile;
+  if (opts.profile && coerceCliProfileName(opts.profile) !== coerceCliProfileName(remoteProfile)) {
+    process.stderr.write(
+      `[remote] warning: --profile ${opts.profile} does not match the session profile ${remoteProfile}; bundling ${opts.profile} credentials anyway\n`,
+    );
+  }
+  const profileName = coerceCliProfileName(requestedProfile);
+  if (!profileName) {
+    throw new Error(
+      `Unknown profile "${requestedProfile}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
+    );
+  }
+
+  let credentials: Readonly<Record<string, string>> | undefined;
+  if (opts.auth !== false) {
+    if (opts.authRefresh !== false) {
+      const result = await ensureProfileAuthFresh(profileName);
+      if (result.checked) {
+        process.stderr.write(`[remote] auth status ok: ${result.command}\n`);
+      }
+    }
+    const bundle = await collectProfileAuth(profileName);
+    assertRequiredAuthBundle(profileName, bundle);
+    if (Object.keys(bundle).length > 0) credentials = bundle;
+  }
+
+  if (!credentials || Object.keys(credentials).length === 0) {
+    process.stderr.write(
+      `[remote] no credentials to refresh for session ${sessionId} (${profileName})\n`,
+    );
+    return;
+  }
+
+  const response = await refreshRemoteSession(baseUrl, sessionId, credentials);
+  process.stderr.write(
+    `[remote] refresh ${response.accepted ? "accepted" : "rejected"} for ${response.sessionId}\n`,
+  );
+}
+
+function getConfiguredRemote(overrideUrl?: string): string {
+  const remote = overrideUrl ?? getConfiguredRemoteOptional();
+  if (!remote) {
+    throw new Error(
+      "No remote URL configured. Set one with `remote config set <url>` (or `remote install <url>`) or pass --remote/URL explicitly.",
+    );
+  }
+  return remote;
+}
+
+function getConfiguredRemoteOptional(): string | undefined {
+  try {
+    return getDefaultRemote();
+  } catch {
+    return undefined;
+  }
+}
+
+function looksLikeUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function resolveUrlAndSessionId(
+  first: string,
+  second: string | undefined,
+): { url: string; sessionId: string } {
+  if (second !== undefined) {
+    return { url: getConfiguredRemote(first), sessionId: second };
+  }
+  if (looksLikeUrl(first)) {
+    throw new Error(
+      `Missing session id. Usage: remote <command> [url] <sessionId> (received URL "${first}" without session id).`,
+    );
+  }
+  return { url: getConfiguredRemote(), sessionId: first };
+}
+
+function setAndReportDefaultRemote(url: string): void {
+  const configured = setDefaultRemote(url);
+  process.stderr.write(`[remote] default remote set to ${configured}\n`);
+}
+
 export async function main(argv: ReadonlyArray<string>): Promise<number> {
   const program = new Command();
   program
     .name("remote")
     .description(
-      "Wrap a local agent CLI (codex/claude/gemini) and expose its session for remote attach.",
+      "Wrap a local agent CLI (codex/claude/agy) and expose its session for remote attach.",
     )
     .version("0.0.0");
 
   for (const [profileName, alias] of [
     ["codex", undefined],
-    ["claude-code", "claude"],
-    ["gemini-cli", "gemini"],
+    ["claude", "claude-code"],
+    ["agy", "antigravity"],
     ["opencode", undefined],
     ["shell", undefined],
   ] as const) {
     const cmd = program
       .command(profileName)
       .description(`Run ${profileName} via remote-cli`)
-      .option("-r, --resume <id>", "resume an existing session id")
+      .argument("[commandArgs...]", "Arguments passed to the wrapped CLI")
+      .option(
+        "-r, --resume [convId]",
+        "resume the wrapped CLI's last conversation (or a specific one by id) using its native --continue/--resume flag",
+      )
       .option(
         "-p, --port <port>",
         "expose the in-process control-plane on this port",
         (value) => Number(value),
       )
       .option(
-        "--remote <url>",
-        "create the session on a remote control-plane and attach instead of running locally",
+        "--remote [url]",
+        "create the session on a remote control-plane and attach instead of running locally; URL optional when a default remote is configured",
       )
       .option(
         "--target <target>",
@@ -179,11 +304,33 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "--no-auth-refresh",
         "skip local auth status preflight before bundling credentials",
       )
-      .action(async (opts: ProfileOpts) => {
-        await runProfile(profileName, opts);
+      .action(async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {
+        const { remote: rawRemote, ...rest } = opts;
+        let remote: string | undefined;
+        if (rawRemote !== undefined) {
+          remote =
+            typeof rawRemote === "string" && rawRemote.length > 0
+              ? rawRemote
+              : getConfiguredRemote();
+        }
+        await runProfile(
+          profileName,
+          {
+            ...rest,
+            ...(remote !== undefined ? { remote } : {}),
+          },
+          commandArgs ?? [],
+        );
       });
     if (alias) cmd.alias(alias);
   }
+
+  program
+    .command("install <url>")
+    .description("Set default remote URL for commands that omit remote URL")
+    .action((url: string) => {
+      setAndReportDefaultRemote(url);
+    });
 
   program
     .command("auth <profile>")
@@ -196,7 +343,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const profile = coerceCliProfileName(profileName);
       if (!profile) {
         throw new Error(
-          `Unknown profile "${profileName}". Known: codex, claude, claude-code, gemini, gemini-cli, opencode, shell`,
+          `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
         );
       }
       const result = await inspectProfileAuth(profile, {
@@ -214,13 +361,39 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
     });
 
-  program
-    .command("smoke <profile>")
+  const checkAction = async (profileName: string, opts: SmokeOpts) => {
+    const profile = coerceCliProfileName(profileName);
+    if (!profile) {
+      throw new Error(
+        `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
+      );
+    }
+    const remote = getConfiguredRemote(opts.remote);
+    const result = await smokeRemoteProfile({
+      profile,
+      baseUrl: remote,
+      target: opts.target ?? "k3s",
+      timeoutMs: opts.timeout ?? 120_000,
+      ...(opts.auth !== undefined ? { auth: opts.auth } : {}),
+      ...(opts.authRefresh !== undefined
+        ? { authRefresh: opts.authRefresh }
+        : {}),
+    });
+    process.stdout.write(`profile: ${result.profile}\n`);
+    process.stdout.write(`session: ${result.sessionId}\n`);
+    process.stdout.write(`terminal: ${result.terminalId}\n`);
+    process.stdout.write(`shell: ${result.shell}\n`);
+    process.stdout.write("stopped: true\n");
+  };
+
+  const checkCommand = program
+    .command("check <profile>")
+    .alias("smoke")
     .description(
-      "Create a remote profile session, wait for terminal.opened, then stop it",
+      "End-to-end probe: create a remote session for <profile>, wait for the Pod's terminal.opened, then stop it. Exits non-zero on failure.",
     )
-    .requiredOption(
-      "--remote <url>",
+    .option(
+      "--remote [url]",
       "remote control-plane base URL, for example http://localhost:8080",
     )
     .option(
@@ -239,34 +412,47 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--no-auth-refresh",
       "skip local auth status preflight before bundling credentials",
     )
-    .action(async (profileName: string, opts: SmokeOpts) => {
-      const profile = coerceCliProfileName(profileName);
-      if (!profile) {
-        throw new Error(
-          `Unknown profile "${profileName}". Known: codex, claude, claude-code, gemini, gemini-cli, opencode, shell`,
-        );
+    .action(checkAction);
+  void checkCommand;
+
+  const configCommand = program
+    .command("config")
+    .description("Manage remote endpoint configuration");
+
+  configCommand
+    .command("set <url>")
+    .description("Set default remote URL (used when URL is not passed)")
+    .action((url: string) => {
+      setAndReportDefaultRemote(url);
+    });
+
+  configCommand
+    .command("clear")
+    .description("Clear default remote URL")
+    .action(() => {
+      clearDefaultRemote();
+      process.stderr.write("[remote] cleared default remote\n");
+    });
+
+  configCommand
+    .command("show")
+    .description("Display configured default remote URL")
+    .action(() => {
+      const remote = getDefaultRemote();
+      if (remote) {
+        process.stdout.write(`${remote}\n`);
+      } else {
+        process.stdout.write("[remote] no default remote configured\n");
       }
-      const result = await smokeRemoteProfile({
-        profile,
-        baseUrl: opts.remote,
-        target: opts.target ?? "k3s",
-        timeoutMs: opts.timeout ?? 120_000,
-        ...(opts.auth !== undefined ? { auth: opts.auth } : {}),
-        ...(opts.authRefresh !== undefined
-          ? { authRefresh: opts.authRefresh }
-          : {}),
-      });
-      process.stdout.write(`profile: ${result.profile}\n`);
-      process.stdout.write(`session: ${result.sessionId}\n`);
-      process.stdout.write(`terminal: ${result.terminalId}\n`);
-      process.stdout.write(`shell: ${result.shell}\n`);
-      process.stdout.write("stopped: true\n");
     });
 
   program
-    .command("attach <url> <sessionId>")
-    .description("Attach to an existing session on a remote control-plane")
-    .action(async (url: string, sessionId: string) => {
+    .command("attach <urlOrSessionId> [sessionId]")
+    .description(
+      "Attach to an existing session on a remote control-plane. URL is optional when a default remote is configured.",
+    )
+    .action(async (first: string, second: string | undefined) => {
+      const { url, sessionId } = resolveUrlAndSessionId(first, second);
       process.stderr.write(
         `[remote] attaching to ${url}/sessions/${sessionId}\n`,
       );
@@ -275,10 +461,35 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     });
 
   program
-    .command("ls <url>")
+    .command("refresh <urlOrSessionId> [sessionId]")
+    .description(
+      "Re-bundle the local CLI credentials and push them to an existing remote session's Secret. The session's Pod is restarted by the control-plane so the new tokens take effect. Profile is auto-detected from the session.",
+    )
+    .option(
+      "--profile <profile>",
+      "override the auto-detected profile (rarely needed)",
+    )
+    .option("--no-auth", "skip bundling local credentials")
+    .option(
+      "--no-auth-refresh",
+      "skip local auth status preflight before bundling credentials",
+    )
+    .action(
+      async (
+        first: string,
+        second: string | undefined,
+        opts: RefreshOpts,
+      ) => {
+        const { url, sessionId } = resolveUrlAndSessionId(first, second);
+        await refreshProfileSession(url, sessionId, opts);
+      },
+    );
+
+  program
+    .command("ls [url]")
     .description("List sessions on a remote control-plane")
-    .action(async (url: string) => {
-      const sessions = await listRemoteSessions(url);
+    .action(async (url: string | undefined) => {
+      const sessions = await listRemoteSessions(getConfiguredRemote(url));
       if (sessions.length === 0) {
         process.stderr.write("[remote] no sessions\n");
         return;
@@ -294,11 +505,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     });
 
   program
-    .command("stop <url> <sessionId>")
-    .description("Stop a session on a remote control-plane")
+    .command("stop <urlOrSessionId> [sessionId]")
+    .description(
+      "Stop a session on a remote control-plane. URL is optional when a default remote is configured.",
+    )
     .option("--reason <reason>", "reason recorded with the stop")
     .action(
-      async (url: string, sessionId: string, opts: { reason?: string }) => {
+      async (
+        first: string,
+        second: string | undefined,
+        opts: { reason?: string },
+      ) => {
+        const { url, sessionId } = resolveUrlAndSessionId(first, second);
         const result = await stopRemoteSession(url, sessionId, opts.reason);
         process.stderr.write(
           `[remote] stop ${result.accepted ? "accepted" : "rejected"} for ${sessionId}\n`,

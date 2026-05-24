@@ -27,14 +27,14 @@ describe("ensureProfileAuthFresh", () => {
       return { status: 0, stdout: '{"loggedIn":true}', stderr: "" };
     };
 
-    const result = await ensureProfileAuthFresh("claude-code", { runCommand });
+    const result = await ensureProfileAuthFresh("claude", { runCommand });
 
     expect(result).toEqual({ checked: true, command: "claude auth status" });
     expect(calls).toEqual([{ command: "claude", args: ["auth", "status"] }]);
   });
 
   it("returns no-status-command for profiles without a noninteractive auth status", async () => {
-    const result = await ensureProfileAuthFresh("gemini-cli", {
+    const result = await ensureProfileAuthFresh("agy", {
       async runCommand() {
         throw new Error("should not be called");
       },

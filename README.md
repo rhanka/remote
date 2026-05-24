@@ -2,14 +2,14 @@
 
 Kubernetes-native orchestration for delegated CLI sessions.
 
-Repository codename: `remote-controle`.
+Repository: `rhanka/remote` (codename was `remote-controle` during scaffold).
 
 ## Stack
 
 - Backend: TypeScript control plane.
 - Frontend: Svelte 5 operator UI.
 - UI design system: `@sent-tech/components-svelte`.
-- Workspace: pnpm monorepo.
+- Workspace: npm monorepo.
 - First runtime target: k3s, then Scaleway Kapsule, then GKE.
 
 ## Docs

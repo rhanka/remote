@@ -289,14 +289,56 @@ export async function stopRemoteSession(
   return { accepted: json.accepted };
 }
 
+export async function getRemoteSession(
+  baseUrl: string,
+  sessionId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ session: { profile: string } }> {
+  const response = await fetchImpl(joinUrl(baseUrl, `/sessions/${sessionId}`));
+  if (!response.ok) {
+    throw new Error(
+      `getRemoteSession: ${response.status} ${response.statusText}`,
+    );
+  }
+  return (await response.json()) as { session: { profile: string } };
+}
+
+export async function refreshRemoteSession(
+  baseUrl: string,
+  sessionId: string,
+  credentials: Readonly<Record<string, string>>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ sessionId: string; accepted: boolean }> {
+  const response = await fetchImpl(
+    joinUrl(baseUrl, `/sessions/${sessionId}/credentials`),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(credentials),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `refreshRemoteSession: ${response.status} ${response.statusText}`,
+    );
+  }
+  const json = (await response.json()) as {
+    sessionId: string;
+    accepted: boolean;
+  };
+  return { sessionId: json.sessionId, accepted: json.accepted };
+}
+
 export async function createRemoteSession(
   baseUrl: string,
   body: {
     profile: string;
     target?: string;
     resume?: string;
+    startupArgs?: readonly string[];
     displayName?: string;
     credentials?: Readonly<Record<string, string>>;
+    metadata?: Readonly<Record<string, unknown>>;
   },
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ id: string }> {
@@ -305,7 +347,20 @@ export async function createRemoteSession(
     target: body.target ?? "k3s",
   };
   if (body.displayName) payload.displayName = body.displayName;
-  if (body.resume) payload.metadata = { resume: body.resume };
+  if (
+    body.resume !== undefined ||
+    (body.startupArgs?.length ?? 0) > 0 ||
+    body.metadata !== undefined
+  ) {
+    const metadata: Record<string, unknown> = {
+      ...(body.metadata ?? {}),
+      ...(body.resume !== undefined ? { resume: body.resume } : {}),
+      ...(body.startupArgs?.length
+        ? { startup: { args: body.startupArgs } }
+        : {}),
+    };
+    payload.metadata = metadata;
+  }
   if (body.credentials && Object.keys(body.credentials).length > 0)
     payload.credentials = body.credentials;
 

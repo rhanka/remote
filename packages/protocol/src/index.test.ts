@@ -27,8 +27,8 @@ describe("protocol constants", () => {
       "shell",
       "codex",
       "opencode",
-      "claude-code",
-      "gemini-cli",
+      "claude",
+      "agy",
     ]);
   });
 

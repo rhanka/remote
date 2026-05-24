@@ -156,6 +156,40 @@ describe("K8sSessionProvisioner", () => {
     expect(ops[0]!.name).toBe("session-sess-test1-auth");
   });
 
+  it("recreates the Pod and updates the auth secret on refresh", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "demo-ns",
+    });
+    await provisioner.provision(descriptor, () => {
+      return;
+    }, {
+      credentials: {
+        ".codex/auth.json": "OLD_TOKEN",
+      },
+    });
+    ops.length = 0;
+
+    await provisioner.refresh(
+      descriptor,
+      () => {
+        return;
+      },
+      {
+        credentials: {
+          ".codex/auth.json": "NEW_TOKEN",
+        },
+      },
+    );
+
+    expect(ops.map((op) => `${op.op}:${op.kind}`)).toEqual([
+      "delete:Pod",
+      "delete:Secret",
+      "create:Secret",
+      "create:Pod",
+    ]);
+  });
+
   it("ensures KubernetesListObject typing surface stays usable", () => {
     const list: KubernetesListObject<KubernetesObject> = {
       apiVersion: "v1",

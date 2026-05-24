@@ -23,6 +23,11 @@ export interface SessionProvisioner {
     emit: ProvisionerEmit,
     options?: ProvisionOptions,
   ): Promise<void>;
+  refresh(
+    descriptor: SessionDescriptor,
+    emit: ProvisionerEmit,
+    options?: ProvisionOptions,
+  ): Promise<void>;
   destroy(sessionId: string, emit: ProvisionerEmit): Promise<void>;
   inspect(sessionId: string): Promise<{ phase: string } | undefined>;
 }
@@ -47,6 +52,14 @@ export class InMemoryProvisioner implements SessionProvisioner {
         nextState: transition.to,
       });
     }
+  }
+
+  async refresh(
+    _descriptor: SessionDescriptor,
+    _emit: ProvisionerEmit,
+    _options: ProvisionOptions = {},
+  ): Promise<void> {
+    return;
   }
 
   async destroy(sessionId: string, emit: ProvisionerEmit): Promise<void> {

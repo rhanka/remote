@@ -10,8 +10,8 @@ import {
 describe("profiles", () => {
   it("resolves known profiles to their binary command", () => {
     expect(resolveProfile("codex").command).toBe("codex");
-    expect(resolveProfile("claude-code").command).toBe("claude");
-    expect(resolveProfile("gemini-cli").command).toBe("gemini");
+    expect(resolveProfile("claude").command).toBe("claude");
+    expect(resolveProfile("agy").command).toBe("agy");
     expect(resolveProfile("shell").command).toBe("/bin/bash");
   });
 
@@ -34,8 +34,10 @@ describe("profiles", () => {
   });
 
   it("coerces CLI aliases to canonical profile names", () => {
-    expect(coerceCliProfileName("claude")).toBe("claude-code");
-    expect(coerceCliProfileName("gemini")).toBe("gemini-cli");
+    expect(coerceCliProfileName("claude")).toBe("claude");
+    expect(coerceCliProfileName("claude-code")).toBe("claude");
+    expect(coerceCliProfileName("agy")).toBe("agy");
+    expect(coerceCliProfileName("antigravity")).toBe("agy");
     expect(coerceCliProfileName("codex")).toBe("codex");
     expect(coerceCliProfileName("not-real")).toBeUndefined();
   });
