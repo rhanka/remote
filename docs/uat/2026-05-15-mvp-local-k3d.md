@@ -85,8 +85,8 @@ remote codex --resume <sid>   # reprend une session codex existante (--continue 
 Préflight local sans création de Pod :
 
 ```bash
-remote auth codex
-remote auth claude
+remote auth status codex
+remote auth status claude
 ```
 
 **Attendu :**

@@ -28,8 +28,11 @@ import {
   collectProfileAuth,
 } from "./auth-bundle.js";
 import { coerceCliProfileName, isCliProfile, resolveProfile } from "./profiles.js";
+import { getLoginCommand, runInteractiveLogin } from "./auth-login.js";
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
+
+import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
 
 export const packageName = "@sentropic/remote-cli";
 
@@ -143,7 +146,10 @@ async function runProfile(
     });
     if (credentials) {
       process.stderr.write(
-        `[remote] bundled ${Object.keys(credentials).length} auth file(s) for ${profileName}\n`,
+        `[remote] sending ${profileName} creds to ${opts.remote}: ${Object.keys(credentials).join(", ")}\n`,
+      );
+      process.stderr.write(
+        `[remote] (use --no-auth to start without credentials)\n`,
       );
     }
     process.stderr.write(
@@ -213,6 +219,42 @@ async function refreshProfileSession(
   const response = await refreshRemoteSession(baseUrl, sessionId, credentials);
   process.stderr.write(
     `[remote] refresh ${response.accepted ? "accepted" : "rejected"} for ${response.sessionId}\n`,
+  );
+}
+
+async function pushAllProfiles(
+  baseUrl: string,
+  sessionId: string,
+  opts: { authRefresh?: boolean },
+): Promise<void> {
+  const merged: Record<string, string> = {};
+  const sent: string[] = [];
+  for (const profile of CLI_PROFILES) {
+    if (opts.authRefresh !== false) {
+      try {
+        await ensureProfileAuthFresh(profile);
+      } catch {
+        // a profile that fails its preflight is simply skipped in --all mode
+        continue;
+      }
+    }
+    const bundle = await collectProfileAuth(profile);
+    if (Object.keys(bundle).length === 0) continue;
+    Object.assign(merged, bundle);
+    sent.push(profile);
+  }
+  if (sent.length === 0) {
+    process.stderr.write(
+      `[remote] no local credentials found for any profile; nothing to push\n`,
+    );
+    return;
+  }
+  process.stderr.write(
+    `[remote] sending creds for ${sent.join(", ")} to ${baseUrl}/sessions/${sessionId}: ${Object.keys(merged).join(", ")}\n`,
+  );
+  const response = await refreshRemoteSession(baseUrl, sessionId, merged);
+  process.stderr.write(
+    `[remote] push ${response.accepted ? "accepted" : "rejected"} for ${response.sessionId}\n`,
   );
 }
 
@@ -328,34 +370,125 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       setAndReportDefaultRemote(url);
     });
 
-  program
-    .command("auth <profile>")
-    .description("Check local auth status and bundled credential files")
+  const authCommand = program
+    .command("auth")
+    .description("Inspect and manage the local CLI credentials remote sends to sessions");
+
+  const printAuthStatus = async (
+    profile: CliProfile,
+    opts: AuthDiagnosticOpts,
+  ): Promise<void> => {
+    const result = await inspectProfileAuth(profile, {
+      ...(opts.authRefresh !== undefined ? { authRefresh: opts.authRefresh } : {}),
+    });
+    process.stdout.write(`profile: ${result.profile}\n`);
+    process.stdout.write(
+      `auth status: ${describeAuthStatus(result.authStatus)}\n`,
+    );
+    process.stdout.write(`bundled files: ${result.bundledFiles.length}\n`);
+    for (const file of result.bundledFiles) {
+      process.stdout.write(`- ${file}\n`);
+    }
+  };
+
+  authCommand
+    .command("status [profile]")
+    .description(
+      "Show local auth status and which credential files would be sent. With --all, report every profile.",
+    )
+    .option("--all", "report every known CLI profile")
     .option(
       "--no-auth-refresh",
-      "skip local auth status preflight and only inspect bundled files",
+      "skip the local auth status preflight and only inspect bundled files",
     )
-    .action(async (profileName: string, opts: AuthDiagnosticOpts) => {
+    .action(
+      async (
+        profileName: string | undefined,
+        opts: AuthDiagnosticOpts & { all?: boolean },
+      ) => {
+        if (opts.all) {
+          for (const profile of CLI_PROFILES) {
+            await printAuthStatus(profile, opts);
+            process.stdout.write("\n");
+          }
+          return;
+        }
+        if (!profileName) {
+          throw new Error(
+            "Specify a profile (e.g. `remote auth status codex`) or pass --all.",
+          );
+        }
+        const profile = coerceCliProfileName(profileName);
+        if (!profile) {
+          throw new Error(
+            `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
+          );
+        }
+        await printAuthStatus(profile, opts);
+      },
+    );
+
+  authCommand
+    .command("login <profile>")
+    .description(
+      "Run the CLI's local login flow (for the not-yet-authenticated case), then show status",
+    )
+    .action(async (profileName: string) => {
       const profile = coerceCliProfileName(profileName);
       if (!profile) {
         throw new Error(
           `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
         );
       }
-      const result = await inspectProfileAuth(profile, {
-        ...(opts.authRefresh !== undefined
-          ? { authRefresh: opts.authRefresh }
-          : {}),
-      });
-      process.stdout.write(`profile: ${result.profile}\n`);
-      process.stdout.write(
-        `auth status: ${describeAuthStatus(result.authStatus)}\n`,
-      );
-      process.stdout.write(`bundled files: ${result.bundledFiles.length}\n`);
-      for (const file of result.bundledFiles) {
-        process.stdout.write(`- ${file}\n`);
+      const loginCommand = getLoginCommand(profile);
+      if (!loginCommand) {
+        process.stderr.write(
+          `[remote] ${profile} has no scripted login. Run \`${profile}\` directly and complete its sign-in flow (browser / SSH-mode URL), then \`remote auth status ${profile}\`.\n`,
+        );
+        return;
       }
+      process.stderr.write(
+        `[remote] running ${loginCommand.command} ${loginCommand.args.join(" ")}\n`,
+      );
+      const code = await runInteractiveLogin(loginCommand);
+      if (code !== 0) {
+        process.stderr.write(
+          `[remote] login exited with code ${code}; check the output above.\n`,
+        );
+        process.exitCode = code;
+        return;
+      }
+      await printAuthStatus(profile, {});
     });
+
+  authCommand
+    .command("push <urlOrSessionId> [sessionId]")
+    .description(
+      "Send local credentials to an existing remote session's Secret (the Pod is restarted). URL optional when a default remote is configured. Profile is auto-detected; --all sends every profile that has local creds.",
+    )
+    .option(
+      "--profile <profile>",
+      "override the auto-detected profile (rarely needed)",
+    )
+    .option("--all", "bundle and send every local profile's credentials")
+    .option(
+      "--no-auth-refresh",
+      "skip the local auth status preflight before bundling",
+    )
+    .action(
+      async (
+        first: string,
+        second: string | undefined,
+        opts: RefreshOpts & { all?: boolean },
+      ) => {
+        const { url, sessionId } = resolveUrlAndSessionId(first, second);
+        if (opts.all) {
+          await pushAllProfiles(url, sessionId, opts);
+          return;
+        }
+        await refreshProfileSession(url, sessionId, opts);
+      },
+    );
 
   const checkAction = async (profileName: string, opts: SmokeOpts) => {
     const profile = coerceCliProfileName(profileName);

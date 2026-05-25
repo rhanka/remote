@@ -23,9 +23,10 @@ Ordre conseillé : `codex` d'abord (preflight le plus fiable), puis `claude`, pu
 ### 1. Diagnostic local (sans créer de Pod)
 
 ```bash
-remote auth codex
-remote auth claude
-remote auth antigravity
+remote auth status codex
+remote auth status claude
+remote auth status agy
+# ou tout d'un coup : remote auth status --all
 ```
 
 **Attendu** :

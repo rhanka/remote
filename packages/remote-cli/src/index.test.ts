@@ -306,4 +306,41 @@ describe("main", () => {
       sessionId: "sess-attach",
     });
   });
+
+  it("auth status --all reports every profile", async () => {
+    const exitCode = await main(["node", "remote", "auth", "status", "--all"]);
+
+    expect(exitCode).toBe(0);
+    const out = stdoutWrite.mock.calls.map((c) => String(c[0])).join("");
+    expect(out).toContain("profile: codex");
+    expect(out).toContain("profile: claude");
+    expect(out).toContain("profile: agy");
+  });
+
+  it("auth login on a profile without a scripted login prints guidance", async () => {
+    const exitCode = await main(["node", "remote", "auth", "login", "agy"]);
+
+    expect(exitCode).toBe(0);
+    const err = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+    expect(err).toContain("no scripted login");
+  });
+
+  it("auth push --all merges every local profile's creds into one refresh", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main([
+      "node",
+      "remote",
+      "auth",
+      "push",
+      "sess-push",
+      "--all",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(refreshRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      "sess-push",
+      { ".codex/auth.json": "BASE64" },
+    );
+  });
 });
