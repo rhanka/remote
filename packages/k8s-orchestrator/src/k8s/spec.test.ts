@@ -92,6 +92,22 @@ describe("k8s spec builders", () => {
     }
   });
 
+  it("sets SESSION_WORKSPACE_SYNC=1 only when workspaceSync is requested", () => {
+    const off = buildSessionPodSpec(baseDescriptor);
+    expect(
+      off.spec.containers[0]!.env.find(
+        (e) => e.name === "SESSION_WORKSPACE_SYNC",
+      ),
+    ).toBeUndefined();
+
+    const on = buildSessionPodSpec(baseDescriptor, DEFAULT_BUILDER_OPTIONS, [], true);
+    expect(
+      on.spec.containers[0]!.env.find(
+        (e) => e.name === "SESSION_WORKSPACE_SYNC",
+      )?.value,
+    ).toBe("1");
+  });
+
   it("passes startup args metadata into SESSION_STARTUP_ARGS", () => {
     const descriptor: SessionDescriptor = {
       ...baseDescriptor,

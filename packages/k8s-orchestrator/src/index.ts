@@ -15,6 +15,7 @@ export type ProvisionerEmit = (
 
 export type ProvisionOptions = {
   readonly credentials?: Readonly<Record<string, string>>;
+  readonly workspaceSync?: boolean;
 };
 
 export interface SessionProvisioner {

@@ -101,6 +101,8 @@ export function createSessionsRouter(
 
   const router = new Hono<{ Variables: ValidationVars }>();
 
+  const workspaceArchives = new Map<string, Uint8Array>();
+
   const emit: ProvisionerEmit = (sessionId, type, payload) => {
     bus.publish(sessionId, type, payload);
   };
@@ -153,6 +155,7 @@ export function createSessionsRouter(
   ): boolean {
     if (!store.get(id)) return false;
     store.delete(id);
+    workspaceArchives.delete(id);
     void provisioner
       .destroy(id, emit)
       .catch((error: unknown) => {
@@ -185,6 +188,7 @@ export function createSessionsRouter(
     const req = validatedBody<
       CreateSessionRequest & {
         credentials?: Record<string, string>;
+        workspaceSync?: boolean;
       }
     >(c);
     const descriptor = store.put(buildDescriptor(req));
@@ -192,12 +196,42 @@ export function createSessionsRouter(
       nextState: "requested",
     });
     watchForTerminalExited(descriptor.id);
-    const provisionOptions = req.credentials
-      ? { credentials: req.credentials }
-      : {};
+    const provisionOptions: {
+      credentials?: Record<string, string>;
+      workspaceSync?: boolean;
+    } = {};
+    if (req.credentials) provisionOptions.credentials = req.credentials;
+    if (req.workspaceSync) provisionOptions.workspaceSync = true;
     void provisioner.provision(descriptor, emit, provisionOptions);
     const response: CreateSessionResponse = { session: descriptor };
     return c.json(response, 201);
+  });
+
+  // Workspace archive staging: the CLI uploads a tar.gz of the cwd here after
+  // session creation; the session-agent fetches it (with retry) on startup and
+  // extracts it into /workspace. Held in memory, dropped on stop.
+  router.post("/:id/workspace", async (c) => {
+    const id = c.req.param("id");
+    if (!store.get(id)) return notFound(c);
+    const body = new Uint8Array(await c.req.arrayBuffer());
+    if (body.byteLength === 0) {
+      return c.json(
+        { code: "workspace.empty", message: "Empty archive", retryable: false },
+        400,
+      );
+    }
+    workspaceArchives.set(id, body);
+    return c.json({ sessionId: id, bytes: body.byteLength, accepted: true });
+  });
+
+  router.get("/:id/workspace", (c) => {
+    const id = c.req.param("id");
+    const archive = workspaceArchives.get(id);
+    if (!archive) return notFound(c);
+    return new Response(archive as unknown as BodyInit, {
+      status: 200,
+      headers: { "content-type": "application/gzip" },
+    });
   });
 
   router.get("/", (c) => {

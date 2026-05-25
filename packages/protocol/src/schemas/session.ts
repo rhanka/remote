@@ -127,6 +127,11 @@ export const createSessionRequestSchema = {
     },
     metadata: metadataSchema,
     credentials: embeddedSessionCredentialsSchema,
+    workspaceSync: {
+      type: "boolean",
+      description:
+        "When true, the session-agent fetches a workspace archive (uploaded via POST /sessions/:id/workspace) and extracts it into /workspace before starting the CLI.",
+    },
   },
 } as const;
 

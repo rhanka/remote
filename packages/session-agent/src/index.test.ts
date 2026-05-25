@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { materializeAuthBundle } from "./index.js";
+import { materializeAuthBundle, materializeWorkspace } from "./index.js";
 
 function setupStage(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "session-agent-test-"));
@@ -66,5 +66,61 @@ describe("materializeAuthBundle", () => {
     );
 
     expect(copied).toEqual([".codex/auth.json"]);
+  });
+});
+
+describe("materializeWorkspace", () => {
+  it("fetches and extracts the archive into the workspace", async () => {
+    const archive = new Uint8Array([1, 2, 3]);
+    let extractedTo = "";
+    const extracted = await materializeWorkspace({
+      controlPlaneEndpoint: "http://cp:8080",
+      sessionId: "sess-x",
+      workspacePath: "/workspace",
+      fetchArchive: async (url) => {
+        expect(url).toBe("http://cp:8080/sessions/sess-x/workspace");
+        return archive;
+      },
+      extract: async (_a, dest) => {
+        extractedTo = dest;
+      },
+    });
+    expect(extracted).toBe(true);
+    expect(extractedTo).toBe("/workspace");
+  });
+
+  it("retries until the archive is staged, then extracts", async () => {
+    let calls = 0;
+    const extracted = await materializeWorkspace({
+      controlPlaneEndpoint: "http://cp:8080",
+      sessionId: "sess-y",
+      workspacePath: "/workspace",
+      retries: 5,
+      delayMs: 0,
+      sleep: async () => {},
+      fetchArchive: async () => {
+        calls += 1;
+        return calls < 3 ? null : new Uint8Array([9]);
+      },
+      extract: async () => {},
+    });
+    expect(extracted).toBe(true);
+    expect(calls).toBe(3);
+  });
+
+  it("returns false when no archive is ever staged", async () => {
+    const extracted = await materializeWorkspace({
+      controlPlaneEndpoint: "http://cp:8080",
+      sessionId: "sess-z",
+      workspacePath: "/workspace",
+      retries: 2,
+      delayMs: 0,
+      sleep: async () => {},
+      fetchArchive: async () => null,
+      extract: async () => {
+        throw new Error("should not extract");
+      },
+    });
+    expect(extracted).toBe(false);
   });
 });

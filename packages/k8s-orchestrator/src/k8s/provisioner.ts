@@ -52,7 +52,12 @@ export class K8sSessionProvisioner implements SessionProvisioner {
 
     await this.client.create(buildSessionPvcSpec(descriptor, this.options));
     await this.client.create(
-      buildSessionPodSpec(descriptor, this.options, authPaths),
+      buildSessionPodSpec(
+        descriptor,
+        this.options,
+        authPaths,
+        options.workspaceSync ?? false,
+      ),
     );
 
     this.phases.set(descriptor.id, "starting");

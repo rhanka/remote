@@ -5,8 +5,12 @@ import { SessionAgent } from "./agent.js";
 import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
+import { materializeWorkspace } from "./workspace-sync.js";
 
 export const packageName = "@sentropic/remote-session-agent";
+
+export { materializeWorkspace } from "./workspace-sync.js";
+export type { MaterializeWorkspaceOptions } from "./workspace-sync.js";
 
 export function materializeAuthBundle(
   stagingDir: string | undefined,
@@ -69,6 +73,23 @@ export async function main(): Promise<void> {
     console.log(
       `[session-agent] materialized ${copied.length} auth file(s) under ${home}`,
     );
+  }
+
+  if (process.env.SESSION_WORKSPACE_SYNC === "1") {
+    try {
+      const extracted = await materializeWorkspace({
+        controlPlaneEndpoint,
+        sessionId,
+        workspacePath,
+      });
+      console.log(
+        extracted
+          ? `[session-agent] extracted workspace archive into ${workspacePath}`
+          : `[session-agent] no workspace archive staged; starting with an empty ${workspacePath}`,
+      );
+    } catch (error) {
+      console.error("[session-agent] workspace sync failed:", error);
+    }
   }
 
   const wsUrl = controlPlaneEndpoint

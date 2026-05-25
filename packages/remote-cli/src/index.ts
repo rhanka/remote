@@ -29,6 +29,10 @@ import {
 } from "./auth-bundle.js";
 import { coerceCliProfileName, isCliProfile, resolveProfile } from "./profiles.js";
 import { getLoginCommand, runInteractiveLogin } from "./auth-login.js";
+import {
+  buildWorkspaceArchive,
+  uploadWorkspaceArchive,
+} from "./workspace-sync.js";
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
 
@@ -79,6 +83,7 @@ type ProfileOpts = {
   target?: "k3s" | "scaleway-kapsule" | "gke";
   auth?: boolean;
   authRefresh?: boolean;
+  sync?: boolean;
 };
 
 type ProfileCliOpts = ProfileOpts & {
@@ -138,12 +143,27 @@ async function runProfile(
         ? resumeStartupArgs(profileName, opts.resume)
         : [];
     const startupArgs = [...resumeArgs, ...commandArgs];
+    let archive: Buffer | undefined;
+    if (opts.sync) {
+      process.stderr.write(`[remote] packing ${process.cwd()} (respecting .gitignore)\n`);
+      archive = await buildWorkspaceArchive(process.cwd());
+      process.stderr.write(
+        `[remote] workspace archive: ${(archive.byteLength / 1024).toFixed(0)} KiB\n`,
+      );
+    }
     const session = await createRemoteSession(opts.remote, {
       profile: profileName,
       target: opts.target ?? "k3s",
       ...(startupArgs.length > 0 ? { startupArgs } : {}),
       ...(credentials ? { credentials } : {}),
+      ...(opts.sync ? { workspaceSync: true } : {}),
     });
+    if (archive) {
+      await uploadWorkspaceArchive(opts.remote, session.id, archive);
+      process.stderr.write(
+        `[remote] uploaded workspace to ${opts.remote}/sessions/${session.id}/workspace\n`,
+      );
+    }
     if (credentials) {
       process.stderr.write(
         `[remote] sending ${profileName} creds to ${opts.remote}: ${Object.keys(credentials).join(", ")}\n`,
@@ -336,6 +356,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       .option(
         "--local",
         "run the CLI in-process via a local PTY instead of a remote session",
+      )
+      .option(
+        "--sync",
+        "seed the remote /workspace with the current directory (honors .gitignore)",
       )
       .option(
         "--target <target>",

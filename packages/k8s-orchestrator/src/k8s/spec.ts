@@ -183,6 +183,7 @@ export function buildSessionPodSpec(
   descriptor: SessionDescriptor,
   options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
   authPaths: ReadonlyArray<string> = [],
+  workspaceSync = false,
 ): K8sPodSpec {
   const names = resourceNames(descriptor);
   const limits = descriptor.resourceLimits;
@@ -258,6 +259,9 @@ export function buildSessionPodSpec(
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: options.home },
+            ...(workspaceSync
+              ? [{ name: "SESSION_WORKSPACE_SYNC", value: "1" }]
+              : []),
             ...(authPaths.length > 0
               ? [
                   {
