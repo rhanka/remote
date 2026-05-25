@@ -34,12 +34,19 @@ import {
   uploadWorkspaceArchive,
 } from "./workspace-sync.js";
 import {
+  acquireWorkspaceLock,
   createWorkspace,
   deleteWorkspace,
+  downloadWorkspaceExport,
   listWorkspaces,
+  lockHolderId,
+  readBaseSnapshot,
   readWorkspaceMarker,
+  releaseWorkspaceLock,
+  writeBaseSnapshot,
   writeWorkspaceMarker,
 } from "./workspace.js";
+import { mergeWorkspaceArchive } from "./workspace-merge.js";
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
 
@@ -485,42 +492,135 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       process.stdout.write(`remote: ${marker.remote}\n`);
     });
 
+  const requireMarker = (cwd: string) => {
+    const marker = readWorkspaceMarker(cwd);
+    if (!marker) {
+      throw new Error(
+        "No workspace mapped for this directory. Run `remote workspace link` first.",
+      );
+    }
+    return marker;
+  };
+
+  const guardLock = async (
+    remote: string,
+    workspaceId: string,
+    force: boolean,
+  ): Promise<void> => {
+    const lock = await acquireWorkspaceLock(
+      remote,
+      workspaceId,
+      lockHolderId(),
+    );
+    if (!lock.acquired) {
+      if (!force) {
+        throw new Error(
+          `Workspace ${workspaceId} is held by ${lock.holder} since ${lock.since}. ` +
+            `Coordinate, or pass --force to override the soft lock.`,
+        );
+      }
+      process.stderr.write(
+        `[remote] warning: overriding soft lock held by ${lock.holder} (--force)\n`,
+      );
+    }
+  };
+
   workspaceCommand
     .command("push")
     .description(
       "Upload the current directory into the mapped workspace's persistent volume (honors .gitignore)",
     )
-    .action(async () => {
+    .option("--force", "override a soft lock held by another editor")
+    .action(async (opts: { force?: boolean }) => {
       const cwd = process.cwd();
-      const marker = readWorkspaceMarker(cwd);
-      if (!marker) {
-        throw new Error(
-          "No workspace mapped for this directory. Run `remote workspace link` first.",
+      const marker = requireMarker(cwd);
+      await guardLock(marker.remote, marker.workspaceId, opts.force ?? false);
+      try {
+        process.stderr.write(
+          `[remote] packing ${cwd} (respecting .gitignore)\n`,
         );
+        const archive = await buildWorkspaceArchive(cwd);
+        process.stderr.write(
+          `[remote] archive: ${(archive.byteLength / 1024).toFixed(0)} KiB -> ${marker.workspaceId}\n`,
+        );
+        // Reuse the --sync path via a throwaway session bound to the workspace:
+        // the session-agent extracts the archive into the retained PVC, then the
+        // shell exits and the session auto-cleans (the workspace PVC is kept).
+        const session = await createRemoteSession(marker.remote, {
+          profile: "shell",
+          workspaceId: marker.workspaceId,
+          workspaceSync: true,
+          startupArgs: ["-c", "exit 0"],
+        });
+        await uploadWorkspaceArchive(marker.remote, session.id, archive);
+        const attached = await attach({
+          baseUrl: marker.remote,
+          sessionId: session.id,
+        });
+        await attached.finished;
+        // The pushed tree is now the shared sync base.
+        writeBaseSnapshot(cwd, archive);
+        process.stderr.write(`[remote] pushed ${cwd} to ${marker.workspaceId}\n`);
+      } finally {
+        await releaseWorkspaceLock(marker.remote, marker.workspaceId);
       }
-      process.stderr.write(`[remote] packing ${cwd} (respecting .gitignore)\n`);
-      const archive = await buildWorkspaceArchive(cwd);
-      process.stderr.write(
-        `[remote] archive: ${(archive.byteLength / 1024).toFixed(0)} KiB -> ${marker.workspaceId}\n`,
-      );
-      // Reuse the --sync path via a throwaway session bound to the workspace:
-      // the session-agent extracts the archive into the retained PVC, then the
-      // shell exits and the session auto-cleans (the workspace PVC is kept).
-      const session = await createRemoteSession(marker.remote, {
-        profile: "shell",
-        workspaceId: marker.workspaceId,
-        workspaceSync: true,
-        startupArgs: ["-c", "exit 0"],
-      });
-      await uploadWorkspaceArchive(marker.remote, session.id, archive);
-      const attached = await attach({
-        baseUrl: marker.remote,
-        sessionId: session.id,
-      });
-      await attached.finished;
-      process.stderr.write(
-        `[remote] pushed ${cwd} to ${marker.workspaceId}\n`,
-      );
+    });
+
+  workspaceCommand
+    .command("pull")
+    .description(
+      "Fetch the mapped workspace and 3-way merge it into the current directory",
+    )
+    .option("--force", "override a soft lock held by another editor")
+    .action(async (opts: { force?: boolean }) => {
+      const cwd = process.cwd();
+      const marker = requireMarker(cwd);
+      await guardLock(marker.remote, marker.workspaceId, opts.force ?? false);
+      try {
+        // Export the live /workspace via a throwaway bound session.
+        const session = await createRemoteSession(marker.remote, {
+          profile: "shell",
+          workspaceId: marker.workspaceId,
+          workspaceExport: true,
+          startupArgs: ["-c", "exit 0"],
+        });
+        const attached = await attach({
+          baseUrl: marker.remote,
+          sessionId: session.id,
+        });
+        await attached.finished;
+        const remoteArchive = await downloadWorkspaceExport(
+          marker.remote,
+          session.id,
+        );
+        if (!remoteArchive) {
+          process.stderr.write(
+            `[remote] nothing to pull (workspace ${marker.workspaceId} is empty)\n`,
+          );
+          return;
+        }
+        const result = mergeWorkspaceArchive({
+          cwd,
+          remoteArchive,
+          baseArchive: readBaseSnapshot(cwd),
+        });
+        process.stderr.write(
+          `[remote] pull: ${result.tookRemote.length} from remote, ${result.keptLocal.length} kept local, ${result.merged.length} merged\n`,
+        );
+        if (result.conflicts.length > 0) {
+          process.stderr.write(
+            `[remote] ${result.conflicts.length} conflict(s) (left with markers, resolve then re-run):\n`,
+          );
+          for (const f of result.conflicts) process.stderr.write(`  ${f}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        // Clean merge → the remote tree is the new shared base.
+        writeBaseSnapshot(cwd, remoteArchive);
+        process.stderr.write(`[remote] pulled ${marker.workspaceId} into ${cwd}\n`);
+      } finally {
+        await releaseWorkspaceLock(marker.remote, marker.workspaceId);
+      }
     });
 
   workspaceCommand

@@ -63,6 +63,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
         this.options,
         authPaths,
         options.workspaceSync ?? false,
+        options.workspaceExport ?? false,
       ),
     );
 

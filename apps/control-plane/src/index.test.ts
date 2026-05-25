@@ -517,7 +517,7 @@ describe("control plane", () => {
     type Call =
       | { op: "provisionWorkspace"; id: string }
       | { op: "destroyWorkspace"; id: string }
-      | { op: "provision"; sessionId: string; workspaceId?: string };
+      | { op: "provision"; sessionId: string; workspaceId?: string | undefined };
     const calls: Call[] = [];
     const provisioner = {
       async provision(descriptor: { id: string; workspaceId?: string }) {

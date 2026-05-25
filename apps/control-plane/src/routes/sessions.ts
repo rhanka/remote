@@ -105,6 +105,7 @@ export function createSessionsRouter(
   const router = new Hono<{ Variables: ValidationVars }>();
 
   const workspaceArchives = new Map<string, Uint8Array>();
+  const workspaceExports = new Map<string, Uint8Array>();
 
   const emit: ProvisionerEmit = (sessionId, type, payload) => {
     bus.publish(sessionId, type, payload);
@@ -159,6 +160,7 @@ export function createSessionsRouter(
     if (!store.get(id)) return false;
     store.delete(id);
     workspaceArchives.delete(id);
+    workspaceExports.delete(id);
     void provisioner
       .destroy(id, emit)
       .catch((error: unknown) => {
@@ -192,6 +194,7 @@ export function createSessionsRouter(
       CreateSessionRequest & {
         credentials?: Record<string, string>;
         workspaceSync?: boolean;
+        workspaceExport?: boolean;
         workspaceId?: string;
       }
     >(c);
@@ -203,9 +206,11 @@ export function createSessionsRouter(
     const provisionOptions: {
       credentials?: Record<string, string>;
       workspaceSync?: boolean;
+      workspaceExport?: boolean;
     } = {};
     if (req.credentials) provisionOptions.credentials = req.credentials;
     if (req.workspaceSync) provisionOptions.workspaceSync = true;
+    if (req.workspaceExport) provisionOptions.workspaceExport = true;
     void provisioner.provision(descriptor, emit, provisionOptions);
     const response: CreateSessionResponse = { session: descriptor };
     return c.json(response, 201);
@@ -231,6 +236,26 @@ export function createSessionsRouter(
   router.get("/:id/workspace", (c) => {
     const id = c.req.param("id");
     const archive = workspaceArchives.get(id);
+    if (!archive) return notFound(c);
+    return new Response(archive as unknown as BodyInit, {
+      status: 200,
+      headers: { "content-type": "application/gzip" },
+    });
+  });
+
+  // Workspace export: the session-agent tars /workspace and POSTs it here; the
+  // CLI (remote workspace pull) GETs it. Held in memory, dropped on stop.
+  router.post("/:id/workspace/export", async (c) => {
+    const id = c.req.param("id");
+    if (!store.get(id)) return notFound(c);
+    const body = new Uint8Array(await c.req.arrayBuffer());
+    workspaceExports.set(id, body);
+    return c.json({ sessionId: id, bytes: body.byteLength, accepted: true });
+  });
+
+  router.get("/:id/workspace/export", (c) => {
+    const id = c.req.param("id");
+    const archive = workspaceExports.get(id);
     if (!archive) return notFound(c);
     return new Response(archive as unknown as BodyInit, {
       status: 200,

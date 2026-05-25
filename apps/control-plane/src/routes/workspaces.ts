@@ -38,6 +38,20 @@ export function createWorkspacesRouter(
   const store = deps.store ?? new Map<string, WorkspaceDescriptor>();
   const router = new Hono<{ Variables: ValidationVars }>();
 
+  // Advisory soft-lock per workspace. Authority lives here (reachable by the
+  // local CLI and remote Pods); auto-expires at TTL.
+  type Lock = { holder: string; acquiredAt: string; expiresAt: number };
+  const locks = new Map<string, Lock>();
+  const activeLock = (id: string): Lock | undefined => {
+    const lock = locks.get(id);
+    if (!lock) return undefined;
+    if (lock.expiresAt <= Date.now()) {
+      locks.delete(id);
+      return undefined;
+    }
+    return lock;
+  };
+
   const notFound = (c: {
     json: (body: unknown, status: number) => Response;
   }) =>
@@ -93,12 +107,55 @@ export function createWorkspacesRouter(
     const id = c.req.param("id");
     if (!store.get(id)) return notFound(c);
     store.delete(id);
+    locks.delete(id);
     await provisioner.destroyWorkspace?.(id);
     const response: DeleteWorkspaceResponse = {
       workspaceId: id,
       accepted: true,
     };
     return c.json(response);
+  });
+
+  router.post("/:id/lock", async (c) => {
+    const id = c.req.param("id");
+    if (!store.get(id)) return notFound(c);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      holder?: string;
+      ttlSeconds?: number;
+    };
+    const holder = body.holder ?? "unknown";
+    const ttl = Math.min(Math.max(body.ttlSeconds ?? 300, 1), 3600);
+    const current = activeLock(id);
+    if (current && current.holder !== holder) {
+      return c.json(
+        {
+          code: "workspace.locked",
+          message: `Workspace held by ${current.holder} since ${current.acquiredAt}`,
+          retryable: true,
+          holder: current.holder,
+          acquiredAt: current.acquiredAt,
+        },
+        409,
+      );
+    }
+    const lock: Lock = {
+      holder,
+      acquiredAt: current?.acquiredAt ?? new Date().toISOString(),
+      expiresAt: Date.now() + ttl * 1000,
+    };
+    locks.set(id, lock);
+    return c.json({
+      workspaceId: id,
+      holder: lock.holder,
+      acquiredAt: lock.acquiredAt,
+      accepted: true,
+    });
+  });
+
+  router.delete("/:id/lock", (c) => {
+    const id = c.req.param("id");
+    locks.delete(id);
+    return c.json({ workspaceId: id, released: true });
   });
 
   return router;

@@ -4,7 +4,11 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { materializeAuthBundle, materializeWorkspace } from "./index.js";
+import {
+  materializeAuthBundle,
+  materializeWorkspace,
+  exportWorkspace,
+} from "./index.js";
 
 function setupStage(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "session-agent-test-"));
@@ -122,5 +126,25 @@ describe("materializeWorkspace", () => {
       },
     });
     expect(extracted).toBe(false);
+  });
+});
+
+describe("exportWorkspace", () => {
+  it("archives the workspace and uploads it to the export endpoint", async () => {
+    let uploadedUrl = "";
+    let uploadedBytes = 0;
+    const bytes = await exportWorkspace({
+      controlPlaneEndpoint: "http://cp:8080",
+      sessionId: "sess-x",
+      workspacePath: "/workspace",
+      archive: async () => new Uint8Array([1, 2, 3, 4]),
+      upload: async (url, body) => {
+        uploadedUrl = url;
+        uploadedBytes = body.byteLength;
+      },
+    });
+    expect(uploadedUrl).toBe("http://cp:8080/sessions/sess-x/workspace/export");
+    expect(uploadedBytes).toBe(4);
+    expect(bytes).toBe(4);
   });
 });

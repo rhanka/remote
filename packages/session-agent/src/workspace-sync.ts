@@ -29,6 +29,55 @@ function extractTarGz(archive: Uint8Array, dest: string): Promise<void> {
   });
 }
 
+function archiveTarGz(srcDir: string): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("tar", ["-czf", "-", "-C", srcDir, "."], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (c: Buffer) => chunks.push(c));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(new Uint8Array(Buffer.concat(chunks)));
+      else reject(new Error(`tar exited with code ${code}`));
+    });
+  });
+}
+
+export type ExportWorkspaceOptions = {
+  readonly controlPlaneEndpoint: string;
+  readonly sessionId: string;
+  readonly workspacePath: string;
+  readonly archive?: (srcDir: string) => Promise<Uint8Array>;
+  readonly upload?: (url: string, body: Uint8Array) => Promise<void>;
+};
+
+async function defaultUpload(url: string, body: Uint8Array): Promise<void> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/gzip" },
+    body: body as unknown as BodyInit,
+  });
+  if (!response.ok) {
+    throw new Error(`workspace export upload failed: ${response.status}`);
+  }
+}
+
+/**
+ * Tar /workspace and POST it to the control-plane export endpoint so the CLI
+ * (`remote workspace pull`) can download and 3-way merge it locally.
+ */
+export async function exportWorkspace(
+  options: ExportWorkspaceOptions,
+): Promise<number> {
+  const archive = options.archive ?? archiveTarGz;
+  const upload = options.upload ?? defaultUpload;
+  const url = `${options.controlPlaneEndpoint.replace(/\/$/, "")}/sessions/${options.sessionId}/workspace/export`;
+  const bytes = await archive(options.workspacePath);
+  await upload(url, bytes);
+  return bytes.byteLength;
+}
+
 export type MaterializeWorkspaceOptions = {
   readonly controlPlaneEndpoint: string;
   readonly sessionId: string;

@@ -1,8 +1,25 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const MARKER_DIR = ".remote";
 const MARKER_FILE = "workspace.json";
+const BASE_FILE = "base.tgz";
+
+export function baseSnapshotPath(cwd: string): string {
+  return join(cwd, MARKER_DIR, BASE_FILE);
+}
+
+export function readBaseSnapshot(cwd: string): Buffer | null {
+  const path = baseSnapshotPath(cwd);
+  if (!existsSync(path)) return null;
+  return readFileSync(path);
+}
+
+export function writeBaseSnapshot(cwd: string, archive: Buffer): void {
+  const path = baseSnapshotPath(cwd);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, archive);
+}
 
 export type WorkspaceMarker = {
   readonly remote: string;
@@ -101,4 +118,74 @@ export async function deleteWorkspace(
     );
   }
   return true;
+}
+
+export async function downloadWorkspaceExport(
+  baseUrl: string,
+  sessionId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Buffer | null> {
+  const response = await fetchImpl(
+    joinUrl(baseUrl, `/sessions/${sessionId}/workspace/export`),
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(
+      `downloadWorkspaceExport: ${response.status} ${response.statusText}`,
+    );
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+export type LockResult =
+  | { readonly acquired: true }
+  | { readonly acquired: false; readonly holder: string; readonly since: string };
+
+export async function acquireWorkspaceLock(
+  baseUrl: string,
+  workspaceId: string,
+  holder: string,
+  ttlSeconds = 300,
+  fetchImpl: typeof fetch = fetch,
+): Promise<LockResult> {
+  const response = await fetchImpl(
+    joinUrl(baseUrl, `/workspaces/${workspaceId}/lock`),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ holder, ttlSeconds }),
+    },
+  );
+  if (response.ok) return { acquired: true };
+  if (response.status === 409) {
+    const body = (await response.json()) as {
+      holder?: string;
+      acquiredAt?: string;
+    };
+    return {
+      acquired: false,
+      holder: body.holder ?? "unknown",
+      since: body.acquiredAt ?? "unknown",
+    };
+  }
+  throw new Error(
+    `acquireWorkspaceLock: ${response.status} ${response.statusText}`,
+  );
+}
+
+export async function releaseWorkspaceLock(
+  baseUrl: string,
+  workspaceId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  await fetchImpl(joinUrl(baseUrl, `/workspaces/${workspaceId}/lock`), {
+    method: "DELETE",
+  }).catch(() => {});
+}
+
+export function lockHolderId(): string {
+  const user = process.env.USER ?? process.env.USERNAME ?? "user";
+  const host =
+    process.env.HOSTNAME ?? process.env.HOST ?? "local";
+  return `${user}@${host}`;
 }

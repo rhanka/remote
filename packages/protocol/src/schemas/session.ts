@@ -133,6 +133,11 @@ export const createSessionRequestSchema = {
       description:
         "When true, the session-agent fetches a workspace archive (uploaded via POST /sessions/:id/workspace) and extracts it into /workspace before starting the CLI.",
     },
+    workspaceExport: {
+      type: "boolean",
+      description:
+        "When true, the session-agent tars /workspace and POSTs it to /sessions/:id/workspace/export on startup so the CLI can pull it (used by `remote workspace pull`).",
+    },
     workspaceId: {
       type: "string",
       minLength: 1,
