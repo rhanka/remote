@@ -31,6 +31,10 @@ export interface SessionProvisioner {
   ): Promise<void>;
   destroy(sessionId: string, emit: ProvisionerEmit): Promise<void>;
   inspect(sessionId: string): Promise<{ phase: string } | undefined>;
+  /** Create the retained PVC backing a persistent Workspace (idempotent). */
+  provisionWorkspace?(workspaceId: string): Promise<void>;
+  /** Delete a Workspace's retained PVC. */
+  destroyWorkspace?(workspaceId: string): Promise<void>;
 }
 
 const LIFECYCLE_TRANSITIONS: ReadonlyArray<{ from: string; to: string }> = [

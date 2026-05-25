@@ -35,6 +35,7 @@ export const sessionDescriptorSchema = {
     profile: embeddedCliProfileSchema,
     target: embeddedSessionTargetSchema,
     workspacePath: { type: "string", const: "/workspace" },
+    workspaceId: { type: "string", minLength: 1 },
     createdAt: isoDateTimeSchema,
     createdBy: embeddedActorSchema,
     displayName: { type: "string", minLength: 1 },
@@ -131,6 +132,12 @@ export const createSessionRequestSchema = {
       type: "boolean",
       description:
         "When true, the session-agent fetches a workspace archive (uploaded via POST /sessions/:id/workspace) and extracts it into /workspace before starting the CLI.",
+    },
+    workspaceId: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Bind the session to a persistent Workspace; its retained PVC is mounted at /workspace instead of a per-session volume.",
     },
   },
 } as const;

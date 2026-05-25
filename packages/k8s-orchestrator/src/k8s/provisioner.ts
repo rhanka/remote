@@ -11,7 +11,9 @@ import {
   buildSessionAuthSecret,
   buildSessionPodSpec,
   buildSessionPvcSpec,
+  buildWorkspacePvcSpec,
   resourceNames,
+  workspacePvcName,
   type SpecBuilderOptions,
 } from "./spec.js";
 
@@ -50,7 +52,11 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       );
     }
 
-    await this.client.create(buildSessionPvcSpec(descriptor, this.options));
+    // A session bound to a persistent Workspace mounts that retained PVC;
+    // only unbound sessions get an ephemeral per-session PVC.
+    if (!descriptor.workspaceId) {
+      await this.client.create(buildSessionPvcSpec(descriptor, this.options));
+    }
     await this.client.create(
       buildSessionPodSpec(
         descriptor,
@@ -165,5 +171,28 @@ export class K8sSessionProvisioner implements SessionProvisioner {
   async inspect(sessionId: string): Promise<{ phase: string } | undefined> {
     const phase = this.phases.get(sessionId);
     return phase ? { phase } : undefined;
+  }
+
+  async provisionWorkspace(workspaceId: string): Promise<void> {
+    await this.client
+      .create(buildWorkspacePvcSpec(workspaceId, this.options))
+      .catch((error: unknown) => {
+        // tolerate "already exists" so workspace create is idempotent
+        const message = String(error);
+        if (!/already exists|AlreadyExists/i.test(message)) throw error;
+      });
+  }
+
+  async destroyWorkspace(workspaceId: string): Promise<void> {
+    await this.client
+      .delete({
+        apiVersion: "v1",
+        kind: "PersistentVolumeClaim",
+        metadata: {
+          name: workspacePvcName(workspaceId),
+          namespace: this.options.namespace,
+        },
+      })
+      .catch(() => {});
   }
 }

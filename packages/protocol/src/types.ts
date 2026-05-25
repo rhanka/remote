@@ -48,6 +48,14 @@ import type {
   stopSessionResponseSchema,
 } from "./schemas/session.js";
 import type {
+  workspaceDescriptorSchema,
+  createWorkspaceRequestSchema,
+  createWorkspaceResponseSchema,
+  listWorkspacesResponseSchema,
+  getWorkspaceResponseSchema,
+  deleteWorkspaceResponseSchema,
+} from "./schemas/workspace.js";
+import type {
   terminalExitedSchema,
   terminalInputSchema,
   terminalOpenedSchema,
@@ -58,6 +66,22 @@ import type { h2aBridgeProfileSchema } from "./schemas/h2a-bridge.js";
 
 export type Actor = FromSchema<typeof actorSchema>;
 export type H2AHostBridgeProfile = FromSchema<typeof h2aBridgeProfileSchema>;
+export type WorkspaceDescriptor = FromSchema<typeof workspaceDescriptorSchema>;
+export type CreateWorkspaceRequest = FromSchema<
+  typeof createWorkspaceRequestSchema
+>;
+export type CreateWorkspaceResponse = FromSchema<
+  typeof createWorkspaceResponseSchema
+>;
+export type ListWorkspacesResponse = FromSchema<
+  typeof listWorkspacesResponseSchema
+>;
+export type GetWorkspaceResponse = FromSchema<
+  typeof getWorkspaceResponseSchema
+>;
+export type DeleteWorkspaceResponse = FromSchema<
+  typeof deleteWorkspaceResponseSchema
+>;
 export type SessionDescriptor = FromSchema<typeof sessionDescriptorSchema>;
 export type SessionCredentials = FromSchema<typeof sessionCredentialsSchema>;
 export type RefreshSessionCredentialsRequest = FromSchema<

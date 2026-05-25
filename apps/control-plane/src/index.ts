@@ -14,6 +14,7 @@ import { AgentRegistry } from "./agents/registry.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { buildAgentSocketEvents } from "./routes/agent-ws.js";
 import { createSessionsRouter } from "./routes/sessions.js";
+import { createWorkspacesRouter } from "./routes/workspaces.js";
 import { SessionEventBus } from "./sessions/events.js";
 import { SessionStore } from "./sessions/store.js";
 import { createAjv, type ValidationVars } from "./validation.js";
@@ -50,7 +51,7 @@ export function createControlPlane(
     "*",
     cors({
       origin: (origin) => origin ?? "*",
-      allowMethods: ["GET", "POST", "OPTIONS"],
+      allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"],
       credentials: false,
     }),
@@ -78,6 +79,8 @@ export function createControlPlane(
     "/sessions",
     createSessionsRouter({ ajv, store, bus, provisioner, registry }),
   );
+
+  app.route("/workspaces", createWorkspacesRouter({ ajv, provisioner }));
 
   app.injectWebSocket = nodeWs.injectWebSocket;
   return app;

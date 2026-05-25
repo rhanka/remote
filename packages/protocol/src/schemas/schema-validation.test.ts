@@ -41,6 +41,9 @@ import {
   terminalResizeSchema,
   uatRouteCreatedSchema,
   h2aBridgeProfileSchema,
+  workspaceDescriptorSchema,
+  createWorkspaceRequestSchema,
+  createWorkspaceResponseSchema,
 } from "./index.js";
 import { H2A_BRIDGE_PROFILE_V1 } from "./h2a-bridge.js";
 
@@ -313,6 +316,32 @@ describe("approval, secret, and error JSON Schemas", () => {
         details: { capability: "publish-npm" },
       }),
     ).toBe(true);
+  });
+});
+
+describe("workspace JSON Schemas", () => {
+  const workspace = {
+    id: "ws-001",
+    createdAt: "2026-05-25T12:00:00.000Z",
+    createdBy: { id: "control-plane", kind: "control-plane" },
+    displayName: "my-project",
+  };
+
+  it("validates a workspace descriptor", () => {
+    expect(ajv.compile(workspaceDescriptorSchema)(workspace)).toBe(true);
+  });
+
+  it("validates create-workspace request and response", () => {
+    expect(
+      ajv.compile(createWorkspaceRequestSchema)({ displayName: "proj" }),
+    ).toBe(true);
+    expect(ajv.compile(createWorkspaceRequestSchema)({})).toBe(true);
+    expect(ajv.compile(createWorkspaceResponseSchema)({ workspace })).toBe(true);
+  });
+
+  it("rejects a workspace descriptor missing createdBy", () => {
+    const { createdBy: _omit, ...invalid } = workspace;
+    expect(ajv.compile(workspaceDescriptorSchema)(invalid)).toBe(false);
   });
 });
 

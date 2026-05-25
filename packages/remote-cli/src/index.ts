@@ -33,6 +33,13 @@ import {
   buildWorkspaceArchive,
   uploadWorkspaceArchive,
 } from "./workspace-sync.js";
+import {
+  createWorkspace,
+  deleteWorkspace,
+  listWorkspaces,
+  readWorkspaceMarker,
+  writeWorkspaceMarker,
+} from "./workspace.js";
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
 
@@ -84,10 +91,12 @@ type ProfileOpts = {
   auth?: boolean;
   authRefresh?: boolean;
   sync?: boolean;
+  workspaceId?: string;
 };
 
 type ProfileCliOpts = ProfileOpts & {
   local?: boolean;
+  workspace?: boolean;
 };
 
 type AuthDiagnosticOpts = {
@@ -157,6 +166,7 @@ async function runProfile(
       ...(startupArgs.length > 0 ? { startupArgs } : {}),
       ...(credentials ? { credentials } : {}),
       ...(opts.sync ? { workspaceSync: true } : {}),
+      ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
     });
     if (archive) {
       await uploadWorkspaceArchive(opts.remote, session.id, archive);
@@ -362,6 +372,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "seed the remote /workspace with the current directory (honors .gitignore)",
       )
       .option(
+        "--no-workspace",
+        "ignore the .remote/ mapping and use a throwaway workspace",
+      )
+      .option(
         "--target <target>",
         "remote session target: k3s, scaleway-kapsule, or gke",
         "k3s",
@@ -372,15 +386,26 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "skip local auth status preflight before bundling credentials",
       )
       .action(async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {
-        const { remote: remoteOverride, local, ...rest } = opts;
+        const { remote: remoteOverride, local, workspace, ...rest } = opts;
         if (local) {
           await runProfile(profileName, { ...rest }, commandArgs ?? []);
           return;
         }
-        const remote = getConfiguredRemote(remoteOverride);
+        const marker =
+          workspace === false ? undefined : readWorkspaceMarker(process.cwd());
+        const remote = getConfiguredRemote(remoteOverride ?? marker?.remote);
+        if (marker) {
+          process.stderr.write(
+            `[remote] cwd mapped to ${marker.workspaceId} (reusing workspace)\n`,
+          );
+        }
         await runProfile(
           profileName,
-          { ...rest, remote },
+          {
+            ...rest,
+            remote,
+            ...(marker ? { workspaceId: marker.workspaceId } : {}),
+          },
           commandArgs ?? [],
         );
       });
@@ -392,6 +417,133 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description("Set default remote URL for commands that omit remote URL")
     .action((url: string) => {
       setAndReportDefaultRemote(url);
+    });
+
+  const workspaceCommand = program
+    .command("workspace")
+    .description(
+      "Map the current project to a persistent remote workspace and sync files",
+    );
+
+  workspaceCommand
+    .command("link")
+    .description(
+      "Create a persistent remote workspace and write the .remote/ mapping for the cwd",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option("--name <name>", "display name for the workspace")
+    .action(async (opts: { remote?: string; name?: string }) => {
+      const cwd = process.cwd();
+      const existing = readWorkspaceMarker(cwd);
+      if (existing) {
+        process.stderr.write(
+          `[remote] ${cwd} already mapped to ${existing.workspaceId} (${existing.remote})\n`,
+        );
+        return;
+      }
+      const remote = getConfiguredRemote(opts.remote);
+      const ws = await createWorkspace(
+        remote,
+        opts.name ? { displayName: opts.name } : {},
+      );
+      writeWorkspaceMarker(cwd, { remote, workspaceId: ws.id });
+      process.stderr.write(
+        `[remote] linked ${cwd} -> ${ws.id} (wrote .remote/workspace.json)\n`,
+      );
+    });
+
+  workspaceCommand
+    .command("list [url]")
+    .description("List persistent workspaces on a remote control-plane")
+    .action(async (url: string | undefined) => {
+      const remote = getConfiguredRemote(url);
+      const workspaces = await listWorkspaces(remote);
+      if (workspaces.length === 0) {
+        process.stderr.write("[remote] no workspaces\n");
+        return;
+      }
+      const rows = workspaces.map((w) =>
+        [w.id, w.createdAt, w.displayName ?? ""].join("\t"),
+      );
+      process.stdout.write(
+        ["ID\tCREATED\tDISPLAY", ...rows].join("\n") + "\n",
+      );
+    });
+
+  workspaceCommand
+    .command("status")
+    .description("Show the workspace mapping for the current directory")
+    .action(() => {
+      const marker = readWorkspaceMarker(process.cwd());
+      if (!marker) {
+        process.stdout.write(
+          "[remote] no workspace mapped for this directory (run `remote workspace link`)\n",
+        );
+        return;
+      }
+      process.stdout.write(`workspace: ${marker.workspaceId}\n`);
+      process.stdout.write(`remote: ${marker.remote}\n`);
+    });
+
+  workspaceCommand
+    .command("push")
+    .description(
+      "Upload the current directory into the mapped workspace's persistent volume (honors .gitignore)",
+    )
+    .action(async () => {
+      const cwd = process.cwd();
+      const marker = readWorkspaceMarker(cwd);
+      if (!marker) {
+        throw new Error(
+          "No workspace mapped for this directory. Run `remote workspace link` first.",
+        );
+      }
+      process.stderr.write(`[remote] packing ${cwd} (respecting .gitignore)\n`);
+      const archive = await buildWorkspaceArchive(cwd);
+      process.stderr.write(
+        `[remote] archive: ${(archive.byteLength / 1024).toFixed(0)} KiB -> ${marker.workspaceId}\n`,
+      );
+      // Reuse the --sync path via a throwaway session bound to the workspace:
+      // the session-agent extracts the archive into the retained PVC, then the
+      // shell exits and the session auto-cleans (the workspace PVC is kept).
+      const session = await createRemoteSession(marker.remote, {
+        profile: "shell",
+        workspaceId: marker.workspaceId,
+        workspaceSync: true,
+        startupArgs: ["-c", "exit 0"],
+      });
+      await uploadWorkspaceArchive(marker.remote, session.id, archive);
+      const attached = await attach({
+        baseUrl: marker.remote,
+        sessionId: session.id,
+      });
+      await attached.finished;
+      process.stderr.write(
+        `[remote] pushed ${cwd} to ${marker.workspaceId}\n`,
+      );
+    });
+
+  workspaceCommand
+    .command("rm [workspaceId]")
+    .description(
+      "Delete a workspace (defaults to the cwd's mapped workspace) and its retained volume",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(async (workspaceId: string | undefined, opts: { remote?: string }) => {
+      const marker = readWorkspaceMarker(process.cwd());
+      const remote = getConfiguredRemote(opts.remote ?? marker?.remote);
+      const id = workspaceId ?? marker?.workspaceId;
+      if (!id) {
+        throw new Error(
+          "No workspace id given and no .remote/ mapping in this directory.",
+        );
+      }
+      const deleted = await deleteWorkspace(remote, id);
+      process.stderr.write(
+        deleted
+          ? `[remote] deleted workspace ${id}\n`
+          : `[remote] workspace ${id} not found\n`,
+      );
     });
 
   const authCommand = program

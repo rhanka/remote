@@ -125,6 +125,41 @@ export function resourceNames(descriptor: SessionDescriptor): {
   };
 }
 
+export function workspacePvcName(workspaceId: string): string {
+  return `workspace-${workspaceId}`;
+}
+
+export function buildWorkspacePvcSpec(
+  workspaceId: string,
+  options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
+): K8sPvcSpec {
+  return {
+    apiVersion: "v1",
+    kind: "PersistentVolumeClaim",
+    metadata: {
+      name: workspacePvcName(workspaceId),
+      namespace: options.namespace,
+      labels: {
+        "app.kubernetes.io/name": "sentropic-remote",
+        "app.kubernetes.io/component": "workspace",
+        "app.kubernetes.io/managed-by": "control-plane",
+        "sentropic.dev/workspace-id": workspaceId,
+      },
+    },
+    spec: {
+      accessModes: ["ReadWriteOnce"],
+      resources: {
+        requests: {
+          storage: options.defaultWorkspaceSize,
+        },
+      },
+      ...(options.storageClassName !== undefined
+        ? { storageClassName: options.storageClassName }
+        : {}),
+    },
+  };
+}
+
 export function buildSessionPvcSpec(
   descriptor: SessionDescriptor,
   options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
@@ -198,13 +233,16 @@ export function buildSessionPodSpec(
     Object.assign(resourceRequests, { memory: limits.memory });
   }
 
+  const claimName = descriptor.workspaceId
+    ? workspacePvcName(descriptor.workspaceId)
+    : names.pvc;
   const volumeMounts: K8sVolumeMount[] = [
     { name: PVC_VOLUME, mountPath: descriptor.workspacePath },
   ];
   const volumes: K8sVolume[] = [
     {
       name: PVC_VOLUME,
-      persistentVolumeClaim: { claimName: names.pvc },
+      persistentVolumeClaim: { claimName },
     },
   ];
 

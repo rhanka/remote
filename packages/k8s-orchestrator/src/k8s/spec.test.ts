@@ -92,6 +92,27 @@ describe("k8s spec builders", () => {
     }
   });
 
+  it("mounts the retained workspace PVC when the session is bound to a workspace", () => {
+    const bound: SessionDescriptor = {
+      ...baseDescriptor,
+      workspaceId: "ws-abc",
+    };
+    const pod = buildSessionPodSpec(bound);
+    const vol = pod.spec.volumes.find((v) => v.name === "workspace");
+    expect(vol).toBeDefined();
+    if (vol && "persistentVolumeClaim" in vol) {
+      expect(vol.persistentVolumeClaim.claimName).toBe("workspace-ws-abc");
+    } else {
+      throw new Error("expected a PVC-backed workspace volume");
+    }
+
+    const unbound = buildSessionPodSpec(baseDescriptor);
+    const uvol = unbound.spec.volumes.find((v) => v.name === "workspace");
+    if (uvol && "persistentVolumeClaim" in uvol) {
+      expect(uvol.persistentVolumeClaim.claimName).toMatch(/^session-.*-workspace$/);
+    }
+  });
+
   it("sets SESSION_WORKSPACE_SYNC=1 only when workspaceSync is requested", () => {
     const off = buildSessionPodSpec(baseDescriptor);
     expect(

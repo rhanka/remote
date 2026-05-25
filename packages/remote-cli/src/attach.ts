@@ -398,6 +398,7 @@ export async function createRemoteSession(
     credentials?: Readonly<Record<string, string>>;
     metadata?: Readonly<Record<string, unknown>>;
     workspaceSync?: boolean;
+    workspaceId?: string;
   },
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ id: string }> {
@@ -407,6 +408,7 @@ export async function createRemoteSession(
   };
   if (body.displayName) payload.displayName = body.displayName;
   if (body.workspaceSync) payload.workspaceSync = true;
+  if (body.workspaceId) payload.workspaceId = body.workspaceId;
   if (
     body.resume !== undefined ||
     (body.startupArgs?.length ?? 0) > 0 ||

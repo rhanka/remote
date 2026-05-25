@@ -13,6 +13,11 @@ const ensureProfileAuthFresh = vi.fn();
 const collectProfileAuth = vi.fn();
 const assertRequiredAuthBundle = vi.fn();
 const run = vi.fn();
+const createWorkspace = vi.fn();
+const listWorkspaces = vi.fn();
+const deleteWorkspace = vi.fn();
+const readWorkspaceMarker = vi.fn();
+const writeWorkspaceMarker = vi.fn();
 
 vi.mock("./attach.js", () => ({
   attach,
@@ -44,6 +49,19 @@ vi.mock("./run.js", () => ({
   run,
 }));
 
+vi.mock("./workspace.js", () => ({
+  createWorkspace,
+  listWorkspaces,
+  deleteWorkspace,
+  readWorkspaceMarker,
+  writeWorkspaceMarker,
+}));
+
+vi.mock("./workspace-sync.js", () => ({
+  buildWorkspaceArchive: vi.fn(async () => Buffer.from("tgz")),
+  uploadWorkspaceArchive: vi.fn(async () => {}),
+}));
+
 vi.mock("./smoke.js", () => ({
   smokeRemoteProfile: vi.fn(),
 }));
@@ -73,6 +91,15 @@ describe("main", () => {
     setDefaultRemote.mockReset();
     clearDefaultRemote.mockReset();
     run.mockReset();
+    createWorkspace.mockReset();
+    listWorkspaces.mockReset();
+    deleteWorkspace.mockReset();
+    readWorkspaceMarker.mockReset();
+    writeWorkspaceMarker.mockReset();
+    readWorkspaceMarker.mockReturnValue(undefined);
+    createWorkspace.mockResolvedValue({ id: "ws-new", createdAt: "now" });
+    listWorkspaces.mockResolvedValue([]);
+    deleteWorkspace.mockResolvedValue(true);
     stderrWrite.mockClear();
     stdoutWrite.mockClear();
 
@@ -341,6 +368,73 @@ describe("main", () => {
       "http://localhost:8080",
       "sess-push",
       { ".codex/auth.json": "BASE64" },
+    );
+  });
+
+  it("workspace link creates a workspace and writes the marker", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    const exitCode = await main(["node", "remote", "workspace", "link"]);
+
+    expect(exitCode).toBe(0);
+    expect(createWorkspace).toHaveBeenCalledWith("http://localhost:8080", {});
+    expect(writeWorkspaceMarker).toHaveBeenCalledWith(expect.any(String), {
+      remote: "http://localhost:8080",
+      workspaceId: "ws-new",
+    });
+  });
+
+  it("workspace link is idempotent when already mapped", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    readWorkspaceMarker.mockReturnValue({
+      remote: "http://localhost:8080",
+      workspaceId: "ws-existing",
+    });
+    const exitCode = await main(["node", "remote", "workspace", "link"]);
+
+    expect(exitCode).toBe(0);
+    expect(createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("workspace list calls the API and prints rows", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    listWorkspaces.mockResolvedValue([
+      { id: "ws-1", createdAt: "t1", displayName: "proj" },
+    ]);
+    const exitCode = await main(["node", "remote", "workspace", "list"]);
+
+    expect(exitCode).toBe(0);
+    expect(listWorkspaces).toHaveBeenCalledWith("http://localhost:8080");
+    const out = stdoutWrite.mock.calls.map((c) => String(c[0])).join("");
+    expect(out).toContain("ws-1");
+  });
+
+  it("auto-binds a profile session to the mapped workspace", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    readWorkspaceMarker.mockReturnValue({
+      remote: "http://localhost:8080",
+      workspaceId: "ws-mapped",
+    });
+    const exitCode = await main(["node", "remote", "codex"]);
+
+    expect(exitCode).toBe(0);
+    expect(createRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      expect.objectContaining({ profile: "codex", workspaceId: "ws-mapped" }),
+    );
+  });
+
+  it("--no-workspace ignores the mapping", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    readWorkspaceMarker.mockReturnValue({
+      remote: "http://localhost:8080",
+      workspaceId: "ws-mapped",
+    });
+    const exitCode = await main(["node", "remote", "codex", "--no-workspace"]);
+
+    expect(exitCode).toBe(0);
+    expect(createRemoteSession).toHaveBeenCalledWith(
+      "http://localhost:8080",
+      expect.not.objectContaining({ workspaceId: expect.anything() }),
     );
   });
 });

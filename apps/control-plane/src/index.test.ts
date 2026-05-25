@@ -512,4 +512,63 @@ describe("control plane", () => {
     const body = (await response.json()) as { code: string };
     expect(body.code).toBe("validation.failed");
   });
+
+  it("creates, lists, binds, and deletes a workspace", async () => {
+    type Call =
+      | { op: "provisionWorkspace"; id: string }
+      | { op: "destroyWorkspace"; id: string }
+      | { op: "provision"; sessionId: string; workspaceId?: string };
+    const calls: Call[] = [];
+    const provisioner = {
+      async provision(descriptor: { id: string; workspaceId?: string }) {
+        calls.push({
+          op: "provision",
+          sessionId: descriptor.id,
+          workspaceId: descriptor.workspaceId,
+        });
+      },
+      async refresh() {},
+      async destroy() {},
+      async inspect() {
+        return undefined;
+      },
+      async provisionWorkspace(id: string) {
+        calls.push({ op: "provisionWorkspace", id });
+      },
+      async destroyWorkspace(id: string) {
+        calls.push({ op: "destroyWorkspace", id });
+      },
+    };
+    const app = createControlPlane({ provisioner });
+
+    const created = (await (
+      await app.request("/workspaces", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "proj" }),
+      })
+    ).json()) as { workspace: { id: string } };
+    const wsId = created.workspace.id;
+    expect(wsId).toMatch(/^ws-/);
+    expect(calls).toContainEqual({ op: "provisionWorkspace", id: wsId });
+
+    const listed = (await (await app.request("/workspaces")).json()) as {
+      workspaces: Array<{ id: string }>;
+    };
+    expect(listed.workspaces.map((w) => w.id)).toContain(wsId);
+
+    // a session bound to the workspace carries workspaceId into provisioning
+    await app.request("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ profile: "shell", target: "k3s", workspaceId: wsId }),
+    });
+    expect(
+      calls.some((c) => c.op === "provision" && c.workspaceId === wsId),
+    ).toBe(true);
+
+    const del = await app.request(`/workspaces/${wsId}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+    expect(calls).toContainEqual({ op: "destroyWorkspace", id: wsId });
+  });
 });

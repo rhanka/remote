@@ -45,7 +45,9 @@ function randomId(prefix: string): string {
   return `${prefix}-${random}`;
 }
 
-function buildDescriptor(req: CreateSessionRequest): SessionDescriptor {
+function buildDescriptor(
+  req: CreateSessionRequest & { workspaceId?: string },
+): SessionDescriptor {
   const now = new Date().toISOString();
   const descriptor: SessionDescriptor = {
     id: randomId("sess"),
@@ -60,6 +62,7 @@ function buildDescriptor(req: CreateSessionRequest): SessionDescriptor {
     },
   };
 
+  if (req.workspaceId !== undefined) descriptor.workspaceId = req.workspaceId;
   if (req.displayName !== undefined) descriptor.displayName = req.displayName;
   if (req.labels !== undefined) descriptor.labels = req.labels;
   if (req.resourceLimits !== undefined)
@@ -189,6 +192,7 @@ export function createSessionsRouter(
       CreateSessionRequest & {
         credentials?: Record<string, string>;
         workspaceSync?: boolean;
+        workspaceId?: string;
       }
     >(c);
     const descriptor = store.put(buildDescriptor(req));
