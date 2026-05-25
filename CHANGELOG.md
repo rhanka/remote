@@ -36,6 +36,18 @@ cwd.
   `@sentropic/h2a` v0.1.25.
 - `SESSION_AGENT_IMAGE_PULL_POLICY` env override on the control-plane (local
   dev can use `IfNotPresent` while production keeps `Always`).
+- **Persistent workspaces (epic P1)** — map a project to a remote workspace
+  whose retained PVC survives sessions:
+  - `Workspace` resource (`POST/GET/DELETE /workspaces`) + retained PVC
+    `workspace-<id>`; a session bound via `workspaceId` mounts it at
+    `/workspace` instead of an ephemeral volume.
+  - `remote workspace link|list|status|push|pull|rm` + `.remote/workspace.json`
+    marker; profile commands auto-bind to the mapped workspace
+    (`--no-workspace` opts out).
+  - `pull` does a **3-way merge** (base snapshot common ancestor, `git
+    merge-file`, conflict markers + non-zero exit); `push`/`pull` honor an
+    advisory **soft-lock** (`/workspaces/:id/lock`, TTL auto-expiry, `--force`
+    to override).
 
 ### Changed
 - **Remote-first CLI**: a bare `remote <profile>` now targets the configured
