@@ -21,6 +21,7 @@ export type SessionTarget =
   (typeof import("./constants.js").SESSION_TARGETS)[number];
 
 export * from "./schemas/index.js";
+export { H2A_BRIDGE_PROFILE_V1 } from "./schemas/h2a-bridge.js";
 export * from "./examples.js";
 export * from "./openapi.js";
 export type * from "./types.js";

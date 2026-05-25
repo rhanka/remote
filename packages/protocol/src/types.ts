@@ -54,8 +54,10 @@ import type {
   terminalOutputSchema,
   terminalResizeSchema,
 } from "./schemas/terminal.js";
+import type { h2aBridgeProfileSchema } from "./schemas/h2a-bridge.js";
 
 export type Actor = FromSchema<typeof actorSchema>;
+export type H2AHostBridgeProfile = FromSchema<typeof h2aBridgeProfileSchema>;
 export type SessionDescriptor = FromSchema<typeof sessionDescriptorSchema>;
 export type SessionCredentials = FromSchema<typeof sessionCredentialsSchema>;
 export type RefreshSessionCredentialsRequest = FromSchema<
