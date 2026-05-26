@@ -47,6 +47,10 @@ import {
   writeWorkspaceMarker,
 } from "./workspace.js";
 import { mergeWorkspaceArchive } from "./workspace-merge.js";
+import {
+  restoreSessionsToLocal,
+  type OnConflict,
+} from "./session-restore.js";
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
 
@@ -572,7 +576,20 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Fetch the mapped workspace and 3-way merge it into the current directory",
     )
     .option("--force", "override a soft lock held by another editor")
-    .action(async (opts: { force?: boolean }) => {
+    .option(
+      "--restore-sessions",
+      "also restore CLI conversation state (codex/claude/agy) into your local HOME",
+    )
+    .option(
+      "--on-conflict <mode>",
+      "for diverged conversations: backup | keep-local (default: block & report)",
+    )
+    .action(
+      async (opts: {
+        force?: boolean;
+        restoreSessions?: boolean;
+        onConflict?: string;
+      }) => {
       const cwd = process.cwd();
       const marker = requireMarker(cwd);
       await guardLock(marker.remote, marker.workspaceId, opts.force ?? false);
@@ -626,6 +643,44 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         // Clean merge → the remote tree is the new shared base.
         writeBaseSnapshot(cwd, remoteArchive);
         process.stderr.write(`[remote] pulled ${marker.workspaceId} into ${cwd}\n`);
+
+        if (opts.restoreSessions) {
+          const onConflict: OnConflict =
+            opts.onConflict === "backup"
+              ? "backup"
+              : opts.onConflict === "keep-local"
+                ? "keep-local"
+                : "block";
+          const home = process.env.HOME ?? "";
+          let anyConflict = false;
+          for (const profile of CLI_PROFILES) {
+            const r = restoreSessionsToLocal({
+              home,
+              profile,
+              remoteArchive,
+              onConflict,
+            });
+            const touched =
+              r.restored.length + r.backedUp.length + r.conflicts.length;
+            if (touched === 0 && r.keptLocal.length === 0) continue;
+            process.stderr.write(
+              `[remote] sessions(${profile}): ${r.restored.length} restored, ${r.backedUp.length} backed-up, ${r.keptLocal.length} kept, ${r.conflicts.length} conflict\n`,
+            );
+            for (const b of r.backedUp)
+              process.stderr.write(`    backup ${b}\n`);
+            if (r.conflicts.length > 0) {
+              anyConflict = true;
+              for (const c of r.conflicts)
+                process.stderr.write(`    conflict ${c}\n`);
+            }
+          }
+          if (anyConflict) {
+            process.stderr.write(
+              `[remote] diverged conversations left untouched. Re-run with --on-conflict backup (keep both) or keep-local.\n`,
+            );
+            process.exitCode = 1;
+          }
+        }
       } finally {
         await releaseWorkspaceLock(marker.remote, marker.workspaceId);
       }
