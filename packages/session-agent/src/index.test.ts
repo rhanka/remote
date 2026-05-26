@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +10,9 @@ import {
   exportWorkspace,
   restoreSessionState,
   snapshotSessionState,
+  writePresence,
+  clearPresence,
+  safePathSegment,
 } from "./index.js";
 
 function setupStage(files: Record<string, string>): string {
@@ -156,6 +159,34 @@ describe("session-state restore/snapshot", () => {
     const ws = mkdtempSync(join(tmpdir(), "ws-"));
     expect(snapshotSessionState("shell", home, ws)).toEqual([]);
     expect(restoreSessionState("opencode", home, ws)).toEqual([]);
+  });
+});
+
+describe("h2a presence projection", () => {
+  it("writes and clears a DEC-059 presence file with a safe path segment", () => {
+    const ws = mkdtempSync(join(tmpdir(), "ws-pres-"));
+    const input = {
+      sessionId: "sess-abc",
+      profile: "codex",
+      workspacePath: ws,
+      workspaceId: "ws-1",
+    };
+    writePresence(input, "live");
+    const f = join(ws, ".h2a/presence/remote__sess-abc.json");
+    const doc = JSON.parse(readFileSync(f, "utf8"));
+    expect(doc).toMatchObject({
+      instance: "remote:sess-abc",
+      host: "remote",
+      state: "live",
+      profile: "codex",
+      workspaceId: "ws-1",
+    });
+    clearPresence(input);
+    expect(existsSync(f)).toBe(false);
+  });
+
+  it("safePathSegment maps ':' to '__'", () => {
+    expect(safePathSegment("remote:sess-x")).toBe("remote__sess-x");
   });
 });
 

@@ -7,6 +7,7 @@ import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
 import { exportWorkspace, materializeWorkspace } from "./workspace-sync.js";
 import { restoreSessionState, snapshotSessionState } from "./session-state.js";
+import { clearPresence, writePresence } from "./h2a-presence.js";
 
 export const packageName = "@sentropic/remote-session-agent";
 
@@ -19,6 +20,7 @@ export {
   restoreSessionState,
   snapshotSessionState,
 } from "./session-state.js";
+export { writePresence, clearPresence, safePathSegment } from "./h2a-presence.js";
 
 export function materializeAuthBundle(
   stagingDir: string | undefined,
@@ -128,6 +130,22 @@ export async function main(): Promise<void> {
     console.error("[session-agent] session-state restore failed:", error);
   }
 
+  // Project this session as an h2a presence file in the workspace (DEC-059),
+  // so other sessions / an h2a sidecar can discover who's on this workspace.
+  const presenceInput = {
+    sessionId,
+    profile,
+    workspacePath,
+    ...(process.env.SESSION_WORKSPACE_ID
+      ? { workspaceId: process.env.SESSION_WORKSPACE_ID }
+      : {}),
+  };
+  try {
+    writePresence(presenceInput, "live");
+  } catch (error) {
+    console.error("[session-agent] h2a presence write failed:", error);
+  }
+
   const wsUrl = controlPlaneEndpoint
     .replace(/^http:/, "ws:")
     .replace(/^https:/, "wss:");
@@ -155,6 +173,11 @@ export async function main(): Promise<void> {
         }
       } catch (error) {
         console.error("[session-agent] session-state snapshot failed:", error);
+      }
+      try {
+        clearPresence(presenceInput);
+      } catch {
+        // best-effort
       }
     },
     spawner,

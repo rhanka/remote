@@ -298,6 +298,9 @@ export function buildSessionPodSpec(
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: options.home },
+            ...(descriptor.workspaceId
+              ? [{ name: "SESSION_WORKSPACE_ID", value: descriptor.workspaceId }]
+              : []),
             ...(workspaceSync
               ? [{ name: "SESSION_WORKSPACE_SYNC", value: "1" }]
               : []),
