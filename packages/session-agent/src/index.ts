@@ -6,6 +6,7 @@ import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
 import { exportWorkspace, materializeWorkspace } from "./workspace-sync.js";
+import { restoreSessionState, snapshotSessionState } from "./session-state.js";
 
 export const packageName = "@sentropic/remote-session-agent";
 
@@ -14,6 +15,10 @@ export type {
   MaterializeWorkspaceOptions,
   ExportWorkspaceOptions,
 } from "./workspace-sync.js";
+export {
+  restoreSessionState,
+  snapshotSessionState,
+} from "./session-state.js";
 
 export function materializeAuthBundle(
   stagingDir: string | undefined,
@@ -110,6 +115,19 @@ export async function main(): Promise<void> {
     }
   }
 
+  // Restore any conversation state persisted in the (retained) workspace so a
+  // CLI conversation can resume across sessions bound to the same workspace.
+  try {
+    const restored = restoreSessionState(profile, home, workspacePath);
+    if (restored.length > 0) {
+      console.log(
+        `[session-agent] restored session state: ${restored.join(", ")}`,
+      );
+    }
+  } catch (error) {
+    console.error("[session-agent] session-state restore failed:", error);
+  }
+
   const wsUrl = controlPlaneEndpoint
     .replace(/^http:/, "ws:")
     .replace(/^https:/, "wss:");
@@ -127,6 +145,18 @@ export async function main(): Promise<void> {
     profile,
     workspacePath,
     transport,
+    onBeforeExit: () => {
+      try {
+        const saved = snapshotSessionState(profile, home, workspacePath);
+        if (saved.length > 0) {
+          console.log(
+            `[session-agent] snapshotted session state: ${saved.join(", ")}`,
+          );
+        }
+      } catch (error) {
+        console.error("[session-agent] session-state snapshot failed:", error);
+      }
+    },
     spawner,
     env: process.env as Record<string, string>,
   });

@@ -47,6 +47,10 @@ export type SessionAgentOptions = {
   readonly clock?: () => Date;
   readonly randomId?: (prefix: string) => string;
   readonly env?: Readonly<Record<string, string>>;
+  /** Invoked when the wrapped process exits, before `terminal.exited` is
+   * published (which triggers the control-plane cleanup cascade). Used to
+   * snapshot conversation state into the retained workspace volume. */
+  readonly onBeforeExit?: () => void;
 };
 
 const AGENT_ACTOR: Actor = {
@@ -97,6 +101,7 @@ export class SessionAgent {
   private readonly clock: () => Date;
   private readonly randomId: (prefix: string) => string;
   private readonly env: Readonly<Record<string, string>>;
+  private readonly onBeforeExit: (() => void) | undefined;
   private sequence = 0;
   private process: ProcessHandle | null = null;
   private terminalId = "";
@@ -111,6 +116,7 @@ export class SessionAgent {
     this.clock = options.clock ?? (() => new Date());
     this.randomId = options.randomId ?? defaultRandomId;
     this.env = options.env ?? {};
+    this.onBeforeExit = options.onBeforeExit;
   }
 
   start(): void {
@@ -140,6 +146,13 @@ export class SessionAgent {
     void handle.exited.then((result) => {
       if (this.stopped) return;
       this.stopped = true;
+      if (this.onBeforeExit) {
+        try {
+          this.onBeforeExit();
+        } catch {
+          // best-effort snapshot; never block the exit path
+        }
+      }
       const payload: Record<string, unknown> = {
         terminalId: this.terminalId,
         exitCode: result.exitCode ?? -1,

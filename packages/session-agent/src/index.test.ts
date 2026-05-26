@@ -8,6 +8,8 @@ import {
   materializeAuthBundle,
   materializeWorkspace,
   exportWorkspace,
+  restoreSessionState,
+  snapshotSessionState,
 } from "./index.js";
 
 function setupStage(files: Record<string, string>): string {
@@ -126,6 +128,34 @@ describe("materializeWorkspace", () => {
       },
     });
     expect(extracted).toBe(false);
+  });
+});
+
+describe("session-state restore/snapshot", () => {
+  it("snapshots HOME conv state into the workspace, then restores it to a fresh HOME", () => {
+    const home1 = mkdtempSync(join(tmpdir(), "home1-"));
+    const ws = mkdtempSync(join(tmpdir(), "ws-"));
+    // codex writes a conversation under ~/.codex/sessions
+    mkdirSync(join(home1, ".codex/sessions"), { recursive: true });
+    writeFileSync(join(home1, ".codex/sessions/conv.jsonl"), "hello");
+
+    const saved = snapshotSessionState("codex", home1, ws);
+    expect(saved).toContain(".codex/sessions");
+
+    // a fresh session (new HOME) bound to the same workspace restores it
+    const home2 = mkdtempSync(join(tmpdir(), "home2-"));
+    const restored = restoreSessionState("codex", home2, ws);
+    expect(restored).toContain(".codex/sessions");
+    expect(
+      readFileSync(join(home2, ".codex/sessions/conv.jsonl"), "utf8"),
+    ).toBe("hello");
+  });
+
+  it("is a no-op for profiles without a known state dir", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const ws = mkdtempSync(join(tmpdir(), "ws-"));
+    expect(snapshotSessionState("shell", home, ws)).toEqual([]);
+    expect(restoreSessionState("opencode", home, ws)).toEqual([]);
   });
 });
 
