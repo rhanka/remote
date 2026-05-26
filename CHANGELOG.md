@@ -5,6 +5,17 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.2.1 — 2026-05-25
+
+### Fixed
+- **`remote workspace pull` export race**: the throwaway export session exited
+  immediately, so the `terminal.exited` cleanup cascade dropped the in-memory
+  export before the CLI downloaded it ("nothing to pull"). The session is now
+  kept alive while the CLI polls the export endpoint, then stopped explicitly.
+  Validated live on k3d (take-remote, keep-local, and conflict paths).
+- Conflict markers from `git merge-file` are now labelled
+  `<path> (local|base|remote)` instead of temp file paths.
+
 ## v0.2.0 — 2026-05-25
 
 Headline: the agent CLI surface becomes **remote-first** and explicit, the
