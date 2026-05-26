@@ -128,9 +128,23 @@ export function mergeWorkspaceArchive(args: {
       writeFileSync(lf, local);
       writeFileSync(bf, base ?? Buffer.alloc(0));
       writeFileSync(rf, remote);
-      const res = spawnSync("git", ["merge-file", "-p", lf, bf, rf], {
-        maxBuffer: 64 * 1024 * 1024,
-      });
+      const res = spawnSync(
+        "git",
+        [
+          "merge-file",
+          "-p",
+          "-L",
+          `${rel} (local)`,
+          "-L",
+          `${rel} (base)`,
+          "-L",
+          `${rel} (remote)`,
+          lf,
+          bf,
+          rf,
+        ],
+        { maxBuffer: 64 * 1024 * 1024 },
+      );
       const out = res.stdout ?? Buffer.alloc(0);
       writeLocal(args.cwd, rel, out);
       merged.push(rel);

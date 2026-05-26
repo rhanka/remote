@@ -577,25 +577,33 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const marker = requireMarker(cwd);
       await guardLock(marker.remote, marker.workspaceId, opts.force ?? false);
       try {
-        // Export the live /workspace via a throwaway bound session.
+        // Export the live /workspace via a bound session. The session-agent
+        // uploads the export on startup (before the shell), so we keep the
+        // shell alive, poll for the export, then stop the session explicitly —
+        // otherwise the terminal.exited cleanup cascade would drop the export
+        // before we could download it.
         const session = await createRemoteSession(marker.remote, {
           profile: "shell",
           workspaceId: marker.workspaceId,
           workspaceExport: true,
-          startupArgs: ["-c", "exit 0"],
+          startupArgs: ["-c", "sleep 120"],
         });
-        const attached = await attach({
-          baseUrl: marker.remote,
-          sessionId: session.id,
-        });
-        await attached.finished;
-        const remoteArchive = await downloadWorkspaceExport(
-          marker.remote,
-          session.id,
-        );
+        let remoteArchive: Buffer | null = null;
+        try {
+          for (let attempt = 0; attempt < 60; attempt++) {
+            remoteArchive = await downloadWorkspaceExport(
+              marker.remote,
+              session.id,
+            );
+            if (remoteArchive) break;
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        } finally {
+          await stopRemoteSession(marker.remote, session.id, "pull-complete");
+        }
         if (!remoteArchive) {
           process.stderr.write(
-            `[remote] nothing to pull (workspace ${marker.workspaceId} is empty)\n`,
+            `[remote] nothing to pull (workspace ${marker.workspaceId} produced no export)\n`,
           );
           return;
         }
