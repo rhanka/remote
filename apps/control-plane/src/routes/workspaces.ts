@@ -90,17 +90,27 @@ export function createWorkspacesRouter(
   );
 
   router.get("/", (c) => {
-    const response: ListWorkspacesResponse = {
-      workspaces: [...store.values()],
-    };
-    return c.json(response);
+    // Augment each workspace with its live lock (informational; the strict
+    // ListWorkspacesResponse type carries only the descriptors).
+    const workspaces = [...store.values()].map((w) => {
+      const lock = activeLock(w.id);
+      return lock
+        ? { ...w, lock: { holder: lock.holder, acquiredAt: lock.acquiredAt } }
+        : w;
+    });
+    return c.json({ workspaces } as unknown as ListWorkspacesResponse);
   });
 
   router.get("/:id", (c) => {
     const workspace = store.get(c.req.param("id"));
     if (!workspace) return notFound(c);
+    const lock = activeLock(workspace.id);
     const response: GetWorkspaceResponse = { workspace };
-    return c.json(response);
+    return c.json(
+      lock
+        ? { ...response, lock: { holder: lock.holder, acquiredAt: lock.acquiredAt } }
+        : response,
+    );
   });
 
   router.delete("/:id", async (c) => {

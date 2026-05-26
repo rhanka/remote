@@ -15,6 +15,10 @@
     sendTerminalResize,
     sessionEventStreamUrl,
     stopSession,
+    listWorkspaces,
+    createWorkspace,
+    deleteWorkspace,
+    type WorkspaceSummary,
   } from "../lib/api.js";
 
   let apiBase = $state("http://localhost:8080");
@@ -36,6 +40,45 @@
   $effect(() => {
     if (typeof window !== "undefined") persistApiBase(apiBase);
   });
+
+  let workspaces = $state<WorkspaceSummary[]>([]);
+  let workspaceError = $state<string | undefined>();
+  let newWorkspaceName = $state("");
+
+  async function refreshWorkspaces(): Promise<void> {
+    try {
+      workspaces = await listWorkspaces(apiBase);
+      workspaceError = undefined;
+    } catch (error) {
+      workspaceError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function handleCreateWorkspace(): Promise<void> {
+    busy = true;
+    try {
+      await createWorkspace(
+        apiBase,
+        newWorkspaceName ? { displayName: newWorkspaceName } : {},
+      );
+      newWorkspaceName = "";
+      await refreshWorkspaces();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function handleDeleteWorkspace(id: string): Promise<void> {
+    if (!window.confirm(`Delete workspace ${id} and its retained volume?`))
+      return;
+    busy = true;
+    try {
+      await deleteWorkspace(apiBase, id);
+      await refreshWorkspaces();
+    } finally {
+      busy = false;
+    }
+  }
 
   async function refreshSessions(): Promise<void> {
     try {
@@ -169,7 +212,11 @@
   onMount(() => {
     apiBase = resolveApiBase();
     void refreshSessions();
-    const interval = window.setInterval(refreshSessions, 5000);
+    void refreshWorkspaces();
+    const interval = window.setInterval(() => {
+      void refreshSessions();
+      void refreshWorkspaces();
+    }, 5000);
     return () => window.clearInterval(interval);
   });
 
@@ -251,6 +298,51 @@
           {busy ? "..." : "Create + attach"}
         </button>
       </form>
+
+      <h2 class="ws-title">Workspaces</h2>
+      {#if workspaceError}
+        <p class="error">{workspaceError}</p>
+      {/if}
+      {#if workspaces.length === 0}
+        <p class="muted">no workspace</p>
+      {/if}
+      {#each workspaces as ws (ws.id)}
+        <article>
+          <div class="ws-row">
+            <strong>{ws.displayName ?? ws.id}</strong>
+            <span class="meta">{ws.id}</span>
+            {#if ws.lock}
+              <span class="lock" title="held since {ws.lock.acquiredAt}">
+                🔒 {ws.lock.holder}
+              </span>
+            {/if}
+          </div>
+          <button
+            type="button"
+            class="stop"
+            onclick={() => handleDeleteWorkspace(ws.id)}
+            disabled={busy}
+            title="Delete workspace"
+          >
+            ✕
+          </button>
+        </article>
+      {/each}
+      <form
+        class="create"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void handleCreateWorkspace();
+        }}
+      >
+        <label>
+          new workspace
+          <input type="text" placeholder="name (optional)" bind:value={newWorkspaceName} />
+        </label>
+        <button type="submit" disabled={busy}>
+          {busy ? "..." : "Create workspace"}
+        </button>
+      </form>
     </nav>
 
     <section class="terminal" aria-label="Terminal">
@@ -270,6 +362,20 @@
 </main>
 
 <style>
+  .ws-title {
+    margin-top: 1.5rem;
+    border-top: 1px solid #e0e4e8;
+    padding-top: 1rem;
+  }
+  .ws-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .lock {
+    font-size: 0.75rem;
+    color: #b4690e;
+  }
   :global(html, body) {
     margin: 0;
     height: 100%;

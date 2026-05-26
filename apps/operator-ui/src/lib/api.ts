@@ -94,3 +94,40 @@ export async function sendTerminalResize(
 export function sessionEventStreamUrl(base: string, id: string): string {
   return join(base, `/sessions/${id}/events`);
 }
+
+export type WorkspaceSummary = {
+  id: string;
+  createdAt: string;
+  displayName?: string;
+  lock?: { holder: string; acquiredAt: string };
+};
+
+export async function listWorkspaces(
+  base: string,
+): Promise<WorkspaceSummary[]> {
+  const res = await fetch(join(base, "/workspaces"));
+  if (!res.ok) throw new Error(`listWorkspaces ${res.status}`);
+  const json = (await res.json()) as { workspaces: WorkspaceSummary[] };
+  return json.workspaces;
+}
+
+export async function createWorkspace(
+  base: string,
+  body: { displayName?: string } = {},
+): Promise<WorkspaceSummary> {
+  const res = await fetch(join(base, "/workspaces"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`createWorkspace ${res.status}`);
+  const json = (await res.json()) as { workspace: WorkspaceSummary };
+  return json.workspace;
+}
+
+export async function deleteWorkspace(base: string, id: string): Promise<boolean> {
+  const res = await fetch(join(base, `/workspaces/${id}`), { method: "DELETE" });
+  if (res.status === 404) return false;
+  if (!res.ok) throw new Error(`deleteWorkspace ${res.status}`);
+  return true;
+}
