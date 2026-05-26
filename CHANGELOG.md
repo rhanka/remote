@@ -5,6 +5,29 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.3.0 — 2026-05-25
+
+Headline: workspaces gain **session continuity** — a CLI conversation started
+remotely can resume in a later remote session or be brought back to your local
+machine, with conflict-aware restore and h2a presence discovery.
+
+### Added
+- **Conversation state persists with the workspace (P2a)**: the session-agent
+  restores `<workspace>/.remote/sessions/<profile>/` into HOME on start and
+  snapshots it back on the wrapped CLI's exit (`onBeforeExit` hook, before the
+  cleanup cascade). codex `.codex/sessions`, claude `.claude/projects`, agy
+  `.gemini/antigravity-cli/conversations`.
+- **`remote workspace pull --restore-sessions` (P2b)**: brings remote
+  conversation state into the local HOME. Per file: write if absent, overwrite
+  if remote continues local (prefix), keep local if local is ahead, else
+  **conflict** resolved by `--on-conflict backup` (duplicate local under a
+  fresh id, keep both) | `keep-local` | block-and-report (default).
+- **h2a presence projection (P2c)**: a workspace-bound session writes
+  `/workspace/.h2a/presence/remote__<sid>.json` (DEC-059 contract,
+  `safePathSegment`) on start and clears it on exit, so peers / an h2a sidecar
+  can discover who's on the workspace.
+- `SESSION_WORKSPACE_ID` env on session pods (informational, drives presence).
+
 ## v0.2.1 — 2026-05-25
 
 ### Fixed
