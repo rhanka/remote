@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -62,4 +62,47 @@ export function snapshotSessionState(
     if (copyDir(src, dst)) saved.push(rel);
   }
   return saved;
+}
+
+const UUID_RE =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/**
+ * Best-effort detection of the wrapped CLI's own conversation id: the
+ * most-recently-modified conversation file under the profile's state dir,
+ * reduced to a uuid (if present in the name) or the filename stem.
+ */
+export function detectCliSessionId(
+  profile: string,
+  home: string,
+): string | undefined {
+  let newest: { id: string; mtime: number } | undefined;
+  for (const rel of stateDirsFor(profile)) {
+    const root = join(home, rel);
+    if (!existsSync(root)) continue;
+    const stack = [root];
+    while (stack.length > 0) {
+      const dir = stack.pop()!;
+      let entries;
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        const abs = join(dir, e.name);
+        if (e.isDirectory()) {
+          stack.push(abs);
+        } else if (e.isFile()) {
+          const mtime = statSync(abs).mtimeMs;
+          if (!newest || mtime > newest.mtime) {
+            const base = e.name.replace(/\.[^.]+$/, "");
+            const id = UUID_RE.exec(e.name)?.[0] ?? base;
+            newest = { id, mtime };
+          }
+        }
+      }
+    }
+  }
+  return newest?.id;
 }

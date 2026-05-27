@@ -263,6 +263,21 @@ export function createSessionsRouter(
     });
   });
 
+  // The session-agent reports the wrapped CLI's own conversation id once it
+  // detects it (newest file in the profile's conversation dir).
+  router.post("/:id/cli-session", async (c) => {
+    const id = c.req.param("id");
+    const session = store.get(id);
+    if (!session) return notFound(c);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      cliSessionId?: string;
+    };
+    if (typeof body.cliSessionId === "string" && body.cliSessionId.length > 0) {
+      store.put({ ...session, cliSessionId: body.cliSessionId });
+    }
+    return c.json({ sessionId: id, accepted: true });
+  });
+
   router.get("/", (c) => {
     const response: ListSessionsResponse = { sessions: store.list() };
     return c.json(response);

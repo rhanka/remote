@@ -302,6 +302,7 @@ export async function listRemoteSessions(
     target: string;
     createdAt: string;
     displayName?: string;
+    cliSessionId?: string;
   }>
 > {
   const response = await fetchImpl(joinUrl(baseUrl, "/sessions"));
@@ -317,7 +318,8 @@ export async function listRemoteSessions(
       target: string;
       createdAt: string;
       displayName?: string;
-    }>;
+    cliSessionId?: string;
+  }>;
   };
   return json.sessions;
 }

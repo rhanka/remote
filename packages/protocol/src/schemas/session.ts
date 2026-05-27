@@ -36,6 +36,12 @@ export const sessionDescriptorSchema = {
     target: embeddedSessionTargetSchema,
     workspacePath: { type: "string", const: "/workspace" },
     workspaceId: { type: "string", minLength: 1 },
+    cliSessionId: {
+      type: "string",
+      minLength: 1,
+      description:
+        "The wrapped CLI's own conversation/session id (codex/claude/agy), reported by the session-agent once detected. Informational, shown in `remote ls`.",
+    },
     createdAt: isoDateTimeSchema,
     createdBy: embeddedActorSchema,
     displayName: { type: "string", minLength: 1 },

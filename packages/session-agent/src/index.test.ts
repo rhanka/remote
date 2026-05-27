@@ -10,6 +10,7 @@ import {
   exportWorkspace,
   restoreSessionState,
   snapshotSessionState,
+  detectCliSessionId,
   writePresence,
   clearPresence,
   safePathSegment,
@@ -159,6 +160,27 @@ describe("session-state restore/snapshot", () => {
     const ws = mkdtempSync(join(tmpdir(), "ws-"));
     expect(snapshotSessionState("shell", home, ws)).toEqual([]);
     expect(restoreSessionState("opencode", home, ws)).toEqual([]);
+  });
+});
+
+describe("detectCliSessionId", () => {
+  it("returns the uuid from the newest conversation file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "home-cli-"));
+    mkdirSync(join(home, ".codex/sessions"), { recursive: true });
+    writeFileSync(join(home, ".codex/sessions/old.jsonl"), "x");
+    await new Promise((r) => setTimeout(r, 10));
+    const uuid = "11111111-2222-3333-4444-555555555555";
+    writeFileSync(
+      join(home, `.codex/sessions/rollout-${uuid}.jsonl`),
+      "y",
+    );
+    expect(detectCliSessionId("codex", home)).toBe(uuid);
+  });
+
+  it("returns undefined when no conversation files exist", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-empty-"));
+    expect(detectCliSessionId("codex", home)).toBeUndefined();
+    expect(detectCliSessionId("shell", home)).toBeUndefined();
   });
 });
 

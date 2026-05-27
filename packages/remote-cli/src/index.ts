@@ -963,12 +963,19 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       const rows = sessions.map((s) =>
-        [s.id, s.profile, s.target, s.createdAt, s.displayName ?? ""].join(
-          "\t",
-        ),
+        [
+          s.id,
+          s.profile,
+          s.cliSessionId ?? "-",
+          s.target,
+          s.createdAt,
+          s.displayName ?? "",
+        ].join("\t"),
       );
       process.stdout.write(
-        ["ID\tPROFILE\tTARGET\tCREATED\tDISPLAY", ...rows].join("\n") + "\n",
+        ["ID\tPROFILE\tCLI_SESSION\tTARGET\tCREATED\tDISPLAY", ...rows].join(
+          "\n",
+        ) + "\n",
       );
     });
 

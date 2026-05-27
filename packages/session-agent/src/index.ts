@@ -6,7 +6,11 @@ import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
 import { exportWorkspace, materializeWorkspace } from "./workspace-sync.js";
-import { restoreSessionState, snapshotSessionState } from "./session-state.js";
+import {
+  detectCliSessionId,
+  restoreSessionState,
+  snapshotSessionState,
+} from "./session-state.js";
 import { clearPresence, writePresence } from "./h2a-presence.js";
 
 export const packageName = "@sentropic/remote-session-agent";
@@ -19,6 +23,7 @@ export type {
 export {
   restoreSessionState,
   snapshotSessionState,
+  detectCliSessionId,
 } from "./session-state.js";
 export { writePresence, clearPresence, safePathSegment } from "./h2a-presence.js";
 
@@ -185,6 +190,30 @@ export async function main(): Promise<void> {
   });
 
   agent.start();
+
+  // Detect the wrapped CLI's own conversation id (appears shortly after start)
+  // and report it to the control-plane so `remote ls` can show it.
+  void (async () => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const cliSessionId = detectCliSessionId(profile, home);
+      if (!cliSessionId) continue;
+      try {
+        await fetch(
+          `${controlPlaneEndpoint.replace(/\/$/, "")}/sessions/${sessionId}/cli-session`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ cliSessionId }),
+          },
+        );
+      } catch {
+        // best-effort
+      }
+      return;
+    }
+  })();
+
   await transport.closed;
 }
 
