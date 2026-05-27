@@ -11,7 +11,8 @@ PORT ?= 8080
 	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
 	demo demo-down \
 	scw-deploy scw-undeploy scw-port-forward \
-	cli-build cli-link cli-unlink
+	cli-build cli-link cli-unlink \
+	e2e-docker e2e-k3s
 
 help:
 	@echo "One-shot:"
@@ -99,6 +100,15 @@ demo: k3d-up k3d-load deploy wait-ready
 	@echo "        -d '{\"profile\":\"codex\",\"target\":\"k3s\"}'"
 
 demo-down: undeploy k3d-down
+
+# --- End-to-end session smoke (two backends) ------------------------------
+# e2e-docker: in-process control-plane + DockerSessionProvisioner (no k8s).
+# e2e-k3s:    full k3d cluster (make demo) + port-forward.
+e2e-docker: build images-session-agent
+	bash e2e/run-docker.sh
+
+e2e-k3s: demo
+	bash e2e/run-k3s.sh
 
 # --- Scaleway Kapsule (tenant-scoped) -------------------------------------
 # This Makefile deploys the sentropic-remote workload INTO an existing

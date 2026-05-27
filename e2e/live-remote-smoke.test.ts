@@ -115,11 +115,21 @@ runIfConfigured("live remote smoke", () => {
     expect(output).toContain(marker);
     expect(output).toContain("/workspace");
 
-    await stopSession(baseUrl, session.id, "e2e-live-complete");
+    // The `exit` above ends the shell, so the control-plane's cleanup cascade
+    // auto-stops the session. A redundant stop may 404; either way the session
+    // must leave the list shortly.
+    await stopSession(baseUrl, session.id, "e2e-live-complete").catch(() => {});
     sessionId = undefined;
-    const sessions = await listSessions(baseUrl);
-    expect(sessions.some((candidate) => candidate.id === session.id)).toBe(
-      false,
-    );
+    let gone = false;
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const sessions = await listSessions(baseUrl);
+      if (!sessions.some((candidate) => candidate.id === session.id)) {
+        gone = true;
+        break;
+      }
+      await sleep(1_000);
+    }
+    expect(gone).toBe(true);
   });
 });
