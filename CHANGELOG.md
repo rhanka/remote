@@ -5,6 +5,17 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.3.1 — 2026-05-26
+
+### Added
+- **Operator-UI workspaces panel**: list workspaces with a 🔒 lock badge
+  (holder), create, and delete. `GET /workspaces[/:id]` now include the live
+  soft-lock. (Push/pull/merge stay CLI — they need the local filesystem.)
+- **`remote ls` shows the wrapped CLI's conversation id** in a new `CLI_SESSION`
+  column: the session-agent detects it (newest file in the profile's
+  conversation dir) and reports it via `POST /sessions/:id/cli-session`;
+  `cliSessionId` added to `SessionDescriptor`.
+
 ## v0.3.0 — 2026-05-25
 
 Headline: workspaces gain **session continuity** — a CLI conversation started

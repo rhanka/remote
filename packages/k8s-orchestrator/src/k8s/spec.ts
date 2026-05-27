@@ -94,7 +94,7 @@ const AUTH_STAGING_DIR = "/run/auth-bundle";
 
 export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
   namespace: "sentropic-remote",
-  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.3.0",
+  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.3.1",
   defaultWorkspaceSize: "1Gi",
   controlPlaneEndpoint: "http://sentropic-remote-control-plane:8080",
   home: "/root",
