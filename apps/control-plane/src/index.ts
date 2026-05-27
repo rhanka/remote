@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { createNodeWebSocket } from "@hono/node-ws";
 import {
+  DockerSessionProvisioner,
   InMemoryProvisioner,
   K8sSessionProvisioner,
   KubernetesObjectApiClient,
@@ -87,6 +88,22 @@ export function createControlPlane(
 }
 
 export function provisionerFromEnv(): SessionProvisioner {
+  if (process.env.SESSION_BACKEND === "docker") {
+    return new DockerSessionProvisioner({
+      ...(process.env.SESSION_AGENT_IMAGE
+        ? { image: process.env.SESSION_AGENT_IMAGE }
+        : {}),
+      ...(process.env.SESSION_DOCKER_CONTROL_PLANE_ENDPOINT
+        ? {
+            controlPlaneEndpoint:
+              process.env.SESSION_DOCKER_CONTROL_PLANE_ENDPOINT,
+          }
+        : {}),
+      ...(process.env.SESSION_DOCKER_NETWORK
+        ? { network: process.env.SESSION_DOCKER_NETWORK }
+        : {}),
+    });
+  }
   const namespace = process.env.K8S_NAMESPACE;
   if (!namespace) return new InMemoryProvisioner();
   const overrides: {

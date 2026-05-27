@@ -109,3 +109,11 @@ export {
   type ResourceQuantities,
   type SpecBuilderOptions,
 } from "./k8s/spec.js";
+
+export {
+  DockerSessionProvisioner,
+  execDocker,
+  type DockerRunner,
+  type DockerRunResult,
+  type DockerProvisionerOptions,
+} from "./docker/provisioner.js";

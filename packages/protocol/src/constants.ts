@@ -12,7 +12,12 @@ export const CLI_PROFILES = [
   "agy",
 ] as const;
 
-export const SESSION_TARGETS = ["k3s", "scaleway-kapsule", "gke"] as const;
+export const SESSION_TARGETS = [
+  "docker",
+  "k3s",
+  "scaleway-kapsule",
+  "gke",
+] as const;
 
 export const SESSION_LIFECYCLE_STATES = [
   "requested",

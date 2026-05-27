@@ -33,7 +33,12 @@ describe("protocol constants", () => {
   });
 
   it("declares target, lifecycle, actor, capability, and event names", () => {
-    expect(SESSION_TARGETS).toEqual(["k3s", "scaleway-kapsule", "gke"]);
+    expect(SESSION_TARGETS).toEqual([
+      "docker",
+      "k3s",
+      "scaleway-kapsule",
+      "gke",
+    ]);
     expect(SESSION_LIFECYCLE_STATES).toEqual([
       "requested",
       "provisioning",
