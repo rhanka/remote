@@ -5,6 +5,31 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## Unreleased
+
+Follow-ups on top of v0.4.0's multi-tenant base (no release tag cut yet).
+
+### Added
+- **Per-session service token for session-agent callbacks under bearer**: when
+  `REMOTE_AUTH` is enabled, the control-plane mints a short-lived JWT
+  (`sub`/`sid`, `aud: remote-session-agent`) per session and injects it as
+  `REMOTE_TOKEN` into the session container; the agent sends it on its workspace
+  fetch/export and `cli-session` callbacks. Signed with `REMOTE_SESSION_TOKEN_SECRET`
+  (falls back to `REMOTE_AUTH_SECRET`). Off-mode injects/sends nothing.
+- Security hardening: the `remote-session-agent` audience is reserved (user
+  tokens carrying it are rejected), the token is bound to its one session
+  (`sid` enforced on `/sessions/:id/*`), and the control-plane warns at startup
+  if auth is enabled with no session secret.
+- **Operator guide** `docs/multi-tenant-auth.md` (all auth env vars + caveats).
+- **OpenAPI**: declares the `bearerAuth` security scheme, applies it
+  document-wide (with `/healthz` public), documents `401` on protected routes,
+  and now covers the `/workspaces` routes and `POST /sessions/:id/terminal/input`.
+
+### Notes
+- Remaining for a real multi-tenant rollout (tracked, not in this repo's flow):
+  the poc-k8s `POST /tenants` operator, an optional `SentropicOIDCAuthenticator`,
+  and moving `REMOTE_TOKEN` from a plain env var to a mounted Secret.
+
 ## v0.4.0 — 2026-05-28
 
 Headline: the control-plane becomes **multi-tenant**. Each request authenticates
