@@ -64,6 +64,22 @@ describe("DockerSessionProvisioner", () => {
     expect(run).toContain(":/run/auth-bundle:ro");
   });
 
+  it("injects REMOTE_TOKEN into the container env when a session token is set", async () => {
+    const { calls, runner } = recorder();
+    const p = new DockerSessionProvisioner({ runner, image: "img:test" });
+    await p.provision(descriptor, () => {}, { sessionToken: "tok-abc123" });
+    const run = calls.find((c) => c[0] === "run")!.join(" ");
+    expect(run).toContain("REMOTE_TOKEN=tok-abc123");
+  });
+
+  it("omits REMOTE_TOKEN from the container env when no session token is set", async () => {
+    const { calls, runner } = recorder();
+    const p = new DockerSessionProvisioner({ runner, image: "img:test" });
+    await p.provision(descriptor, () => {});
+    const run = calls.find((c) => c[0] === "run")!.join(" ");
+    expect(run).not.toContain("REMOTE_TOKEN");
+  });
+
   it("destroy removes the container + per-session volume, keeps workspace volume", async () => {
     const { calls, runner } = recorder();
     const p = new DockerSessionProvisioner({ runner, image: "img:test" });

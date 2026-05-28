@@ -612,6 +612,75 @@ describe("control plane", () => {
     expect(bobStop.status).toBe(404);
   });
 
+  it("scopes a minted session token back to its owner under bearer auth", async () => {
+    const prevAuth = process.env.REMOTE_AUTH;
+    const prevSecret = process.env.REMOTE_AUTH_SECRET;
+    process.env.REMOTE_AUTH = "bearer";
+    process.env.REMOTE_AUTH_SECRET = "integration-secret";
+    try {
+      const { mintSessionToken } = await import("./auth/session-token.js");
+      // createControlPlane with no injected authenticator → builds from env
+      // (BearerAuthenticator wrapped with withSessionTokens).
+      const app = createControlPlane();
+
+      // alice creates a session with a real user token (sub=alice).
+      const { SignJWT } = await import("jose");
+      const aliceToken = await new SignJWT({ sub: "alice" })
+        .setProtectedHeader({ alg: "HS256" })
+        .setIssuedAt()
+        .sign(new TextEncoder().encode("integration-secret"));
+      const created = (await (
+        await app.request("/sessions", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${aliceToken}`,
+          },
+          body: JSON.stringify({ profile: "shell", target: "k3s" }),
+        })
+      ).json()) as { session: { id: string } };
+      const id = created.session.id;
+
+      // The agent's callback carries a minted session token (no user JWT). It
+      // must resolve to alice and reach alice's session (200, not 401/404).
+      const sessionToken = await mintSessionToken({
+        userId: "alice",
+        sessionId: id,
+        secret: "integration-secret",
+      });
+      const cb = await app.request(`/sessions/${id}/cli-session`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({ cliSessionId: "conv-123" }),
+      });
+      expect(cb.status).toBe(200);
+
+      // A session token minted for bob must NOT reach alice's session.
+      const bobToken = await mintSessionToken({
+        userId: "bob",
+        sessionId: id,
+        secret: "integration-secret",
+      });
+      const denied = await app.request(`/sessions/${id}/cli-session`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${bobToken}`,
+        },
+        body: JSON.stringify({ cliSessionId: "conv-456" }),
+      });
+      expect(denied.status).toBe(404);
+    } finally {
+      if (prevAuth === undefined) delete process.env.REMOTE_AUTH;
+      else process.env.REMOTE_AUTH = prevAuth;
+      if (prevSecret === undefined) delete process.env.REMOTE_AUTH_SECRET;
+      else process.env.REMOTE_AUTH_SECRET = prevSecret;
+    }
+  });
+
   it("threads the tenant namespace into provision and destroy", async () => {
     const calls: Array<{ op: string; namespace: string | undefined }> = [];
     const provisioner = {

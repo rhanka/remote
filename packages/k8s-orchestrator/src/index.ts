@@ -18,6 +18,9 @@ export type ProvisionOptions = {
   readonly workspaceSync?: boolean;
   readonly workspaceExport?: boolean;
   readonly namespace?: string;
+  /** Per-session service token (only minted under bearer auth) injected as the
+   * REMOTE_TOKEN env so the session-agent can authenticate its callbacks. */
+  readonly sessionToken?: string;
 };
 
 export interface SessionProvisioner {

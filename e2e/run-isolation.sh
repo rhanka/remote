@@ -55,5 +55,10 @@ curl -fsS --max-time 3 "http://localhost:$PORT/healthz" >/dev/null \
   || { echo "[e2e-isolation] control-plane did not come up"; cat "$ROOT/e2e-isolation-cp.log"; exit 1; }
 
 echo "[e2e-isolation] running two-user isolation test"
+# REMOTE_AUTH_SECRET is exported so the test can mint a per-session service
+# token (aud=remote-session-agent) and assert the agent's callbacks under it
+# are accepted (not 401) — the auth path the control-plane injects as
+# REMOTE_TOKEN at provision time.
 REMOTE_E2E_BASE_URL="http://localhost:$PORT" \
+  REMOTE_AUTH_SECRET="$SECRET" \
   npx vitest run e2e/two-user-isolation.test.ts --testTimeout=240000

@@ -78,6 +78,13 @@ export async function main(): Promise<void> {
   const workspacePath = process.env.WORKSPACE_PATH ?? "/workspace";
   const controlPlaneEndpoint = requireEnv("CONTROL_PLANE_ENDPOINT");
   const home = process.env.HOME ?? "/root";
+  // Per-session service token (only injected under bearer auth). Sent as
+  // Authorization: Bearer on every control-plane callback so the auth
+  // middleware resolves it back to this session's owner.
+  const token = process.env.REMOTE_TOKEN;
+  const authHeaders: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
 
   const copied = materializeAuthBundle(
     process.env.SESSION_AUTH_STAGING_DIR,
@@ -96,6 +103,7 @@ export async function main(): Promise<void> {
         controlPlaneEndpoint,
         sessionId,
         workspacePath,
+        ...(token ? { token } : {}),
       });
       console.log(
         extracted
@@ -113,6 +121,7 @@ export async function main(): Promise<void> {
         controlPlaneEndpoint,
         sessionId,
         workspacePath,
+        ...(token ? { token } : {}),
       });
       console.log(
         `[session-agent] exported ${workspacePath} (${bytes} bytes) for pull`,
@@ -203,7 +212,7 @@ export async function main(): Promise<void> {
           `${controlPlaneEndpoint.replace(/\/$/, "")}/sessions/${sessionId}/cli-session`,
           {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "application/json", ...authHeaders },
             body: JSON.stringify({ cliSessionId }),
           },
         );

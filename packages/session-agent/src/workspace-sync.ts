@@ -5,13 +5,20 @@ export type FetchArchive = (url: string) => Promise<Uint8Array | null>;
 const DEFAULT_RETRIES = 12;
 const DEFAULT_DELAY_MS = 1000;
 
-async function defaultFetchArchive(url: string): Promise<Uint8Array | null> {
-  const response = await fetch(url);
-  if (response.status === 404) return null;
-  if (!response.ok) {
-    throw new Error(`workspace fetch failed: ${response.status}`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
+/** Bearer header for the session-agent's callbacks under auth; empty otherwise. */
+function authHeaders(token: string | undefined): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function makeFetchArchive(token: string | undefined): FetchArchive {
+  return async (url: string): Promise<Uint8Array | null> => {
+    const response = await fetch(url, { headers: authHeaders(token) });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`workspace fetch failed: ${response.status}`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  };
 }
 
 function extractTarGz(archive: Uint8Array, dest: string): Promise<void> {
@@ -48,19 +55,25 @@ export type ExportWorkspaceOptions = {
   readonly controlPlaneEndpoint: string;
   readonly sessionId: string;
   readonly workspacePath: string;
+  /** Per-session service token; sent as Authorization: Bearer when set. */
+  readonly token?: string;
   readonly archive?: (srcDir: string) => Promise<Uint8Array>;
   readonly upload?: (url: string, body: Uint8Array) => Promise<void>;
 };
 
-async function defaultUpload(url: string, body: Uint8Array): Promise<void> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/gzip" },
-    body: body as unknown as BodyInit,
-  });
-  if (!response.ok) {
-    throw new Error(`workspace export upload failed: ${response.status}`);
-  }
+function makeUpload(
+  token: string | undefined,
+): (url: string, body: Uint8Array) => Promise<void> {
+  return async (url: string, body: Uint8Array): Promise<void> => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/gzip", ...authHeaders(token) },
+      body: body as unknown as BodyInit,
+    });
+    if (!response.ok) {
+      throw new Error(`workspace export upload failed: ${response.status}`);
+    }
+  };
 }
 
 /**
@@ -71,7 +84,7 @@ export async function exportWorkspace(
   options: ExportWorkspaceOptions,
 ): Promise<number> {
   const archive = options.archive ?? archiveTarGz;
-  const upload = options.upload ?? defaultUpload;
+  const upload = options.upload ?? makeUpload(options.token);
   const url = `${options.controlPlaneEndpoint.replace(/\/$/, "")}/sessions/${options.sessionId}/workspace/export`;
   const bytes = await archive(options.workspacePath);
   await upload(url, bytes);
@@ -82,6 +95,8 @@ export type MaterializeWorkspaceOptions = {
   readonly controlPlaneEndpoint: string;
   readonly sessionId: string;
   readonly workspacePath: string;
+  /** Per-session service token; sent as Authorization: Bearer when set. */
+  readonly token?: string;
   readonly fetchArchive?: FetchArchive;
   readonly extract?: (archive: Uint8Array, dest: string) => Promise<void>;
   readonly retries?: number;
@@ -98,7 +113,7 @@ export type MaterializeWorkspaceOptions = {
 export async function materializeWorkspace(
   options: MaterializeWorkspaceOptions,
 ): Promise<boolean> {
-  const fetchArchive = options.fetchArchive ?? defaultFetchArchive;
+  const fetchArchive = options.fetchArchive ?? makeFetchArchive(options.token);
   const extract = options.extract ?? extractTarGz;
   const retries = options.retries ?? DEFAULT_RETRIES;
   const delayMs = options.delayMs ?? DEFAULT_DELAY_MS;

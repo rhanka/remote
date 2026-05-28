@@ -33,6 +33,11 @@ import { AgentRegistry } from "../agents/registry.js";
 import { SessionEventBus } from "../sessions/events.js";
 import { SessionStore } from "../sessions/store.js";
 import {
+  authEnabled,
+  mintSessionToken,
+  sessionTokenSecret,
+} from "../auth/session-token.js";
+import {
   StubTenantProvisioner,
   type TenantProvisioner,
 } from "../tenancy/tenant-provisioner.js";
@@ -230,10 +235,22 @@ export function createSessionsRouter(
         workspaceSync?: boolean;
         workspaceExport?: boolean;
         namespace?: string;
+        sessionToken?: string;
       } = { namespace };
       if (req.credentials) provisionOptions.credentials = req.credentials;
       if (req.workspaceSync) provisionOptions.workspaceSync = true;
       if (req.workspaceExport) provisionOptions.workspaceExport = true;
+      // Under bearer auth, mint a per-session service token the agent uses to
+      // authenticate its callbacks (workspace sync/export, cli-session). In
+      // off-mode no secret/auth is set so nothing is minted or injected.
+      const secret = sessionTokenSecret();
+      if (authEnabled() && secret) {
+        provisionOptions.sessionToken = await mintSessionToken({
+          userId,
+          sessionId: descriptor.id,
+          secret,
+        });
+      }
       void provisioner.provision(descriptor, emit, provisionOptions);
       const response: CreateSessionResponse = { session: descriptor };
       return c.json(response, 201);

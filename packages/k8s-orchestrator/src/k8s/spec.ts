@@ -220,6 +220,7 @@ export function buildSessionPodSpec(
   authPaths: ReadonlyArray<string> = [],
   workspaceSync = false,
   workspaceExport = false,
+  sessionToken?: string,
 ): K8sPodSpec {
   const names = resourceNames(descriptor);
   const limits = descriptor.resourceLimits;
@@ -306,6 +307,9 @@ export function buildSessionPodSpec(
               : []),
             ...(workspaceExport
               ? [{ name: "SESSION_WORKSPACE_EXPORT", value: "1" }]
+              : []),
+            ...(sessionToken
+              ? [{ name: "REMOTE_TOKEN", value: sessionToken }]
               : []),
             ...(authPaths.length > 0
               ? [

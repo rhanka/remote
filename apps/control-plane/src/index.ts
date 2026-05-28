@@ -17,6 +17,11 @@ import {
   authenticatorFromEnv,
 } from "./auth/authenticator.js";
 import { authMiddleware } from "./auth/middleware.js";
+import {
+  authEnabled,
+  sessionTokenSecret,
+  withSessionTokens,
+} from "./auth/session-token.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { buildAgentSocketEvents } from "./routes/agent-ws.js";
 import { createSessionsRouter } from "./routes/sessions.js";
@@ -55,7 +60,14 @@ export function createControlPlane(
   const bus = options.bus ?? new SessionEventBus();
   const provisioner = options.provisioner ?? new InMemoryProvisioner();
   const registry = options.registry ?? new AgentRegistry();
-  const authenticator = options.authenticator ?? authenticatorFromEnv();
+  let authenticator = options.authenticator ?? authenticatorFromEnv();
+  // Under bearer auth, also accept per-session service tokens (minted at
+  // provision time) so the session-agent's own callbacks authenticate back to
+  // their owner. In off-mode this wrap is skipped — OffAuthenticator unchanged.
+  const sessionSecret = sessionTokenSecret();
+  if (authEnabled() && sessionSecret) {
+    authenticator = withSessionTokens(authenticator, sessionSecret);
+  }
   const tenantProvisioner =
     options.tenantProvisioner ?? tenantProvisionerFromEnv();
   const nodeWs = createNodeWebSocket({ app });

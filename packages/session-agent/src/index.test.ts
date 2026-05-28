@@ -231,3 +231,97 @@ describe("exportWorkspace", () => {
     expect(bytes).toBe(4);
   });
 });
+
+describe("session-agent callback auth header", () => {
+  function fetchSpy(): {
+    fetch: typeof fetch;
+    calls: Array<{ url: string; init: RequestInit | undefined }>;
+  } {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const fn = (async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(new Uint8Array([1]), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fetch: fn, calls };
+  }
+
+  function headerOf(init: RequestInit | undefined, name: string): string | undefined {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    return headers[name];
+  }
+
+  it("includes the bearer header on the archive fetch when a token is provided", async () => {
+    const { fetch: spy, calls } = fetchSpy();
+    const original = globalThis.fetch;
+    globalThis.fetch = spy;
+    try {
+      await materializeWorkspace({
+        controlPlaneEndpoint: "http://cp:8080",
+        sessionId: "sess-x",
+        workspacePath: "/workspace",
+        token: "tok-1",
+        extract: async () => {},
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(calls).toHaveLength(1);
+    expect(headerOf(calls[0]!.init, "Authorization")).toBe("Bearer tok-1");
+  });
+
+  it("omits the bearer header on the archive fetch when no token is provided", async () => {
+    const { fetch: spy, calls } = fetchSpy();
+    const original = globalThis.fetch;
+    globalThis.fetch = spy;
+    try {
+      await materializeWorkspace({
+        controlPlaneEndpoint: "http://cp:8080",
+        sessionId: "sess-x",
+        workspacePath: "/workspace",
+        extract: async () => {},
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(calls).toHaveLength(1);
+    expect(headerOf(calls[0]!.init, "Authorization")).toBeUndefined();
+  });
+
+  it("includes the bearer header on the export upload when a token is provided", async () => {
+    const { fetch: spy, calls } = fetchSpy();
+    const original = globalThis.fetch;
+    globalThis.fetch = spy;
+    try {
+      await exportWorkspace({
+        controlPlaneEndpoint: "http://cp:8080",
+        sessionId: "sess-x",
+        workspacePath: "/workspace",
+        token: "tok-2",
+        archive: async () => new Uint8Array([1, 2, 3, 4]),
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(calls).toHaveLength(1);
+    expect(headerOf(calls[0]!.init, "Authorization")).toBe("Bearer tok-2");
+    expect(headerOf(calls[0]!.init, "content-type")).toBe("application/gzip");
+  });
+
+  it("omits the bearer header on the export upload when no token is provided", async () => {
+    const { fetch: spy, calls } = fetchSpy();
+    const original = globalThis.fetch;
+    globalThis.fetch = spy;
+    try {
+      await exportWorkspace({
+        controlPlaneEndpoint: "http://cp:8080",
+        sessionId: "sess-x",
+        workspacePath: "/workspace",
+        archive: async () => new Uint8Array([1, 2, 3, 4]),
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(calls).toHaveLength(1);
+    expect(headerOf(calls[0]!.init, "Authorization")).toBeUndefined();
+  });
+});

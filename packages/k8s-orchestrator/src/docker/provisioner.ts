@@ -140,6 +140,8 @@ export class DockerSessionProvisioner implements SessionProvisioner {
       env.push("-e", `SESSION_WORKSPACE_ID=${descriptor.workspaceId}`);
     if (options.workspaceSync) env.push("-e", "SESSION_WORKSPACE_SYNC=1");
     if (options.workspaceExport) env.push("-e", "SESSION_WORKSPACE_EXPORT=1");
+    if (options.sessionToken)
+      env.push("-e", `REMOTE_TOKEN=${options.sessionToken}`);
     if (startupArgs.length > 0)
       env.push("-e", `SESSION_STARTUP_ARGS=${JSON.stringify(startupArgs)}`);
 

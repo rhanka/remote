@@ -229,6 +229,54 @@ describe("K8sSessionProvisioner", () => {
     expect(deletes.every((op) => op.namespace === "user-abc12345")).toBe(true);
   });
 
+  it("injects REMOTE_TOKEN into the Pod env when a session token is set", async () => {
+    const specs: Array<{ kind: string | undefined; spec: unknown }> = [];
+    const client: K8sClient = {
+      async create<T extends KubernetesObject>(spec: T): Promise<T> {
+        specs.push({ kind: spec.kind, spec });
+        return spec;
+      },
+      async delete(): Promise<void> {},
+      async read<T extends KubernetesObject>(): Promise<T | undefined> {
+        return undefined;
+      },
+    };
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "demo-ns",
+    });
+    await provisioner.provision(descriptor, () => {}, {
+      sessionToken: "tok-abc123",
+    });
+    const pod = specs.find((s) => s.kind === "Pod")!.spec as {
+      spec: { containers: Array<{ env: Array<{ name: string; value: string }> }> };
+    };
+    const env = pod.spec.containers[0]!.env;
+    expect(env).toContainEqual({ name: "REMOTE_TOKEN", value: "tok-abc123" });
+  });
+
+  it("omits REMOTE_TOKEN from the Pod env when no session token is set", async () => {
+    const specs: Array<{ kind: string | undefined; spec: unknown }> = [];
+    const client: K8sClient = {
+      async create<T extends KubernetesObject>(spec: T): Promise<T> {
+        specs.push({ kind: spec.kind, spec });
+        return spec;
+      },
+      async delete(): Promise<void> {},
+      async read<T extends KubernetesObject>(): Promise<T | undefined> {
+        return undefined;
+      },
+    };
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "demo-ns",
+    });
+    await provisioner.provision(descriptor, () => {});
+    const pod = specs.find((s) => s.kind === "Pod")!.spec as {
+      spec: { containers: Array<{ env: Array<{ name: string; value: string }> }> };
+    };
+    const env = pod.spec.containers[0]!.env;
+    expect(env.some((e) => e.name === "REMOTE_TOKEN")).toBe(false);
+  });
+
   it("ensures KubernetesListObject typing surface stays usable", () => {
     const list: KubernetesListObject<KubernetesObject> = {
       apiVersion: "v1",
