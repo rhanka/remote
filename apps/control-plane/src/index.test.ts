@@ -571,4 +571,91 @@ describe("control plane", () => {
     expect(del.status).toBe(200);
     expect(calls).toContainEqual({ op: "destroyWorkspace", id: wsId });
   });
+
+  it("scopes sessions per authenticated user (no cross-user access)", async () => {
+    const auth = {
+      authenticate: async (r: Request) => ({
+        userId: r.headers.get("x-test-user") ?? "default",
+        claims: {},
+      }),
+    };
+    const app = createControlPlane({ authenticator: auth });
+    const mk = (u: string) =>
+      app.request("/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-test-user": u },
+        body: JSON.stringify({ profile: "shell", target: "k3s" }),
+      });
+    const a = (await (await mk("alice")).json()) as { session: { id: string } };
+    await mk("bob");
+
+    const bobList = (await (
+      await app.request("/sessions", { headers: { "x-test-user": "bob" } })
+    ).json()) as { sessions: Array<{ id: string }> };
+    expect(bobList.sessions.some((s) => s.id === a.session.id)).toBe(false);
+
+    const aliceList = (await (
+      await app.request("/sessions", { headers: { "x-test-user": "alice" } })
+    ).json()) as { sessions: Array<{ id: string }> };
+    expect(aliceList.sessions.some((s) => s.id === a.session.id)).toBe(true);
+
+    const bobGet = await app.request(`/sessions/${a.session.id}`, {
+      headers: { "x-test-user": "bob" },
+    });
+    expect(bobGet.status).toBe(404);
+
+    const bobStop = await app.request(`/sessions/${a.session.id}/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-user": "bob" },
+      body: "{}",
+    });
+    expect(bobStop.status).toBe(404);
+  });
+
+  it("threads the tenant namespace into provision and destroy", async () => {
+    const calls: Array<{ op: string; namespace: string | undefined }> = [];
+    const provisioner = {
+      async provision(
+        _d: { id: string },
+        _e: unknown,
+        options?: { namespace?: string },
+      ) {
+        calls.push({ op: "provision", namespace: options?.namespace });
+      },
+      async refresh() {},
+      async destroy(_id: string, _e: unknown, namespace?: string) {
+        calls.push({ op: "destroy", namespace });
+      },
+      async inspect() {
+        return undefined;
+      },
+    };
+    const auth = {
+      authenticate: async (r: Request) => ({
+        userId: r.headers.get("x-test-user") ?? "default",
+        claims: {},
+      }),
+    };
+    const app = createControlPlane({ provisioner, authenticator: auth });
+    const created = (await (
+      await app.request("/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-test-user": "alice" },
+        body: JSON.stringify({ profile: "shell", target: "k3s" }),
+      })
+    ).json()) as { session: { id: string } };
+    await app.request(`/sessions/${created.session.id}/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-user": "alice" },
+      body: "{}",
+    });
+
+    const expectedNs = (await import("./tenancy/namespace.js")).tenantNamespace(
+      "alice",
+    );
+    expect(calls).toEqual([
+      { op: "provision", namespace: expectedNs },
+      { op: "destroy", namespace: expectedNs },
+    ]);
+  });
 });

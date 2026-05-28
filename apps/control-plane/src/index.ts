@@ -12,12 +12,21 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 
 import { AgentRegistry } from "./agents/registry.js";
+import {
+  type Authenticator,
+  authenticatorFromEnv,
+} from "./auth/authenticator.js";
+import { authMiddleware } from "./auth/middleware.js";
 import { buildOpenApiDocument } from "./openapi.js";
 import { buildAgentSocketEvents } from "./routes/agent-ws.js";
 import { createSessionsRouter } from "./routes/sessions.js";
 import { createWorkspacesRouter } from "./routes/workspaces.js";
 import { SessionEventBus } from "./sessions/events.js";
 import { SessionStore } from "./sessions/store.js";
+import {
+  type TenantProvisioner,
+  tenantProvisionerFromEnv,
+} from "./tenancy/tenant-provisioner.js";
 import { createAjv, type ValidationVars } from "./validation.js";
 
 export type ControlPlaneOptions = {
@@ -25,6 +34,8 @@ export type ControlPlaneOptions = {
   store?: SessionStore;
   bus?: SessionEventBus;
   registry?: AgentRegistry;
+  authenticator?: Authenticator;
+  tenantProvisioner?: TenantProvisioner;
 };
 
 type InjectWebSocket = ReturnType<
@@ -44,6 +55,9 @@ export function createControlPlane(
   const bus = options.bus ?? new SessionEventBus();
   const provisioner = options.provisioner ?? new InMemoryProvisioner();
   const registry = options.registry ?? new AgentRegistry();
+  const authenticator = options.authenticator ?? authenticatorFromEnv();
+  const tenantProvisioner =
+    options.tenantProvisioner ?? tenantProvisionerFromEnv();
   const nodeWs = createNodeWebSocket({ app });
 
   // Permissive CORS for the POC operator-UI. Tighten origin allowlist before
@@ -76,12 +90,36 @@ export function createControlPlane(
     }),
   );
 
+  // Authenticate every session/workspace request before it reaches the
+  // routers. The agent WebSocket upgrade (handled above) and the public
+  // health/OpenAPI endpoints are intentionally left unauthenticated: the
+  // session-agent connects with a session id, not a user identity.
+  const requireAuth = authMiddleware(authenticator);
+  app.use("/sessions", requireAuth);
+  app.use("/sessions/:id/*", (c, next) => {
+    if (c.req.path.endsWith("/agent")) return next();
+    return requireAuth(c, next);
+  });
+  app.use("/sessions/:id", requireAuth);
+  app.use("/workspaces", requireAuth);
+  app.use("/workspaces/*", requireAuth);
+
   app.route(
     "/sessions",
-    createSessionsRouter({ ajv, store, bus, provisioner, registry }),
+    createSessionsRouter({
+      ajv,
+      store,
+      bus,
+      provisioner,
+      registry,
+      tenantProvisioner,
+    }),
   );
 
-  app.route("/workspaces", createWorkspacesRouter({ ajv, provisioner }));
+  app.route(
+    "/workspaces",
+    createWorkspacesRouter({ ajv, provisioner, tenantProvisioner }),
+  );
 
   app.injectWebSocket = nodeWs.injectWebSocket;
   return app;

@@ -12,6 +12,10 @@ import type { Ajv } from "ajv";
 import { Hono } from "hono";
 
 import {
+  StubTenantProvisioner,
+  type TenantProvisioner,
+} from "../tenancy/tenant-provisioner.js";
+import {
   type ValidationVars,
   validateJsonBody,
   validatedBody,
@@ -28,6 +32,7 @@ export type WorkspacesRouterDeps = {
   readonly ajv: Ajv;
   readonly provisioner: SessionProvisioner;
   readonly store?: Map<string, WorkspaceDescriptor>;
+  readonly tenantProvisioner?: TenantProvisioner;
 };
 
 export function createWorkspacesRouter(
@@ -36,7 +41,14 @@ export function createWorkspacesRouter(
   const ajv = deps.ajv;
   const provisioner = deps.provisioner;
   const store = deps.store ?? new Map<string, WorkspaceDescriptor>();
+  const tenantProvisioner = deps.tenantProvisioner ?? new StubTenantProvisioner();
   const router = new Hono<{ Variables: ValidationVars }>();
+
+  // Workspace ownership: the authenticated user who created it. A workspace
+  // owned by another user is invisible (404) to everyone else.
+  const owners = new Map<string, string>();
+  const ownsWorkspace = (id: string, userId: string): boolean =>
+    store.has(id) && owners.get(id) === userId;
 
   // Advisory soft-lock per workspace. Authority lives here (reachable by the
   // local CLI and remote Pods); auto-expires at TTL.
@@ -82,8 +94,11 @@ export function createWorkspacesRouter(
         descriptor.displayName = req.displayName;
       if (req.labels !== undefined) descriptor.labels = req.labels;
 
+      const { userId } = c.var.auth!;
+      await tenantProvisioner.ensureTenant(userId);
       await provisioner.provisionWorkspace?.(descriptor.id);
       store.set(descriptor.id, descriptor);
+      owners.set(descriptor.id, userId);
       const response: CreateWorkspaceResponse = { workspace: descriptor };
       return c.json(response, 201);
     },
@@ -91,18 +106,24 @@ export function createWorkspacesRouter(
 
   router.get("/", (c) => {
     // Augment each workspace with its live lock (informational; the strict
-    // ListWorkspacesResponse type carries only the descriptors).
-    const workspaces = [...store.values()].map((w) => {
-      const lock = activeLock(w.id);
-      return lock
-        ? { ...w, lock: { holder: lock.holder, acquiredAt: lock.acquiredAt } }
-        : w;
-    });
+    // ListWorkspacesResponse type carries only the descriptors). Only the
+    // authenticated user's workspaces are listed.
+    const userId = c.var.auth!.userId;
+    const workspaces = [...store.values()]
+      .filter((w) => owners.get(w.id) === userId)
+      .map((w) => {
+        const lock = activeLock(w.id);
+        return lock
+          ? { ...w, lock: { holder: lock.holder, acquiredAt: lock.acquiredAt } }
+          : w;
+      });
     return c.json({ workspaces } as unknown as ListWorkspacesResponse);
   });
 
   router.get("/:id", (c) => {
-    const workspace = store.get(c.req.param("id"));
+    const id = c.req.param("id");
+    if (!ownsWorkspace(id, c.var.auth!.userId)) return notFound(c);
+    const workspace = store.get(id);
     if (!workspace) return notFound(c);
     const lock = activeLock(workspace.id);
     const response: GetWorkspaceResponse = { workspace };
@@ -115,8 +136,9 @@ export function createWorkspacesRouter(
 
   router.delete("/:id", async (c) => {
     const id = c.req.param("id");
-    if (!store.get(id)) return notFound(c);
+    if (!ownsWorkspace(id, c.var.auth!.userId)) return notFound(c);
     store.delete(id);
+    owners.delete(id);
     locks.delete(id);
     await provisioner.destroyWorkspace?.(id);
     const response: DeleteWorkspaceResponse = {
@@ -128,7 +150,7 @@ export function createWorkspacesRouter(
 
   router.post("/:id/lock", async (c) => {
     const id = c.req.param("id");
-    if (!store.get(id)) return notFound(c);
+    if (!ownsWorkspace(id, c.var.auth!.userId)) return notFound(c);
     const body = (await c.req.json().catch(() => ({}))) as {
       holder?: string;
       ttlSeconds?: number;
@@ -164,6 +186,7 @@ export function createWorkspacesRouter(
 
   router.delete("/:id/lock", (c) => {
     const id = c.req.param("id");
+    if (!ownsWorkspace(id, c.var.auth!.userId)) return notFound(c);
     locks.delete(id);
     return c.json({ workspaceId: id, released: true });
   });

@@ -33,6 +33,10 @@ import { AgentRegistry } from "../agents/registry.js";
 import { SessionEventBus } from "../sessions/events.js";
 import { SessionStore } from "../sessions/store.js";
 import {
+  StubTenantProvisioner,
+  type TenantProvisioner,
+} from "../tenancy/tenant-provisioner.js";
+import {
   type ValidationVars,
   validateJsonBody,
   validatedBody,
@@ -91,6 +95,7 @@ export type SessionsRouterDeps = {
   readonly bus?: SessionEventBus;
   readonly provisioner?: SessionProvisioner;
   readonly registry?: AgentRegistry;
+  readonly tenantProvisioner?: TenantProvisioner;
 };
 
 export function createSessionsRouter(
@@ -101,11 +106,16 @@ export function createSessionsRouter(
   const bus = deps.bus ?? new SessionEventBus();
   const provisioner = deps.provisioner ?? new InMemoryProvisioner();
   const registry = deps.registry ?? new AgentRegistry();
+  const tenantProvisioner = deps.tenantProvisioner ?? new StubTenantProvisioner();
 
   const router = new Hono<{ Variables: ValidationVars }>();
 
   const workspaceArchives = new Map<string, Uint8Array>();
   const workspaceExports = new Map<string, Uint8Array>();
+  // Owner + tenant namespace captured at create time so the terminal.exited
+  // cascade (which fires outside any request) can destroy in the right
+  // namespace and delete from the right user partition.
+  const sessionTenant = new Map<string, { userId: string; namespace: string }>();
 
   const emit: ProvisionerEmit = (sessionId, type, payload) => {
     bus.publish(sessionId, type, payload);
@@ -156,13 +166,19 @@ export function createSessionsRouter(
   function stopSessionInternal(
     id: string,
     reason: string | undefined,
+    userId?: string,
   ): boolean {
-    if (!store.get(id)) return false;
-    store.delete(id);
+    const tenant = sessionTenant.get(id);
+    // Enforce ownership when a userId is supplied (request-scoped stop). The
+    // terminal.exited cascade calls without one (system-scoped).
+    if (userId !== undefined && tenant && tenant.userId !== userId) return false;
+    if (!store.get(id, userId)) return false;
+    store.delete(id, userId);
+    sessionTenant.delete(id);
     workspaceArchives.delete(id);
     workspaceExports.delete(id);
     void provisioner
-      .destroy(id, emit)
+      .destroy(id, emit, tenant?.namespace)
       .catch((error: unknown) => {
         console.error(
           `[control-plane] session destroy failed (${reason ?? "unspecified"}):`,
@@ -189,39 +205,47 @@ export function createSessionsRouter(
     );
   }
 
-  router.post("/", validateJsonBody(ajv, createSessionRequestSchema), (c) => {
-    const req = validatedBody<
-      CreateSessionRequest & {
+  router.post(
+    "/",
+    validateJsonBody(ajv, createSessionRequestSchema),
+    async (c) => {
+      const req = validatedBody<
+        CreateSessionRequest & {
+          credentials?: Record<string, string>;
+          workspaceSync?: boolean;
+          workspaceExport?: boolean;
+          workspaceId?: string;
+        }
+      >(c);
+      const { userId } = c.var.auth!;
+      const { namespace } = await tenantProvisioner.ensureTenant(userId);
+      const descriptor = store.put(buildDescriptor(req), userId);
+      sessionTenant.set(descriptor.id, { userId, namespace });
+      bus.publish(descriptor.id, "session.lifecycle.changed", {
+        nextState: "requested",
+      });
+      watchForTerminalExited(descriptor.id);
+      const provisionOptions: {
         credentials?: Record<string, string>;
         workspaceSync?: boolean;
         workspaceExport?: boolean;
-        workspaceId?: string;
-      }
-    >(c);
-    const descriptor = store.put(buildDescriptor(req));
-    bus.publish(descriptor.id, "session.lifecycle.changed", {
-      nextState: "requested",
-    });
-    watchForTerminalExited(descriptor.id);
-    const provisionOptions: {
-      credentials?: Record<string, string>;
-      workspaceSync?: boolean;
-      workspaceExport?: boolean;
-    } = {};
-    if (req.credentials) provisionOptions.credentials = req.credentials;
-    if (req.workspaceSync) provisionOptions.workspaceSync = true;
-    if (req.workspaceExport) provisionOptions.workspaceExport = true;
-    void provisioner.provision(descriptor, emit, provisionOptions);
-    const response: CreateSessionResponse = { session: descriptor };
-    return c.json(response, 201);
-  });
+        namespace?: string;
+      } = { namespace };
+      if (req.credentials) provisionOptions.credentials = req.credentials;
+      if (req.workspaceSync) provisionOptions.workspaceSync = true;
+      if (req.workspaceExport) provisionOptions.workspaceExport = true;
+      void provisioner.provision(descriptor, emit, provisionOptions);
+      const response: CreateSessionResponse = { session: descriptor };
+      return c.json(response, 201);
+    },
+  );
 
   // Workspace archive staging: the CLI uploads a tar.gz of the cwd here after
   // session creation; the session-agent fetches it (with retry) on startup and
   // extracts it into /workspace. Held in memory, dropped on stop.
   router.post("/:id/workspace", async (c) => {
     const id = c.req.param("id");
-    if (!store.get(id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const body = new Uint8Array(await c.req.arrayBuffer());
     if (body.byteLength === 0) {
       return c.json(
@@ -235,6 +259,7 @@ export function createSessionsRouter(
 
   router.get("/:id/workspace", (c) => {
     const id = c.req.param("id");
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const archive = workspaceArchives.get(id);
     if (!archive) return notFound(c);
     return new Response(archive as unknown as BodyInit, {
@@ -247,7 +272,7 @@ export function createSessionsRouter(
   // CLI (remote workspace pull) GETs it. Held in memory, dropped on stop.
   router.post("/:id/workspace/export", async (c) => {
     const id = c.req.param("id");
-    if (!store.get(id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const body = new Uint8Array(await c.req.arrayBuffer());
     workspaceExports.set(id, body);
     return c.json({ sessionId: id, bytes: body.byteLength, accepted: true });
@@ -255,6 +280,7 @@ export function createSessionsRouter(
 
   router.get("/:id/workspace/export", (c) => {
     const id = c.req.param("id");
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const archive = workspaceExports.get(id);
     if (!archive) return notFound(c);
     return new Response(archive as unknown as BodyInit, {
@@ -267,24 +293,27 @@ export function createSessionsRouter(
   // detects it (newest file in the profile's conversation dir).
   router.post("/:id/cli-session", async (c) => {
     const id = c.req.param("id");
-    const session = store.get(id);
+    const userId = c.var.auth!.userId;
+    const session = store.get(id, userId);
     if (!session) return notFound(c);
     const body = (await c.req.json().catch(() => ({}))) as {
       cliSessionId?: string;
     };
     if (typeof body.cliSessionId === "string" && body.cliSessionId.length > 0) {
-      store.put({ ...session, cliSessionId: body.cliSessionId });
+      store.put({ ...session, cliSessionId: body.cliSessionId }, userId);
     }
     return c.json({ sessionId: id, accepted: true });
   });
 
   router.get("/", (c) => {
-    const response: ListSessionsResponse = { sessions: store.list() };
+    const response: ListSessionsResponse = {
+      sessions: store.list(c.var.auth!.userId),
+    };
     return c.json(response);
   });
 
   router.get("/:id", (c) => {
-    const session = store.get(c.req.param("id"));
+    const session = store.get(c.req.param("id"), c.var.auth!.userId);
     if (!session) return notFound(c);
     const response: GetSessionResponse = { session };
     return c.json(response);
@@ -295,10 +324,17 @@ export function createSessionsRouter(
     validateJsonBody(ajv, refreshSessionCredentialsRequestSchema),
     async (c) => {
       const id = c.req.param("id");
-      const descriptor = store.get(id);
+      const userId = c.var.auth!.userId;
+      const descriptor = store.get(id, userId);
       if (!descriptor) return notFound(c);
       const body = validatedBody<RefreshSessionCredentialsRequest>(c);
-      await provisioner.refresh(descriptor, emit, { credentials: body });
+      const refreshOptions: {
+        credentials: RefreshSessionCredentialsRequest;
+        namespace?: string;
+      } = { credentials: body };
+      const namespace = sessionTenant.get(id)?.namespace;
+      if (namespace !== undefined) refreshOptions.namespace = namespace;
+      await provisioner.refresh(descriptor, emit, refreshOptions);
       const response: RefreshSessionCredentialsResponse = {
         sessionId: id,
         accepted: true,
@@ -313,7 +349,7 @@ export function createSessionsRouter(
     (c) => {
       const id = c.req.param("id");
       const req = validatedBody<StopSessionRequest>(c);
-      const stopped = stopSessionInternal(id, req.reason);
+      const stopped = stopSessionInternal(id, req.reason, c.var.auth!.userId);
       if (!stopped) return notFound(c);
       const response: StopSessionResponse = { sessionId: id, accepted: true };
       return c.json(response);
@@ -325,7 +361,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, sendInstructionRequestSchema),
     (c) => {
       const id = c.req.param("id");
-      if (!store.get(id)) return notFound(c);
+      if (!store.get(id, c.var.auth!.userId)) return notFound(c);
       const req = validatedBody<SendInstructionRequest>(c);
       const instructionId = randomId("inst");
       const payload: Record<string, unknown> = {
@@ -353,7 +389,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, terminalInputSchema),
     (c) => {
       const id = c.req.param("id");
-      if (!store.get(id)) return notFound(c);
+      if (!store.get(id, c.var.auth!.userId)) return notFound(c);
       const body = validatedBody<Record<string, unknown>>(c);
       const envelope = buildTerminalInputEnvelope(id, body);
       const delivered = registry.send(id, envelope);
@@ -376,7 +412,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, terminalResizeSchema),
     (c) => {
       const id = c.req.param("id");
-      if (!store.get(id)) return notFound(c);
+      if (!store.get(id, c.var.auth!.userId)) return notFound(c);
       const body = validatedBody<Record<string, unknown>>(c);
       const envelope = buildTerminalResizeEnvelope(id, body);
       const delivered = registry.send(id, envelope);
@@ -396,7 +432,7 @@ export function createSessionsRouter(
 
   router.get("/:id/events", (c) => {
     const id = c.req.param("id");
-    if (!store.get(id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
 
     const queue: RemoteEventEnvelope[] = [];
     let notify: (() => void) | null = null;
