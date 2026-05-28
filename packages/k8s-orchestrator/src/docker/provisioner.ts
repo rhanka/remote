@@ -184,7 +184,11 @@ export class DockerSessionProvisioner implements SessionProvisioner {
     // running container is out of scope for the docker backend (V1).
   }
 
-  async destroy(sessionId: string, emit: ProvisionerEmit): Promise<void> {
+  async destroy(
+    sessionId: string,
+    emit: ProvisionerEmit,
+    _namespace?: string,
+  ): Promise<void> {
     this.phases.set(sessionId, "stopping");
     emit(sessionId, "session.lifecycle.changed", {
       previousState: this.phases.get(sessionId) ?? "running",

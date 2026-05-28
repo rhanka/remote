@@ -22,9 +22,9 @@ const descriptor: SessionDescriptor = {
 };
 
 type Operation =
-  | { op: "create"; kind: string; name: string }
-  | { op: "delete"; kind: string; name: string }
-  | { op: "read"; kind: string; name: string };
+  | { op: "create"; kind: string; name: string; namespace?: string | undefined }
+  | { op: "delete"; kind: string; name: string; namespace?: string | undefined }
+  | { op: "read"; kind: string; name: string; namespace?: string | undefined };
 
 function recordingClient(): { client: K8sClient; ops: Operation[] } {
   const ops: Operation[] = [];
@@ -34,6 +34,7 @@ function recordingClient(): { client: K8sClient; ops: Operation[] } {
         op: "create",
         kind: spec.kind ?? "?",
         name: spec.metadata?.name ?? "?",
+        namespace: spec.metadata?.namespace,
       });
       return spec;
     },
@@ -42,6 +43,7 @@ function recordingClient(): { client: K8sClient; ops: Operation[] } {
         op: "delete",
         kind: ref.kind,
         name: ref.metadata.name,
+        namespace: ref.metadata.namespace,
       });
     },
     async read<T extends KubernetesObject>(
@@ -72,8 +74,14 @@ describe("K8sSessionProvisioner", () => {
         op: "create",
         kind: "PersistentVolumeClaim",
         name: "session-sess-test1-workspace",
+        namespace: "demo-ns",
       },
-      { op: "create", kind: "Pod", name: "session-sess-test1" },
+      {
+        op: "create",
+        kind: "Pod",
+        name: "session-sess-test1",
+        namespace: "demo-ns",
+      },
     ]);
     expect(events.map((event) => event.payload.nextState)).toEqual([
       "provisioning",
@@ -99,16 +107,23 @@ describe("K8sSessionProvisioner", () => {
     });
 
     expect(ops).toEqual([
-      { op: "delete", kind: "Pod", name: "session-sess-test1" },
+      {
+        op: "delete",
+        kind: "Pod",
+        name: "session-sess-test1",
+        namespace: "demo-ns",
+      },
       {
         op: "delete",
         kind: "PersistentVolumeClaim",
         name: "session-sess-test1-workspace",
+        namespace: "demo-ns",
       },
       {
         op: "delete",
         kind: "Secret",
         name: "session-sess-test1-auth",
+        namespace: "demo-ns",
       },
     ]);
     expect(events.map((event) => event.payload.nextState)).toEqual([
@@ -188,6 +203,30 @@ describe("K8sSessionProvisioner", () => {
       "create:Secret",
       "create:Pod",
     ]);
+  });
+
+  it("provisions into the namespace passed in options", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "sentropic-remote",
+    });
+    await provisioner.provision(descriptor, () => {}, {
+      namespace: "user-abc12345",
+    });
+    const creates = ops.filter((op) => op.op === "create");
+    expect(creates.length).toBeGreaterThan(0);
+    expect(creates.every((op) => op.namespace === "user-abc12345")).toBe(true);
+  });
+
+  it("destroys from the namespace passed in options", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "sentropic-remote",
+    });
+    await provisioner.destroy(descriptor.id, () => {}, "user-abc12345");
+    const deletes = ops.filter((op) => op.op === "delete");
+    expect(deletes.length).toBeGreaterThan(0);
+    expect(deletes.every((op) => op.namespace === "user-abc12345")).toBe(true);
   });
 
   it("ensures KubernetesListObject typing surface stays usable", () => {

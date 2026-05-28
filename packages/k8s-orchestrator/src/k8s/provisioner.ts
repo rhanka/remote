@@ -42,25 +42,28 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       nextState: "provisioning",
     });
 
+    const ns = options.namespace ?? this.options.namespace;
+    const opts = { ...this.options, namespace: ns };
+
     const credentials = options.credentials ?? {};
     const authPaths = Object.keys(credentials);
     this.credentials.set(descriptor.id, { ...credentials });
 
     if (authPaths.length > 0) {
       await this.client.create(
-        buildSessionAuthSecret(descriptor, credentials, this.options),
+        buildSessionAuthSecret(descriptor, credentials, opts),
       );
     }
 
     // A session bound to a persistent Workspace mounts that retained PVC;
     // only unbound sessions get an ephemeral per-session PVC.
     if (!descriptor.workspaceId) {
-      await this.client.create(buildSessionPvcSpec(descriptor, this.options));
+      await this.client.create(buildSessionPvcSpec(descriptor, opts));
     }
     await this.client.create(
       buildSessionPodSpec(
         descriptor,
-        this.options,
+        opts,
         authPaths,
         options.workspaceSync ?? false,
         options.workspaceExport ?? false,
@@ -128,7 +131,11 @@ export class K8sSessionProvisioner implements SessionProvisioner {
     });
   }
 
-  async destroy(sessionId: string, emit: ProvisionerEmit): Promise<void> {
+  async destroy(
+    sessionId: string,
+    emit: ProvisionerEmit,
+    namespace?: string,
+  ): Promise<void> {
     const previous = this.phases.get(sessionId) ?? "running";
     this.phases.set(sessionId, "stopping");
     emit(sessionId, "session.lifecycle.changed", {
@@ -137,26 +144,26 @@ export class K8sSessionProvisioner implements SessionProvisioner {
     });
 
     const names = resourceNames({ id: sessionId } as SessionDescriptor);
-    const namespace = this.options.namespace;
+    const ns = namespace ?? this.options.namespace;
     await this.client
       .delete({
         apiVersion: "v1",
         kind: "Pod",
-        metadata: { name: names.pod, namespace },
+        metadata: { name: names.pod, namespace: ns },
       })
       .catch(() => {});
     await this.client
       .delete({
         apiVersion: "v1",
         kind: "PersistentVolumeClaim",
-        metadata: { name: names.pvc, namespace },
+        metadata: { name: names.pvc, namespace: ns },
       })
       .catch(() => {});
     await this.client
       .delete({
         apiVersion: "v1",
         kind: "Secret",
-        metadata: { name: names.authSecret, namespace },
+        metadata: { name: names.authSecret, namespace: ns },
       })
       .catch(() => {});
 

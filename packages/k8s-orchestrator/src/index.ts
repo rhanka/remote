@@ -17,6 +17,7 @@ export type ProvisionOptions = {
   readonly credentials?: Readonly<Record<string, string>>;
   readonly workspaceSync?: boolean;
   readonly workspaceExport?: boolean;
+  readonly namespace?: string;
 };
 
 export interface SessionProvisioner {
@@ -30,7 +31,11 @@ export interface SessionProvisioner {
     emit: ProvisionerEmit,
     options?: ProvisionOptions,
   ): Promise<void>;
-  destroy(sessionId: string, emit: ProvisionerEmit): Promise<void>;
+  destroy(
+    sessionId: string,
+    emit: ProvisionerEmit,
+    namespace?: string,
+  ): Promise<void>;
   inspect(sessionId: string): Promise<{ phase: string } | undefined>;
   /** Create the retained PVC backing a persistent Workspace (idempotent). */
   provisionWorkspace?(workspaceId: string): Promise<void>;
@@ -68,7 +73,11 @@ export class InMemoryProvisioner implements SessionProvisioner {
     return;
   }
 
-  async destroy(sessionId: string, emit: ProvisionerEmit): Promise<void> {
+  async destroy(
+    sessionId: string,
+    emit: ProvisionerEmit,
+    _namespace?: string,
+  ): Promise<void> {
     const previous = this.phases.get(sessionId) ?? "running";
     this.phases.set(sessionId, "stopping");
     emit(sessionId, "session.lifecycle.changed", {
