@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { authHeaders } from "./config.js";
+
 const MARKER_DIR = ".remote";
 const MARKER_FILE = "workspace.json";
 const BASE_FILE = "base.tgz";
@@ -76,7 +78,7 @@ export async function createWorkspace(
 ): Promise<WorkspaceDescriptor> {
   const response = await fetchImpl(joinUrl(baseUrl, "/workspaces"), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!response.ok) {
@@ -92,7 +94,9 @@ export async function listWorkspaces(
   baseUrl: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ReadonlyArray<WorkspaceDescriptor>> {
-  const response = await fetchImpl(joinUrl(baseUrl, "/workspaces"));
+  const response = await fetchImpl(joinUrl(baseUrl, "/workspaces"), {
+    headers: { ...authHeaders() },
+  });
   if (!response.ok) {
     throw new Error(`listWorkspaces: ${response.status} ${response.statusText}`);
   }
@@ -109,7 +113,7 @@ export async function deleteWorkspace(
 ): Promise<boolean> {
   const response = await fetchImpl(
     joinUrl(baseUrl, `/workspaces/${workspaceId}`),
-    { method: "DELETE" },
+    { method: "DELETE", headers: { ...authHeaders() } },
   );
   if (response.status === 404) return false;
   if (!response.ok) {
@@ -127,6 +131,7 @@ export async function downloadWorkspaceExport(
 ): Promise<Buffer | null> {
   const response = await fetchImpl(
     joinUrl(baseUrl, `/sessions/${sessionId}/workspace/export`),
+    { headers: { ...authHeaders() } },
   );
   if (response.status === 404) return null;
   if (!response.ok) {
@@ -152,7 +157,7 @@ export async function acquireWorkspaceLock(
     joinUrl(baseUrl, `/workspaces/${workspaceId}/lock`),
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       body: JSON.stringify({ holder, ttlSeconds }),
     },
   );
@@ -180,6 +185,7 @@ export async function releaseWorkspaceLock(
 ): Promise<void> {
   await fetchImpl(joinUrl(baseUrl, `/workspaces/${workspaceId}/lock`), {
     method: "DELETE",
+    headers: { ...authHeaders() },
   }).catch(() => {});
 }
 

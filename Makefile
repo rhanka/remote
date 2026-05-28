@@ -12,7 +12,7 @@ PORT ?= 8080
 	demo demo-down \
 	scw-deploy scw-undeploy scw-port-forward \
 	cli-build cli-link cli-unlink \
-	e2e-docker e2e-k3s
+	e2e-docker e2e-k3s e2e-isolation
 
 help:
 	@echo "One-shot:"
@@ -106,6 +106,10 @@ demo-down: undeploy k3d-down
 # e2e-k3s:    full k3d cluster (make demo) + port-forward.
 e2e-docker: build images-session-agent
 	bash e2e/run-docker.sh
+
+# e2e-isolation: docker backend + bearer auth; asserts per-user namespace isolation.
+e2e-isolation: build images-session-agent
+	bash e2e/run-isolation.sh
 
 e2e-k3s: demo
 	bash e2e/run-k3s.sh

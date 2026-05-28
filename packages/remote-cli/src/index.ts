@@ -16,6 +16,7 @@ import {
   clearDefaultRemote,
   getDefaultRemote,
   setDefaultRemote,
+  setToken,
 } from "./config.js";
 import {
   inspectProfileAuth,
@@ -892,6 +893,16 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description("Set default remote URL (used when URL is not passed)")
     .action((url: string) => {
       setAndReportDefaultRemote(url);
+    });
+
+  configCommand
+    .command("token <value>")
+    .description(
+      "Store the bearer token sent as Authorization on control-plane requests (overridden by $REMOTE_TOKEN)",
+    )
+    .action((value: string) => {
+      setToken(value);
+      process.stderr.write("[remote] stored bearer token\n");
     });
 
   configCommand

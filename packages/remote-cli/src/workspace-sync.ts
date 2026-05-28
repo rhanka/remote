@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+import { authHeaders } from "./config.js";
+
 const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024; // 50 MiB safety cap
 
 function run(
@@ -125,7 +127,7 @@ export async function uploadWorkspaceArchive(
     `${baseUrl.replace(/\/$/, "")}/sessions/${sessionId}/workspace`,
     {
       method: "POST",
-      headers: { "content-type": "application/gzip" },
+      headers: { "content-type": "application/gzip", ...authHeaders() },
       body: archive as unknown as BodyInit,
     },
   );

@@ -1,5 +1,7 @@
 import type { RemoteEventEnvelope } from "@sentropic/remote-protocol";
 
+import { authHeaders } from "./config.js";
+
 export type InputRetryOptions = {
   readonly maxAttempts?: number;
   readonly baseDelayMs?: number;
@@ -68,7 +70,7 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
   const sseResponse = await doFetch(
     joinUrl(baseUrl, `/sessions/${sessionId}/events`),
     {
-      headers: { accept: "text/event-stream" },
+      headers: { accept: "text/event-stream", ...authHeaders() },
       signal: controller.signal,
     },
   );
@@ -110,7 +112,7 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
           joinUrl(baseUrl, `/sessions/${sessionId}/terminal/input`),
           {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "application/json", ...authHeaders() },
             body: JSON.stringify({
               terminalId: "operator",
               data,
@@ -159,7 +161,7 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
         joinUrl(baseUrl, `/sessions/${sessionId}/terminal/resize`),
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...authHeaders() },
           body: JSON.stringify({
             terminalId: "operator",
             columns,
@@ -305,7 +307,9 @@ export async function listRemoteSessions(
     cliSessionId?: string;
   }>
 > {
-  const response = await fetchImpl(joinUrl(baseUrl, "/sessions"));
+  const response = await fetchImpl(joinUrl(baseUrl, "/sessions"), {
+    headers: { ...authHeaders() },
+  });
   if (!response.ok) {
     throw new Error(
       `listRemoteSessions: ${response.status} ${response.statusText}`,
@@ -336,7 +340,7 @@ export async function stopRemoteSession(
     joinUrl(baseUrl, `/sessions/${sessionId}/stop`),
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       body: JSON.stringify(body),
     },
   );
@@ -354,7 +358,9 @@ export async function getRemoteSession(
   sessionId: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ session: { profile: string } }> {
-  const response = await fetchImpl(joinUrl(baseUrl, `/sessions/${sessionId}`));
+  const response = await fetchImpl(joinUrl(baseUrl, `/sessions/${sessionId}`), {
+    headers: { ...authHeaders() },
+  });
   if (!response.ok) {
     throw new Error(
       `getRemoteSession: ${response.status} ${response.statusText}`,
@@ -373,7 +379,7 @@ export async function refreshRemoteSession(
     joinUrl(baseUrl, `/sessions/${sessionId}/credentials`),
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       body: JSON.stringify(credentials),
     },
   );
@@ -432,7 +438,7 @@ export async function createRemoteSession(
 
   const response = await fetchImpl(joinUrl(baseUrl, "/sessions"), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
   });
   if (!response.ok) {

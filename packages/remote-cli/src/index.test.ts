@@ -9,6 +9,7 @@ const stopRemoteSession = vi.fn();
 const getDefaultRemote = vi.fn();
 const setDefaultRemote = vi.fn();
 const clearDefaultRemote = vi.fn();
+const setToken = vi.fn();
 const ensureProfileAuthFresh = vi.fn();
 const collectProfileAuth = vi.fn();
 const assertRequiredAuthBundle = vi.fn();
@@ -43,6 +44,7 @@ vi.mock("./config.js", () => ({
   clearDefaultRemote,
   getDefaultRemote,
   setDefaultRemote,
+  setToken,
 }));
 
 vi.mock("./run.js", () => ({
@@ -90,6 +92,7 @@ describe("main", () => {
     getDefaultRemote.mockReset();
     setDefaultRemote.mockReset();
     clearDefaultRemote.mockReset();
+    setToken.mockReset();
     run.mockReset();
     createWorkspace.mockReset();
     listWorkspaces.mockReset();
@@ -280,6 +283,19 @@ describe("main", () => {
 
     expect(exitCode).toBe(0);
     expect(setDefaultRemote).toHaveBeenCalledWith("http://localhost:8080");
+  });
+
+  it("stores a bearer token from config token", async () => {
+    const exitCode = await main([
+      "node",
+      "remote",
+      "config",
+      "token",
+      "tok-123",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(setToken).toHaveBeenCalledWith("tok-123");
   });
 
   it("aliases remote install to set default remote", async () => {

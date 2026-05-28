@@ -2,15 +2,19 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
-const CONFIG_DIR = join(homedir(), ".config", "sentropic");
-const CONFIG_FILE = join(CONFIG_DIR, "remote-cli", "config.json");
-
 export type RemoteCliConfig = {
   defaultRemote?: string;
+  token?: string;
 };
 
+// Resolved lazily so tests can redirect the config home via
+// REMOTE_CLI_CONFIG_HOME without clobbering the real ~/.config.
+function configHome(): string {
+  return process.env.REMOTE_CLI_CONFIG_HOME ?? homedir();
+}
+
 export function resolveConfigPath(): string {
-  return CONFIG_FILE;
+  return join(configHome(), ".config", "sentropic", "remote-cli", "config.json");
 }
 
 export function normalizeRemoteUrl(rawUrl: string): string {
@@ -29,14 +33,14 @@ export function normalizeRemoteUrl(rawUrl: string): string {
 
 export function readRemoteConfig(): RemoteCliConfig {
   try {
-    const raw = readFileSync(CONFIG_FILE, "utf8");
+    const raw = readFileSync(resolveConfigPath(), "utf8");
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
-      const defaultRemote =
-        typeof parsed.defaultRemote === "string"
-          ? parsed.defaultRemote
-          : undefined;
-      return defaultRemote ? { defaultRemote } : {};
+      const config: RemoteCliConfig = {};
+      if (typeof parsed.defaultRemote === "string")
+        config.defaultRemote = parsed.defaultRemote;
+      if (typeof parsed.token === "string") config.token = parsed.token;
+      return config;
     }
     return {};
   } catch (error) {
@@ -46,8 +50,9 @@ export function readRemoteConfig(): RemoteCliConfig {
 }
 
 export function writeRemoteConfig(config: RemoteCliConfig): void {
-  mkdirSync(dirname(CONFIG_FILE), { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
+  const path = resolveConfigPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(config, null, 2), "utf8");
 }
 
 export function getDefaultRemote(): string | undefined {
@@ -57,10 +62,24 @@ export function getDefaultRemote(): string | undefined {
 
 export function setDefaultRemote(rawUrl: string): string {
   const defaultRemote = normalizeRemoteUrl(rawUrl);
-  writeRemoteConfig({ defaultRemote });
+  writeRemoteConfig({ ...readRemoteConfig(), defaultRemote });
   return defaultRemote;
 }
 
 export function clearDefaultRemote(): void {
-  writeRemoteConfig({});
+  const { token } = readRemoteConfig();
+  writeRemoteConfig(token ? { token } : {});
+}
+
+export function getToken(): string | undefined {
+  return process.env.REMOTE_TOKEN ?? readRemoteConfig().token;
+}
+
+export function setToken(value: string): void {
+  writeRemoteConfig({ ...readRemoteConfig(), token: value });
+}
+
+export function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
