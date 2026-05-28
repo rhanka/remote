@@ -115,6 +115,17 @@ export function createSessionsRouter(
 
   const router = new Hono<{ Variables: ValidationVars }>();
 
+  // A per-session service token may act ONLY on the session it was minted for.
+  // Returns true (caller should bail with notFound) when a session-bound token
+  // is used against a different :id. A normal user/off-mode token has no
+  // sessionId → always false → behavior unchanged.
+  function sessionTokenMismatch(
+    auth: { sessionId?: string },
+    id: string,
+  ): boolean {
+    return auth.sessionId !== undefined && auth.sessionId !== id;
+  }
+
   const workspaceArchives = new Map<string, Uint8Array>();
   const workspaceExports = new Map<string, Uint8Array>();
   // Owner + tenant namespace captured at create time so the terminal.exited
@@ -262,6 +273,7 @@ export function createSessionsRouter(
   // extracts it into /workspace. Held in memory, dropped on stop.
   router.post("/:id/workspace", async (c) => {
     const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const body = new Uint8Array(await c.req.arrayBuffer());
     if (body.byteLength === 0) {
@@ -276,6 +288,7 @@ export function createSessionsRouter(
 
   router.get("/:id/workspace", (c) => {
     const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const archive = workspaceArchives.get(id);
     if (!archive) return notFound(c);
@@ -289,6 +302,7 @@ export function createSessionsRouter(
   // CLI (remote workspace pull) GETs it. Held in memory, dropped on stop.
   router.post("/:id/workspace/export", async (c) => {
     const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const body = new Uint8Array(await c.req.arrayBuffer());
     workspaceExports.set(id, body);
@@ -297,6 +311,7 @@ export function createSessionsRouter(
 
   router.get("/:id/workspace/export", (c) => {
     const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const archive = workspaceExports.get(id);
     if (!archive) return notFound(c);
@@ -310,6 +325,7 @@ export function createSessionsRouter(
   // detects it (newest file in the profile's conversation dir).
   router.post("/:id/cli-session", async (c) => {
     const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     const userId = c.var.auth!.userId;
     const session = store.get(id, userId);
     if (!session) return notFound(c);
@@ -330,7 +346,9 @@ export function createSessionsRouter(
   });
 
   router.get("/:id", (c) => {
-    const session = store.get(c.req.param("id"), c.var.auth!.userId);
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    const session = store.get(id, c.var.auth!.userId);
     if (!session) return notFound(c);
     const response: GetSessionResponse = { session };
     return c.json(response);
@@ -341,6 +359,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, refreshSessionCredentialsRequestSchema),
     async (c) => {
       const id = c.req.param("id");
+      if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
       const userId = c.var.auth!.userId;
       const descriptor = store.get(id, userId);
       if (!descriptor) return notFound(c);
@@ -365,6 +384,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, stopSessionRequestSchema),
     (c) => {
       const id = c.req.param("id");
+      if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
       const req = validatedBody<StopSessionRequest>(c);
       const stopped = stopSessionInternal(id, req.reason, c.var.auth!.userId);
       if (!stopped) return notFound(c);
@@ -378,6 +398,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, sendInstructionRequestSchema),
     (c) => {
       const id = c.req.param("id");
+      if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
       if (!store.get(id, c.var.auth!.userId)) return notFound(c);
       const req = validatedBody<SendInstructionRequest>(c);
       const instructionId = randomId("inst");
@@ -406,6 +427,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, terminalInputSchema),
     (c) => {
       const id = c.req.param("id");
+      if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
       if (!store.get(id, c.var.auth!.userId)) return notFound(c);
       const body = validatedBody<Record<string, unknown>>(c);
       const envelope = buildTerminalInputEnvelope(id, body);
@@ -429,6 +451,7 @@ export function createSessionsRouter(
     validateJsonBody(ajv, terminalResizeSchema),
     (c) => {
       const id = c.req.param("id");
+      if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
       if (!store.get(id, c.var.auth!.userId)) return notFound(c);
       const body = validatedBody<Record<string, unknown>>(c);
       const envelope = buildTerminalResizeEnvelope(id, body);
@@ -449,6 +472,7 @@ export function createSessionsRouter(
 
   router.get("/:id/events", (c) => {
     const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
 
     const queue: RemoteEventEnvelope[] = [];

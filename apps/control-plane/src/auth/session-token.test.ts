@@ -23,6 +23,28 @@ describe("session-token", () => {
     expect(ctx.userId).toBe("alice");
   });
 
+  it("surfaces the sessionId (sid) on the session-token path", async () => {
+    const token = await mintSessionToken({
+      userId: "alice",
+      sessionId: "sess-42",
+      secret: SECRET,
+    });
+    const auth = withSessionTokens(new OffAuthenticator(), SECRET);
+    const ctx = await auth.authenticate(bearerRequest(token));
+    expect(ctx.userId).toBe("alice");
+    expect(ctx.sessionId).toBe("sess-42");
+  });
+
+  it("leaves sessionId undefined on the user-delegation path", async () => {
+    const userAuth: Authenticator = {
+      authenticate: async () => ({ userId: "USERAUTH", claims: {} }),
+    };
+    const auth = withSessionTokens(userAuth, SECRET);
+    const ctx = await auth.authenticate(bearerRequest("not-a-real-jwt"));
+    expect(ctx.userId).toBe("USERAUTH");
+    expect(ctx.sessionId).toBeUndefined();
+  });
+
   it("delegates to userAuth for a token not minted for the agent audience", async () => {
     const userAuth: Authenticator = {
       authenticate: async () => ({ userId: "USERAUTH", claims: {} }),

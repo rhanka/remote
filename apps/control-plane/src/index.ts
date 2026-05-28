@@ -67,6 +67,13 @@ export function createControlPlane(
   const sessionSecret = sessionTokenSecret();
   if (authEnabled() && sessionSecret) {
     authenticator = withSessionTokens(authenticator, sessionSecret);
+  } else if (authEnabled()) {
+    // Fail loud: bearer auth is on but no session-token secret is configured
+    // (e.g. JWKS-only user auth). Session-agent callbacks (workspace
+    // sync/export, cli-session) will be unauthenticated and rejected 401.
+    console.warn(
+      "[control-plane] WARNING: REMOTE_AUTH is enabled but no session-token secret is set — session-agent callbacks (workspace sync/export, cli-session) will be UNAUTHENTICATED and rejected with 401; set REMOTE_SESSION_TOKEN_SECRET (a dedicated HS256 secret, independent of the user-auth mode) to enable them.",
+    );
   }
   const tenantProvisioner =
     options.tenantProvisioner ?? tenantProvisionerFromEnv();

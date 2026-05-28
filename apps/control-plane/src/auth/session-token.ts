@@ -1,10 +1,15 @@
 import { SignJWT, jwtVerify } from "jose";
 
-import type { AuthContext, Authenticator } from "./authenticator.js";
+import {
+  SESSION_TOKEN_AUDIENCE,
+  type AuthContext,
+  type Authenticator,
+} from "./authenticator.js";
 
-/** Audience claim that distinguishes a per-session service token from a real
- * user token. The session-agent presents these on its HTTP callbacks. */
-const SESSION_TOKEN_AUDIENCE = "remote-session-agent";
+/** Re-exported for callers that mint/verify against the reserved audience.
+ * The canonical definition lives in authenticator.ts to avoid an import
+ * cycle (BearerAuthenticator must reference it too). */
+export { SESSION_TOKEN_AUDIENCE };
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60;
 
 export type MintSessionTokenOptions = {
@@ -70,6 +75,10 @@ export function withSessionTokens(
           return {
             userId: payload.sub,
             claims: payload as Record<string, unknown>,
+            // Bind this token to the one session it was minted for; routes
+            // enforce it against the :id path param. Only the session-token
+            // path sets this — user delegation leaves it undefined.
+            sessionId: payload.sid as string | undefined,
           };
         }
       } catch {

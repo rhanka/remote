@@ -1,8 +1,18 @@
 import { jwtVerify, createRemoteJWKSet } from "jose";
 
+/** Audience claim that distinguishes a per-session service token from a real
+ * user token. The session-agent presents these on its HTTP callbacks. Defined
+ * here (not in session-token.ts) so BearerAuthenticator can reference it
+ * without creating an import cycle. */
+export const SESSION_TOKEN_AUDIENCE = "remote-session-agent";
+
 export type AuthContext = {
   readonly userId: string;
   readonly claims: Record<string, unknown>;
+  /** Set only when the request authenticated via a per-session service token;
+   * routes use it to bind that token to its one session. User and off-mode
+   * contexts leave it undefined. */
+  readonly sessionId?: string;
 };
 
 export class AuthError extends Error {
@@ -50,6 +60,17 @@ export class BearerAuthenticator implements Authenticator {
       const { payload } = await jwtVerify(token, key as never, {
         ...(this.opts.issuer ? { issuer: this.opts.issuer } : {}),
       });
+      // The session audience is reserved for control-plane-minted session
+      // tokens. A user token must never carry it — otherwise, when the session
+      // secret falls back to REMOTE_AUTH_SECRET, a user could forge an
+      // agent-scoped token. Reject regardless of aud shape (string | string[]).
+      const aud = payload.aud;
+      const carriesSessionAud =
+        aud === SESSION_TOKEN_AUDIENCE ||
+        (Array.isArray(aud) && aud.includes(SESSION_TOKEN_AUDIENCE));
+      if (carriesSessionAud) {
+        throw new AuthError("user token must not carry the session audience");
+      }
       const claim = this.opts.userClaim ?? "sub";
       const userId = payload[claim];
       if (typeof userId !== "string" || userId.length === 0) {

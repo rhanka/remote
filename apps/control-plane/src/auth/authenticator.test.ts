@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { SignJWT } from "jose";
-import { OffAuthenticator, BearerAuthenticator } from "./authenticator.js";
+import {
+  OffAuthenticator,
+  BearerAuthenticator,
+  SESSION_TOKEN_AUDIENCE,
+} from "./authenticator.js";
 
 const SECRET = "test-secret-do-not-use-in-prod";
 
@@ -52,5 +56,33 @@ describe("BearerAuthenticator", () => {
     await expect(
       auth.authenticate(reqWith({ authorization: `Bearer ${token}` })),
     ).rejects.toThrow();
+  });
+
+  it("rejects a user token carrying the reserved session audience", async () => {
+    // A token signed with the user secret but bearing the session audience
+    // must never be accepted as a user — that audience is reserved for
+    // control-plane-minted session tokens only.
+    const sessionAudToken = await new SignJWT({ sub: "alice" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setAudience(SESSION_TOKEN_AUDIENCE)
+      .setIssuedAt()
+      .sign(new TextEncoder().encode(SECRET));
+    const auth = new BearerAuthenticator({ secret: SECRET });
+    await expect(
+      auth.authenticate(reqWith({ authorization: `Bearer ${sessionAudToken}` })),
+    ).rejects.toThrow(/session audience/);
+  });
+
+  it("accepts a user token carrying a different (non-session) audience", async () => {
+    const otherAudToken = await new SignJWT({ sub: "alice" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setAudience("some-other-api")
+      .setIssuedAt()
+      .sign(new TextEncoder().encode(SECRET));
+    const auth = new BearerAuthenticator({ secret: SECRET });
+    const ctx = await auth.authenticate(
+      reqWith({ authorization: `Bearer ${otherAudToken}` }),
+    );
+    expect(ctx.userId).toBe("alice");
   });
 });

@@ -18,7 +18,7 @@ import {
 } from "@sentropic/remote-protocol";
 import { Ajv } from "ajv";
 import addFormats from "ajv-formats";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createControlPlane } from "./index.js";
 import { SessionEventBus } from "./sessions/events.js";
@@ -678,6 +678,102 @@ describe("control plane", () => {
       else process.env.REMOTE_AUTH = prevAuth;
       if (prevSecret === undefined) delete process.env.REMOTE_AUTH_SECRET;
       else process.env.REMOTE_AUTH_SECRET = prevSecret;
+    }
+  });
+
+  it("binds a session token to its one session (rejects it on another session of the same user)", async () => {
+    const prevAuth = process.env.REMOTE_AUTH;
+    const prevSecret = process.env.REMOTE_AUTH_SECRET;
+    process.env.REMOTE_AUTH = "bearer";
+    process.env.REMOTE_AUTH_SECRET = "integration-secret";
+    try {
+      const { mintSessionToken } = await import("./auth/session-token.js");
+      const { SignJWT } = await import("jose");
+      const app = createControlPlane();
+
+      const aliceToken = await new SignJWT({ sub: "alice" })
+        .setProtectedHeader({ alg: "HS256" })
+        .setIssuedAt()
+        .sign(new TextEncoder().encode("integration-secret"));
+      const mk = () =>
+        app.request("/sessions", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${aliceToken}`,
+          },
+          body: JSON.stringify({ profile: "shell", target: "k3s" }),
+        });
+
+      // alice owns two sessions, S1 and S2.
+      const s1 = (await (await mk()).json()) as { session: { id: string } };
+      const s2 = (await (await mk()).json()) as { session: { id: string } };
+      const id1 = s1.session.id;
+      const id2 = s2.session.id;
+      expect(id1).not.toBe(id2);
+
+      // A session token minted for S1 is accepted on S1's route...
+      const tokenForS1 = await mintSessionToken({
+        userId: "alice",
+        sessionId: id1,
+        secret: "integration-secret",
+      });
+      const allowed = await app.request(`/sessions/${id1}/cli-session`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${tokenForS1}`,
+        },
+        body: JSON.stringify({ cliSessionId: "conv-s1" }),
+      });
+      expect(allowed.status).toBe(200);
+
+      // ...but rejected (404, no existence leak) on S2 — same user, other id.
+      const denied = await app.request(`/sessions/${id2}/cli-session`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${tokenForS1}`,
+        },
+        body: JSON.stringify({ cliSessionId: "conv-s2" }),
+      });
+      expect(denied.status).toBe(404);
+      const body = (await denied.json()) as { code: string };
+      expect(body.code).toBe("session.not_found");
+    } finally {
+      if (prevAuth === undefined) delete process.env.REMOTE_AUTH;
+      else process.env.REMOTE_AUTH = prevAuth;
+      if (prevSecret === undefined) delete process.env.REMOTE_AUTH_SECRET;
+      else process.env.REMOTE_AUTH_SECRET = prevSecret;
+    }
+  });
+
+  it("warns at startup when bearer auth is on but no session-token secret is set", async () => {
+    const prevAuth = process.env.REMOTE_AUTH;
+    const prevSecret = process.env.REMOTE_AUTH_SECRET;
+    const prevSessionSecret = process.env.REMOTE_SESSION_TOKEN_SECRET;
+    const prevJwks = process.env.REMOTE_AUTH_JWKS_URL;
+    process.env.REMOTE_AUTH = "bearer";
+    delete process.env.REMOTE_AUTH_SECRET;
+    delete process.env.REMOTE_SESSION_TOKEN_SECRET;
+    process.env.REMOTE_AUTH_JWKS_URL = "https://issuer.example/.well-known/jwks.json";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      createControlPlane();
+      expect(warnSpy).toHaveBeenCalled();
+      const message = warnSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(message).toContain("REMOTE_SESSION_TOKEN_SECRET");
+    } finally {
+      warnSpy.mockRestore();
+      if (prevAuth === undefined) delete process.env.REMOTE_AUTH;
+      else process.env.REMOTE_AUTH = prevAuth;
+      if (prevSecret === undefined) delete process.env.REMOTE_AUTH_SECRET;
+      else process.env.REMOTE_AUTH_SECRET = prevSecret;
+      if (prevSessionSecret === undefined)
+        delete process.env.REMOTE_SESSION_TOKEN_SECRET;
+      else process.env.REMOTE_SESSION_TOKEN_SECRET = prevSessionSecret;
+      if (prevJwks === undefined) delete process.env.REMOTE_AUTH_JWKS_URL;
+      else process.env.REMOTE_AUTH_JWKS_URL = prevJwks;
     }
   });
 
