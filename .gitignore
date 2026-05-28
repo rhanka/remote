@@ -15,6 +15,9 @@ coverage/
 e2e-*-cp.log
 
 # Local scratch / tool artifacts (not project source)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.state-test/
 .playwright-mcp/
 remote-controle/
 remote-controle-scope-snapshot.md
