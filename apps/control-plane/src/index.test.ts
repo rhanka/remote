@@ -850,3 +850,88 @@ describe("control plane", () => {
     ]);
   });
 });
+
+describe("workspace soft-lock", () => {
+  async function createWorkspace(
+    app: ReturnType<typeof createControlPlane>,
+  ): Promise<string> {
+    const res = await app.request("/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "lock-test" }),
+    });
+    expect(res.status).toBe(201);
+    return ((await res.json()) as { workspace: { id: string } }).workspace.id;
+  }
+
+  async function acquire(
+    app: ReturnType<typeof createControlPlane>,
+    id: string,
+    holder: string,
+    ttlSeconds?: number,
+  ): Promise<Response> {
+    return app.request(`/workspaces/${id}/lock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        ttlSeconds === undefined ? { holder } : { holder, ttlSeconds },
+      ),
+    });
+  }
+
+  it("acquires, blocks a different holder (409), refreshes the holder, and releases", async () => {
+    const app = createControlPlane();
+    const id = await createWorkspace(app);
+
+    const a1 = await acquire(app, id, "alice");
+    expect(a1.status).toBe(200);
+    expect(((await a1.json()) as { holder: string }).holder).toBe("alice");
+
+    const b = await acquire(app, id, "bob");
+    expect(b.status).toBe(409);
+    const bBody = (await b.json()) as { code: string; holder: string };
+    expect(bBody.code).toBe("workspace.locked");
+    expect(bBody.holder).toBe("alice");
+
+    // Same holder may re-acquire (refresh).
+    expect((await acquire(app, id, "alice")).status).toBe(200);
+
+    const get = await app.request(`/workspaces/${id}`);
+    const getBody = (await get.json()) as { lock?: { holder: string } };
+    expect(getBody.lock?.holder).toBe("alice");
+
+    const release = await app.request(`/workspaces/${id}/lock`, {
+      method: "DELETE",
+    });
+    expect(release.status).toBe(200);
+    expect(((await release.json()) as { released: boolean }).released).toBe(
+      true,
+    );
+
+    // Released → another holder can take it.
+    expect((await acquire(app, id, "bob")).status).toBe(200);
+  });
+
+  it("expires the lock once its TTL elapses", async () => {
+    // Only Date.now() is mocked (what activeLock uses) — async/timers untouched.
+    const nowSpy = vi.spyOn(Date, "now");
+    try {
+      nowSpy.mockReturnValue(1_000_000);
+      const app = createControlPlane();
+      const id = await createWorkspace(app);
+
+      expect((await acquire(app, id, "alice", 1)).status).toBe(200);
+      // Before expiry, a different holder is blocked.
+      expect((await acquire(app, id, "bob")).status).toBe(409);
+
+      // Advance past the 1s TTL.
+      nowSpy.mockReturnValue(1_000_000 + 1_001);
+
+      const late = await acquire(app, id, "bob");
+      expect(late.status).toBe(200);
+      expect(((await late.json()) as { holder: string }).holder).toBe("bob");
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
