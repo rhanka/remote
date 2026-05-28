@@ -178,6 +178,21 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         },
       },
     },
+    "/sessions/{id}/terminal/input": {
+      post: {
+        summary: "Forward terminal input (keystrokes) to the session-agent",
+        parameters: idParam,
+        requestBody: jsonBody(ref("TerminalInput")),
+        responses: {
+          "202": jsonObjectResponse("Input accepted", ["accepted"], {
+            accepted: { type: "boolean" },
+          }),
+          "400": validationError,
+          "404": notFoundError,
+          "503": jsonResponse("No session-agent connected", ref("RemoteError")),
+        },
+      },
+    },
     "/sessions/{id}/terminal/resize": {
       post: {
         summary: "Propagate a terminal resize to the session-agent",

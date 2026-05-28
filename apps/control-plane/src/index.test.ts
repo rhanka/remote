@@ -84,6 +84,7 @@ describe("control plane", () => {
     expect(paths).toHaveProperty("/sessions/{id}/credentials");
     expect(paths).toHaveProperty("/sessions/{id}/instructions");
     expect(paths).toHaveProperty("/sessions/{id}/events");
+    expect(paths).toHaveProperty("/sessions/{id}/terminal/input");
 
     // The bearer security scheme is declared and applied document-wide.
     const securitySchemes = (
