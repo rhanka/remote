@@ -5,9 +5,9 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
-## Unreleased
+## v0.4.1 — 2026-05-28
 
-Follow-ups on top of v0.4.0's multi-tenant base (no release tag cut yet).
+Follow-ups on top of v0.4.0's multi-tenant base.
 
 ### Added
 - **Per-session service token for session-agent callbacks under bearer**: when
