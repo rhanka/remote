@@ -75,12 +75,28 @@ describe("control plane", () => {
     expect(schemas).toHaveProperty("SessionDescriptor");
     expect(schemas).toHaveProperty("CreateSessionRequest");
     expect(schemas).toHaveProperty("RemoteError");
-    const paths = doc.paths as Record<string, unknown>;
+    const paths = doc.paths as Record<
+      string,
+      Record<string, { security?: unknown; responses: Record<string, unknown> }>
+    >;
     expect(paths).toHaveProperty("/sessions/{id}");
     expect(paths).toHaveProperty("/sessions/{id}/stop");
     expect(paths).toHaveProperty("/sessions/{id}/credentials");
     expect(paths).toHaveProperty("/sessions/{id}/instructions");
     expect(paths).toHaveProperty("/sessions/{id}/events");
+
+    // The bearer security scheme is declared and applied document-wide.
+    const securitySchemes = (
+      doc.components as { securitySchemes?: Record<string, { scheme?: string }> }
+    ).securitySchemes;
+    expect(securitySchemes?.bearerAuth?.scheme).toBe("bearer");
+    expect(doc.security).toEqual([{ bearerAuth: [] }]);
+
+    // Protected routes document a 401; the public liveness probe opts out.
+    expect(paths["/sessions"]!.get!.responses).toHaveProperty("401");
+    expect(paths["/sessions/{id}/stop"]!.post!.responses).toHaveProperty("401");
+    expect(paths["/healthz"]!.get!.security).toEqual([]);
+    expect(paths["/healthz"]!.get!.responses).not.toHaveProperty("401");
   });
 
   it("streams protocol events via SSE for an existing session", async () => {

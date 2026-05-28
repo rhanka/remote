@@ -22,8 +22,206 @@ const jsonResponse = (
 
 const validationError = jsonResponse("Validation failed", ref("RemoteError"));
 const notFoundError = jsonResponse("Session not found", ref("RemoteError"));
+const unauthorizedError = jsonResponse(
+  "Authentication required or token rejected (when REMOTE_AUTH is enabled)",
+  ref("RemoteError"),
+);
+
+type Operation = {
+  responses: Record<string, unknown>;
+  [key: string]: unknown;
+};
 
 export function buildOpenApiDocument(): Record<string, unknown> {
+  const paths: Record<string, Record<string, Operation>> = {
+    "/healthz": {
+      get: {
+        summary: "Liveness probe",
+        // Public — the only route exempt from the document-wide bearer security.
+        security: [],
+        responses: {
+          "200": {
+            description: "Service is up",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["ok", "service", "protocolVersion"],
+                  properties: {
+                    ok: { type: "boolean", const: true },
+                    service: { type: "string" },
+                    protocolVersion: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/sessions": {
+      get: {
+        summary: "List remote sessions",
+        responses: {
+          "200": jsonResponse("List of sessions", ref("ListSessionsResponse")),
+        },
+      },
+      post: {
+        summary: "Create a remote session",
+        requestBody: jsonBody(ref("CreateSessionRequest")),
+        responses: {
+          "201": jsonResponse("Session created", ref("CreateSessionResponse")),
+          "400": validationError,
+        },
+      },
+    },
+    "/sessions/{id}": {
+      get: {
+        summary: "Get a remote session",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string", minLength: 1 },
+          },
+        ],
+        responses: {
+          "200": jsonResponse("Session descriptor", ref("GetSessionResponse")),
+          "404": notFoundError,
+        },
+      },
+    },
+    "/sessions/{id}/stop": {
+      post: {
+        summary: "Stop a remote session",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string", minLength: 1 },
+          },
+        ],
+        requestBody: jsonBody(ref("StopSessionRequest")),
+        responses: {
+          "200": jsonResponse("Stop accepted", ref("StopSessionResponse")),
+          "400": validationError,
+          "404": notFoundError,
+        },
+      },
+    },
+    "/sessions/{id}/credentials": {
+      post: {
+        summary: "Refresh auth credentials for a running session",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string", minLength: 1 },
+          },
+        ],
+        requestBody: jsonBody(ref("RefreshSessionCredentialsRequest")),
+        responses: {
+          "200": jsonResponse(
+            "Credentials refresh accepted",
+            ref("RefreshSessionCredentialsResponse"),
+          ),
+          "400": validationError,
+          "404": notFoundError,
+        },
+      },
+    },
+    "/sessions/{id}/instructions": {
+      post: {
+        summary: "Send an instruction to a session",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string", minLength: 1 },
+          },
+        ],
+        requestBody: jsonBody(ref("SendInstructionRequest")),
+        responses: {
+          "202": jsonResponse(
+            "Instruction accepted",
+            ref("SendInstructionResponse"),
+          ),
+          "400": validationError,
+          "404": notFoundError,
+        },
+      },
+    },
+    "/sessions/{id}/terminal/resize": {
+      post: {
+        summary: "Propagate a terminal resize to the session-agent",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string", minLength: 1 },
+          },
+        ],
+        requestBody: jsonBody(ref("TerminalResize")),
+        responses: {
+          "202": {
+            description: "Resize accepted",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["accepted"],
+                  properties: { accepted: { type: "boolean" } },
+                },
+              },
+            },
+          },
+          "400": validationError,
+          "404": notFoundError,
+          "503": jsonResponse("No session-agent connected", ref("RemoteError")),
+        },
+      },
+    },
+    "/sessions/{id}/events": {
+      get: {
+        summary: "Stream protocol events for a session as SSE",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string", minLength: 1 },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Event stream",
+            content: {
+              "text/event-stream": {
+                schema: ref("RemoteEventEnvelope"),
+              },
+            },
+          },
+          "404": notFoundError,
+        },
+      },
+    },
+  };
+
+  // Every route except the public liveness probe sits behind the bearer
+  // security scheme and may answer 401 when REMOTE_AUTH is enabled. Document it
+  // uniformly so the contract stays correct as routes are added.
+  for (const [path, operations] of Object.entries(paths)) {
+    if (path === "/healthz") continue;
+    for (const operation of Object.values(operations)) {
+      operation.responses["401"] = unauthorizedError;
+    }
+  }
+
   return {
     openapi: "3.1.0",
     info: {
@@ -31,194 +229,21 @@ export function buildOpenApiDocument(): Record<string, unknown> {
       version: REMOTE_PROTOCOL_VERSION,
       summary: "Control plane API for Sentropic Remote sessions",
     },
-    components: remoteOpenApiComponents,
-    paths: {
-      "/healthz": {
-        get: {
-          summary: "Liveness probe",
-          responses: {
-            "200": {
-              description: "Service is up",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    required: ["ok", "service", "protocolVersion"],
-                    properties: {
-                      ok: { type: "boolean", const: true },
-                      service: { type: "string" },
-                      protocolVersion: { type: "string" },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/sessions": {
-        get: {
-          summary: "List remote sessions",
-          responses: {
-            "200": jsonResponse(
-              "List of sessions",
-              ref("ListSessionsResponse"),
-            ),
-          },
-        },
-        post: {
-          summary: "Create a remote session",
-          requestBody: jsonBody(ref("CreateSessionRequest")),
-          responses: {
-            "201": jsonResponse(
-              "Session created",
-              ref("CreateSessionResponse"),
-            ),
-            "400": validationError,
-          },
-        },
-      },
-      "/sessions/{id}": {
-        get: {
-          summary: "Get a remote session",
-          parameters: [
-            {
-              name: "id",
-              in: "path",
-              required: true,
-              schema: { type: "string", minLength: 1 },
-            },
-          ],
-          responses: {
-            "200": jsonResponse(
-              "Session descriptor",
-              ref("GetSessionResponse"),
-            ),
-            "404": notFoundError,
-          },
-        },
-      },
-      "/sessions/{id}/stop": {
-        post: {
-          summary: "Stop a remote session",
-          parameters: [
-            {
-              name: "id",
-              in: "path",
-              required: true,
-              schema: { type: "string", minLength: 1 },
-            },
-          ],
-          requestBody: jsonBody(ref("StopSessionRequest")),
-          responses: {
-            "200": jsonResponse("Stop accepted", ref("StopSessionResponse")),
-            "400": validationError,
-            "404": notFoundError,
-          },
-        },
-      },
-      "/sessions/{id}/credentials": {
-        post: {
-          summary: "Refresh auth credentials for a running session",
-          parameters: [
-            {
-              name: "id",
-              in: "path",
-              required: true,
-              schema: { type: "string", minLength: 1 },
-            },
-          ],
-          requestBody: jsonBody(ref("RefreshSessionCredentialsRequest")),
-          responses: {
-            "200": jsonResponse(
-              "Credentials refresh accepted",
-              ref("RefreshSessionCredentialsResponse"),
-            ),
-            "400": validationError,
-            "404": notFoundError,
-          },
-        },
-      },
-      "/sessions/{id}/instructions": {
-        post: {
-          summary: "Send an instruction to a session",
-          parameters: [
-            {
-              name: "id",
-              in: "path",
-              required: true,
-              schema: { type: "string", minLength: 1 },
-            },
-          ],
-          requestBody: jsonBody(ref("SendInstructionRequest")),
-          responses: {
-            "202": jsonResponse(
-              "Instruction accepted",
-              ref("SendInstructionResponse"),
-            ),
-            "400": validationError,
-            "404": notFoundError,
-          },
-        },
-      },
-      "/sessions/{id}/terminal/resize": {
-        post: {
-          summary: "Propagate a terminal resize to the session-agent",
-          parameters: [
-            {
-              name: "id",
-              in: "path",
-              required: true,
-              schema: { type: "string", minLength: 1 },
-            },
-          ],
-          requestBody: jsonBody(ref("TerminalResize")),
-          responses: {
-            "202": {
-              description: "Resize accepted",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    required: ["accepted"],
-                    properties: { accepted: { type: "boolean" } },
-                  },
-                },
-              },
-            },
-            "400": validationError,
-            "404": notFoundError,
-            "503": jsonResponse(
-              "No session-agent connected",
-              ref("RemoteError"),
-            ),
-          },
-        },
-      },
-      "/sessions/{id}/events": {
-        get: {
-          summary: "Stream protocol events for a session as SSE",
-          parameters: [
-            {
-              name: "id",
-              in: "path",
-              required: true,
-              schema: { type: "string", minLength: 1 },
-            },
-          ],
-          responses: {
-            "200": {
-              description: "Event stream",
-              content: {
-                "text/event-stream": {
-                  schema: ref("RemoteEventEnvelope"),
-                },
-              },
-            },
-            "404": notFoundError,
-          },
+    components: {
+      ...remoteOpenApiComponents,
+      securitySchemes: {
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "JWT",
+          description:
+            "Bearer JWT whose `sub` claim is the user id. Required on " +
+            "/sessions and /workspaces when REMOTE_AUTH is enabled (off by " +
+            "default, in which case no token is needed).",
         },
       },
     },
+    security: [{ bearerAuth: [] }],
+    paths,
   };
 }
