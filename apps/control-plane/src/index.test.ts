@@ -97,6 +97,15 @@ describe("control plane", () => {
     expect(paths["/sessions/{id}/stop"]!.post!.responses).toHaveProperty("401");
     expect(paths["/healthz"]!.get!.security).toEqual([]);
     expect(paths["/healthz"]!.get!.responses).not.toHaveProperty("401");
+
+    // Workspaces routes are documented too, with the same 401 contract.
+    expect(paths).toHaveProperty("/workspaces");
+    expect(paths).toHaveProperty("/workspaces/{id}");
+    expect(paths).toHaveProperty("/workspaces/{id}/lock");
+    expect(paths["/workspaces"]!.post!.responses).toHaveProperty("401");
+    expect(paths["/workspaces/{id}/lock"]!.post!.responses).toHaveProperty(
+      "409",
+    );
   });
 
   it("streams protocol events via SSE for an existing session", async () => {

@@ -26,6 +26,29 @@ const unauthorizedError = jsonResponse(
   "Authentication required or token rejected (when REMOTE_AUTH is enabled)",
   ref("RemoteError"),
 );
+const workspaceNotFound = jsonResponse("Workspace not found", ref("RemoteError"));
+
+const idParam = [
+  {
+    name: "id",
+    in: "path",
+    required: true,
+    schema: { type: "string", minLength: 1 },
+  },
+];
+
+const jsonObjectResponse = (
+  description: string,
+  required: string[],
+  properties: Record<string, unknown>,
+) => ({
+  description,
+  content: {
+    "application/json": {
+      schema: { type: "object", required, properties },
+    },
+  },
+});
 
 type Operation = {
   responses: Record<string, unknown>;
@@ -207,6 +230,90 @@ export function buildOpenApiDocument(): Record<string, unknown> {
             },
           },
           "404": notFoundError,
+        },
+      },
+    },
+    "/workspaces": {
+      get: {
+        summary: "List workspaces (each with its live soft-lock, if any)",
+        responses: {
+          "200": jsonResponse(
+            "List of workspaces",
+            ref("ListWorkspacesResponse"),
+          ),
+        },
+      },
+      post: {
+        summary: "Create a workspace",
+        requestBody: jsonBody(ref("CreateWorkspaceRequest")),
+        responses: {
+          "201": jsonResponse(
+            "Workspace created",
+            ref("CreateWorkspaceResponse"),
+          ),
+          "400": validationError,
+        },
+      },
+    },
+    "/workspaces/{id}": {
+      get: {
+        summary: "Get a workspace (with its live soft-lock, if any)",
+        parameters: idParam,
+        responses: {
+          "200": jsonResponse(
+            "Workspace descriptor",
+            ref("GetWorkspaceResponse"),
+          ),
+          "404": workspaceNotFound,
+        },
+      },
+      delete: {
+        summary: "Delete a workspace",
+        parameters: idParam,
+        responses: {
+          "200": jsonResponse(
+            "Delete accepted",
+            ref("DeleteWorkspaceResponse"),
+          ),
+          "404": workspaceNotFound,
+        },
+      },
+    },
+    "/workspaces/{id}/lock": {
+      post: {
+        summary: "Acquire or refresh the workspace soft-lock",
+        parameters: idParam,
+        responses: {
+          "200": jsonObjectResponse(
+            "Lock acquired or refreshed",
+            ["workspaceId", "holder", "acquiredAt", "accepted"],
+            {
+              workspaceId: { type: "string" },
+              holder: { type: "string" },
+              acquiredAt: { type: "string" },
+              accepted: { type: "boolean" },
+            },
+          ),
+          "404": workspaceNotFound,
+          "409": jsonResponse(
+            "Workspace already held by another lock holder",
+            ref("RemoteError"),
+          ),
+        },
+      },
+      delete: {
+        summary: "Release the workspace soft-lock",
+        parameters: idParam,
+        responses: {
+          "200": jsonObjectResponse(
+            "Lock released",
+            ["workspaceId", "released"],
+            {
+              workspaceId: { type: "string" },
+              released: { type: "boolean" },
+            },
+          ),
+          "404": workspaceNotFound,
         },
       },
     },
