@@ -72,13 +72,15 @@ export function withSessionTokens(
           audience: SESSION_TOKEN_AUDIENCE,
         });
         if (typeof payload.sub === "string" && payload.sub.length > 0) {
+          // Bind this token to the one session it was minted for; routes
+          // enforce it against the :id path param. Only the session-token
+          // path sets this — user delegation leaves it undefined.
           return {
             userId: payload.sub,
             claims: payload as Record<string, unknown>,
-            // Bind this token to the one session it was minted for; routes
-            // enforce it against the :id path param. Only the session-token
-            // path sets this — user delegation leaves it undefined.
-            sessionId: payload.sid as string | undefined,
+            ...(typeof payload.sid === "string" && payload.sid.length > 0
+              ? { sessionId: payload.sid }
+              : {}),
           };
         }
       } catch {
