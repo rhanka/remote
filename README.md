@@ -20,11 +20,15 @@ Repository: `rhanka/remote` (codename was `remote-controle` during scaffold).
 - MVP spec: `docs/superpowers/specs/2026-05-09-remote-controle-mvp-design.md`
 - Protocol/events spec: `docs/superpowers/specs/2026-05-11-remote-protocol-events-design.md`
 - Plan 0 scaffold: `docs/superpowers/plans/2026-05-09-remote-controle-plan-0-scaffold.md`
+- Multi-tenant sessions spec: `docs/superpowers/specs/2026-05-27-multi-tenant-sessions-design.md`
+- Multi-tenant sessions plan: `docs/superpowers/plans/2026-05-27-multi-tenant-sessions.md`
+- Enabling multi-tenant auth (operator guide): `docs/multi-tenant-auth.md`
 
 ## Commands
 
 ```bash
-corepack enable pnpm
-corepack pnpm install
-corepack pnpm verify
+corepack npm install
+corepack npm run verify
 ```
+
+This is an npm workspaces monorepo (`package-lock.json`); do not use pnpm/yarn/bun.
