@@ -2,10 +2,11 @@ import { remoteOpenApiComponents } from "@sentropic/remote-protocol";
 import { Ajv, type ValidateFunction } from "ajv";
 import addFormatsModule, { type FormatsPlugin } from "ajv-formats";
 import type { Context, MiddlewareHandler } from "hono";
+import type { AuthContext } from "./auth/authenticator.js";
 
 const addFormats = addFormatsModule as unknown as FormatsPlugin;
 
-export type ValidationVars = { validatedBody: unknown };
+export type ValidationVars = { validatedBody: unknown; auth?: AuthContext };
 
 export type ValidationContext = Context<{ Variables: ValidationVars }>;
 
