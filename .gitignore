@@ -13,3 +13,11 @@ coverage/
 .superpowers/
 .cfg-test/
 e2e-*-cp.log
+
+# Local scratch / tool artifacts (not project source)
+.playwright-mcp/
+remote-controle/
+remote-controle-scope-snapshot.md
+remote-controle-scope-viewport.png
+/1
+/hop
