@@ -47,7 +47,7 @@ export type DockerProvisionerOptions = {
 };
 
 const DEFAULTS = {
-  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.3.1",
+  image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.4.0",
   controlPlaneEndpoint: "http://host.docker.internal:8080",
   home: "/root",
 };

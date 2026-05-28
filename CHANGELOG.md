@@ -5,6 +5,47 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.4.0 — 2026-05-28
+
+Headline: the control-plane becomes **multi-tenant**. Each request authenticates
+to a `userId`, resolves a per-user Kubernetes namespace, and every session and
+workspace operation is scoped to it — a user can neither see nor act on another
+user's resources. Backward compatible: `REMOTE_AUTH=off` (the default) keeps the
+single-namespace `sentropic-remote` behavior with zero config.
+
+### Added
+- **Pluggable `Authenticator` seam** (`apps/control-plane/src/auth/`):
+  `OffAuthenticator` (default → user `default`) and `BearerAuthenticator`
+  (HS256 shared secret or JWKS, `sub` → `userId`), selected via `REMOTE_AUTH`
+  (`off` | bearer) + `REMOTE_AUTH_SECRET` / `REMOTE_AUTH_JWKS_URL` /
+  `REMOTE_AUTH_ISSUER`. Hono `authMiddleware` runs it on `/sessions*` and
+  `/workspaces*`, sets `c.var.auth`, and returns `401 auth.unauthorized` on
+  failure. Health and OpenAPI stay public.
+- **Per-user namespace resolution** (`tenancy/namespace.ts`):
+  `tenantNamespace(userId)` maps `default` → `sentropic-remote`, any other id →
+  a deterministic, DNS-safe `user-<sha8>`.
+- **`TenantProvisioner`** (`tenancy/tenant-provisioner.ts`):
+  `StubTenantProvisioner` (dev/no-auth) and `PocK8sTenantProvisioner` (lazy,
+  cached `POST {POC_K8S_TENANTS_URL}/tenants`), selected via env. The
+  control-plane holds no namespace-create power; poc-k8s owns tenant lifecycle.
+- **`remote config token <value>`** + `REMOTE_TOKEN` env: the CLI sends
+  `Authorization: Bearer` on every control-plane call (env wins over stored).
+- **Two-user isolation e2e** (`make e2e-isolation`, docker backend): user B
+  cannot list or stop user A's session (404, no existence leak).
+
+### Changed
+- `K8sSessionProvisioner` is **namespace-per-call**: `ProvisionOptions.namespace`
+  and `destroy(sessionId, emit, namespace?)` override the constructor namespace.
+  InMemory/Docker backends accept the parameter for parity and ignore it.
+- `SessionStore` is **partitioned by owner**: `put/get/list/delete` take a
+  `userId`; cross-user `get`/`delete` return undefined/false, `list` is filtered.
+
+### Notes
+- Real multi-tenant rollout still needs the poc-k8s `POST /tenants` operator
+  (sibling spec) and, optionally, a `SentropicOIDCAuthenticator`. Under bearer
+  auth the session-agent's workspace fetch/export will need a user-scoped token
+  (tracked separately). None of this affects `REMOTE_AUTH=off` deployments.
+
 ## v0.3.1 — 2026-05-26
 
 ### Added
