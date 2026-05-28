@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { SignJWT } from "jose";
 import {
   OffAuthenticator,
   BearerAuthenticator,
   SESSION_TOKEN_AUDIENCE,
+  authenticatorFromEnv,
 } from "./authenticator.js";
 
 const SECRET = "test-secret-do-not-use-in-prod";
@@ -84,5 +85,40 @@ describe("BearerAuthenticator", () => {
       reqWith({ authorization: `Bearer ${otherAudToken}` }),
     );
     expect(ctx.userId).toBe("alice");
+  });
+});
+
+describe("authenticatorFromEnv", () => {
+  const AUTH_ENV = [
+    "REMOTE_AUTH",
+    "REMOTE_AUTH_SECRET",
+    "REMOTE_AUTH_JWKS_URL",
+    "REMOTE_AUTH_ISSUER",
+    "REMOTE_AUTH_USER_CLAIM",
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+  for (const k of AUTH_ENV) saved[k] = process.env[k];
+
+  afterEach(() => {
+    for (const k of AUTH_ENV) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it("defaults to OffAuthenticator when REMOTE_AUTH is unset", () => {
+    for (const k of AUTH_ENV) delete process.env[k];
+    expect(authenticatorFromEnv()).toBeInstanceOf(OffAuthenticator);
+  });
+
+  it("returns OffAuthenticator when REMOTE_AUTH=off", () => {
+    process.env.REMOTE_AUTH = "off";
+    expect(authenticatorFromEnv()).toBeInstanceOf(OffAuthenticator);
+  });
+
+  it("returns a BearerAuthenticator when REMOTE_AUTH is enabled", () => {
+    process.env.REMOTE_AUTH = "bearer";
+    process.env.REMOTE_AUTH_SECRET = SECRET;
+    expect(authenticatorFromEnv()).toBeInstanceOf(BearerAuthenticator);
   });
 });

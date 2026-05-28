@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
-import { StubTenantProvisioner, PocK8sTenantProvisioner } from "./tenant-provisioner.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  StubTenantProvisioner,
+  PocK8sTenantProvisioner,
+  tenantProvisionerFromEnv,
+} from "./tenant-provisioner.js";
 
 describe("StubTenantProvisioner", () => {
   it("returns the shared namespace for any user", async () => {
@@ -44,5 +48,23 @@ describe("PocK8sTenantProvisioner", () => {
     await t.ensureTenant("alice");
     await t.ensureTenant("alice");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("tenantProvisionerFromEnv", () => {
+  const saved = process.env.POC_K8S_TENANTS_URL;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.POC_K8S_TENANTS_URL;
+    else process.env.POC_K8S_TENANTS_URL = saved;
+  });
+
+  it("returns the stub when POC_K8S_TENANTS_URL is unset", () => {
+    delete process.env.POC_K8S_TENANTS_URL;
+    expect(tenantProvisionerFromEnv()).toBeInstanceOf(StubTenantProvisioner);
+  });
+
+  it("returns the poc-k8s client when POC_K8S_TENANTS_URL is set", () => {
+    process.env.POC_K8S_TENANTS_URL = "http://poc:9000";
+    expect(tenantProvisionerFromEnv()).toBeInstanceOf(PocK8sTenantProvisioner);
   });
 });
