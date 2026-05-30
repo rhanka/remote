@@ -277,6 +277,77 @@ describe("K8sSessionProvisioner", () => {
     expect(env.some((e) => e.name === "REMOTE_TOKEN")).toBe(false);
   });
 
+  it("refresh uses the per-call namespace, not the constructor namespace", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "sentropic-remote",
+    });
+    await provisioner.provision(descriptor, () => {}, {
+      namespace: "user-abc12345",
+      credentials: { ".codex/auth.json": "OLD_TOKEN" },
+    });
+    ops.length = 0;
+
+    await provisioner.refresh(
+      descriptor,
+      () => {},
+      {
+        namespace: "user-abc12345",
+        credentials: { ".codex/auth.json": "NEW_TOKEN" },
+      },
+    );
+
+    const namespaces = ops.map((op) => op.namespace);
+    expect(namespaces.every((ns) => ns === "user-abc12345")).toBe(true);
+    expect(namespaces.some((ns) => ns === "sentropic-remote")).toBe(false);
+  });
+
+  it("provisionWorkspace creates the PVC in the per-call namespace", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "sentropic-remote",
+    });
+    await provisioner.provisionWorkspace("ws-test1", "user-abc12345");
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "create",
+      kind: "PersistentVolumeClaim",
+      namespace: "user-abc12345",
+    });
+  });
+
+  it("destroyWorkspace deletes the PVC in the per-call namespace", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "sentropic-remote",
+    });
+    await provisioner.destroyWorkspace("ws-test1", "user-abc12345");
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "delete",
+      kind: "PersistentVolumeClaim",
+      namespace: "user-abc12345",
+    });
+  });
+
+  it("provisionWorkspace falls back to constructor namespace when no per-call namespace given", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "sentropic-remote",
+    });
+    await provisioner.provisionWorkspace("ws-test2");
+    expect(ops[0]).toMatchObject({ namespace: "sentropic-remote" });
+  });
+
+  it("destroyWorkspace falls back to constructor namespace when no per-call namespace given", async () => {
+    const { client, ops } = recordingClient();
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "sentropic-remote",
+    });
+    await provisioner.destroyWorkspace("ws-test2");
+    expect(ops[0]).toMatchObject({ namespace: "sentropic-remote" });
+  });
+
   it("ensures KubernetesListObject typing surface stays usable", () => {
     const list: KubernetesListObject<KubernetesObject> = {
       apiVersion: "v1",

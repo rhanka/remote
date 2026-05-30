@@ -94,7 +94,8 @@ export class K8sSessionProvisioner implements SessionProvisioner {
     const authPaths = Object.keys(nextCredentials);
 
     const names = resourceNames(descriptor);
-    const namespace = this.options.namespace;
+    const ns = options.namespace ?? this.options.namespace;
+    const opts = { ...this.options, namespace: ns };
     emit(descriptor.id, "session.lifecycle.changed", {
       previousState: this.phases.get(descriptor.id) ?? "running",
       nextState: "starting",
@@ -104,7 +105,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       .delete({
         apiVersion: "v1",
         kind: "Pod",
-        metadata: { name: names.pod, namespace },
+        metadata: { name: names.pod, namespace: ns },
       })
       .catch(() => {});
 
@@ -113,16 +114,16 @@ export class K8sSessionProvisioner implements SessionProvisioner {
         .delete({
           apiVersion: "v1",
           kind: "Secret",
-          metadata: { name: names.authSecret, namespace },
+          metadata: { name: names.authSecret, namespace: ns },
         })
         .catch(() => {});
       await this.client.create(
-        buildSessionAuthSecret(descriptor, nextCredentials, this.options),
+        buildSessionAuthSecret(descriptor, nextCredentials, opts),
       );
     }
 
     await this.client.create(
-      buildSessionPodSpec(descriptor, this.options, authPaths),
+      buildSessionPodSpec(descriptor, opts, authPaths),
     );
 
     this.phases.set(descriptor.id, "ready");
@@ -182,9 +183,11 @@ export class K8sSessionProvisioner implements SessionProvisioner {
     return phase ? { phase } : undefined;
   }
 
-  async provisionWorkspace(workspaceId: string): Promise<void> {
+  async provisionWorkspace(workspaceId: string, namespace?: string): Promise<void> {
+    const ns = namespace ?? this.options.namespace;
+    const opts = { ...this.options, namespace: ns };
     await this.client
-      .create(buildWorkspacePvcSpec(workspaceId, this.options))
+      .create(buildWorkspacePvcSpec(workspaceId, opts))
       .catch((error: unknown) => {
         // tolerate "already exists" so workspace create is idempotent
         const message = String(error);
@@ -192,14 +195,15 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       });
   }
 
-  async destroyWorkspace(workspaceId: string): Promise<void> {
+  async destroyWorkspace(workspaceId: string, namespace?: string): Promise<void> {
+    const ns = namespace ?? this.options.namespace;
     await this.client
       .delete({
         apiVersion: "v1",
         kind: "PersistentVolumeClaim",
         metadata: {
           name: workspacePvcName(workspaceId),
-          namespace: this.options.namespace,
+          namespace: ns,
         },
       })
       .catch(() => {});

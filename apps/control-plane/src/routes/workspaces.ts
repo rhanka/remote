@@ -50,6 +50,10 @@ export function createWorkspacesRouter(
   const ownsWorkspace = (id: string, userId: string): boolean =>
     store.has(id) && owners.get(id) === userId;
 
+  // Tenant namespace captured at create time so destroyWorkspace targets the
+  // right per-tenant namespace (not the control-plane default namespace).
+  const workspaceNamespace = new Map<string, string>();
+
   // Advisory soft-lock per workspace. Authority lives here (reachable by the
   // local CLI and remote Pods); auto-expires at TTL.
   type Lock = { holder: string; acquiredAt: string; expiresAt: number };
@@ -95,10 +99,11 @@ export function createWorkspacesRouter(
       if (req.labels !== undefined) descriptor.labels = req.labels;
 
       const { userId } = c.var.auth!;
-      await tenantProvisioner.ensureTenant(userId);
-      await provisioner.provisionWorkspace?.(descriptor.id);
+      const { namespace } = await tenantProvisioner.ensureTenant(userId);
+      await provisioner.provisionWorkspace?.(descriptor.id, namespace);
       store.set(descriptor.id, descriptor);
       owners.set(descriptor.id, userId);
+      workspaceNamespace.set(descriptor.id, namespace);
       const response: CreateWorkspaceResponse = { workspace: descriptor };
       return c.json(response, 201);
     },
@@ -137,10 +142,12 @@ export function createWorkspacesRouter(
   router.delete("/:id", async (c) => {
     const id = c.req.param("id");
     if (!ownsWorkspace(id, c.var.auth!.userId)) return notFound(c);
+    const ns = workspaceNamespace.get(id);
     store.delete(id);
     owners.delete(id);
     locks.delete(id);
-    await provisioner.destroyWorkspace?.(id);
+    workspaceNamespace.delete(id);
+    await provisioner.destroyWorkspace?.(id, ns);
     const response: DeleteWorkspaceResponse = {
       workspaceId: id,
       accepted: true,

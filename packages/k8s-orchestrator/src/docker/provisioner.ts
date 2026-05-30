@@ -217,11 +217,11 @@ export class DockerSessionProvisioner implements SessionProvisioner {
     return phase ? { phase } : undefined;
   }
 
-  async provisionWorkspace(workspaceId: string): Promise<void> {
+  async provisionWorkspace(workspaceId: string, _namespace?: string): Promise<void> {
     await this.run(["volume", "create", workspaceVolume(workspaceId)]);
   }
 
-  async destroyWorkspace(workspaceId: string): Promise<void> {
+  async destroyWorkspace(workspaceId: string, _namespace?: string): Promise<void> {
     await this.run(["volume", "rm", "-f", workspaceVolume(workspaceId)]);
   }
 }
