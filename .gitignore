@@ -24,3 +24,6 @@ remote-controle-scope-snapshot.md
 remote-controle-scope-viewport.png
 /1
 /hop
+
+# Local worktrees (per-project tmp/<slug>)
+tmp/
