@@ -60,6 +60,13 @@ vi.mock("./session-restore.js", () => ({
   restoreSessionsToLocal: mockRestoreSessionsToLocal,
 }));
 
+const mockCollectProfileAuth = vi.fn();
+
+vi.mock("./auth-bundle.js", () => ({
+  collectProfileAuth: mockCollectProfileAuth,
+  assertRequiredAuthBundle: vi.fn(),
+}));
+
 // Import the module under test after all mocks are wired.
 const { migrateForward, migrateBack } = await import("./migrate.js");
 
@@ -118,6 +125,8 @@ beforeEach(() => {
   mockReadBaseSnapshot.mockReturnValue(null);
   mockCreateWorkspace.mockResolvedValue({ id: "ws-new", createdAt: "now" });
   mockWriteWorkspaceMarker.mockReturnValue(undefined);
+  // Default: no local creds (forward path omits credentials, matching prior behavior).
+  mockCollectProfileAuth.mockResolvedValue({});
 
   // push shell session
   mockCreateRemoteSession.mockImplementation(
@@ -246,6 +255,46 @@ describe("migrateForward", () => {
     );
     expect(mainSession).toBeDefined();
     expect(mainSession!.workspaceId).toBe(WORKSPACE_ID);
+  });
+
+  it("bundles the profile's local credentials into the main session", async () => {
+    const stderr = stubStream();
+    mockCollectProfileAuth.mockResolvedValue({ "auth.json": "secret-token" });
+    const capturedBodies: Array<{
+      profile: string;
+      workspaceSync?: boolean;
+      credentials?: Record<string, string>;
+    }> = [];
+
+    mockCreateRemoteSession.mockImplementation(
+      (
+        _url: string,
+        body: {
+          profile: string;
+          workspaceSync?: boolean;
+          credentials?: Record<string, string>;
+        },
+      ) => {
+        capturedBodies.push(body);
+        if (body.workspaceSync && body.profile === "shell")
+          return Promise.resolve({ id: PUSH_SESSION_ID });
+        return Promise.resolve({ id: SESSION_ID });
+      },
+    );
+
+    await migrateForward({
+      profile: "claude",
+      remoteUrl: REMOTE_URL,
+      cwd: makeTempCwd("forward-creds"),
+      stderr,
+    });
+
+    expect(mockCollectProfileAuth).toHaveBeenCalledWith("claude");
+    const mainSession = capturedBodies.find((b) => b.profile === "claude");
+    expect(mainSession?.credentials).toEqual({ "auth.json": "secret-token" });
+    // The throwaway push shell session must NOT carry credentials.
+    const pushSession = capturedBodies.find((b) => b.profile === "shell");
+    expect(pushSession?.credentials).toBeUndefined();
   });
 
   it("passes --resume args to createRemoteSession when resume is given", async () => {

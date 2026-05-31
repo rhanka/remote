@@ -23,6 +23,7 @@
 
 import { attach, createRemoteSession, stopRemoteSession } from "./attach.js";
 import { coerceCliProfileName, resolveProfile } from "./profiles.js";
+import { collectProfileAuth } from "./auth-bundle.js";
 import {
   acquireWorkspaceLock,
   createWorkspace,
@@ -366,7 +367,14 @@ export async function migrateForward(
   // Step 2 & 3: push workspace.
   await pushWorkspace(cwd, remoteUrl, marker.workspaceId, fetchImpl, stderr);
 
-  // Step 4: create remote session.
+  // Step 4: create remote session. Bundle the profile's local credentials so
+  // the migrated CLI is authenticated in-pod, mirroring the `remote <profile>`
+  // run path. Missing creds are tolerated (the session still starts; shell /
+  // opencode need none) — we warn rather than hard-fail.
+  let credentials: Readonly<Record<string, string>> | undefined;
+  const bundle = await collectProfileAuth(profile);
+  if (Object.keys(bundle).length > 0) credentials = bundle;
+
   const resumeArgs = resume !== undefined ? buildResumeStartupArgs(profile, resume) : [];
   const session = await createRemoteSession(
     remoteUrl,
@@ -374,9 +382,15 @@ export async function migrateForward(
       profile,
       workspaceId: marker.workspaceId,
       workspaceSync: true,
+      ...(credentials ? { credentials } : {}),
       ...(resumeArgs.length > 0 ? { startupArgs: resumeArgs } : {}),
     },
     fetchImpl,
+  );
+  stderr.write(
+    credentials
+      ? `[remote] bundled ${profile} creds: ${Object.keys(credentials).join(", ")}\n`
+      : `[remote] no ${profile} creds found locally — session starts unauthenticated\n`,
   );
 
   stderr.write(
