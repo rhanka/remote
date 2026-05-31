@@ -268,6 +268,33 @@ describe("control plane", () => {
     ]);
   });
 
+  it("does not crash when provisioning fails; cleans up the orphaned session", async () => {
+    // Regression: a rejecting provision() used to be an unhandled rejection that
+    // crashed the whole control-plane (in-process store → every session lost).
+    const provisioner = {
+      async provision() {
+        throw new Error("pods is forbidden: exceeded quota (simulated)");
+      },
+      async refresh() {
+        return undefined;
+      },
+      async destroy() {
+        return undefined;
+      },
+      async inspect() {
+        return undefined;
+      },
+    };
+    const app = createControlPlane({ provisioner });
+    const created = await createSession(app);
+    const id = created.session.id;
+    // The rejection is handled asynchronously (catch → failed event + cleanup).
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const res = await app.request(`/sessions/${id}`);
+    // Session was cleaned up and the process is still alive to answer.
+    expect(res.status).toBe(404);
+  });
+
   it("auto-destroys the session when the agent publishes terminal.exited", async () => {
     type Call =
       | { op: "provision"; sessionId: string }

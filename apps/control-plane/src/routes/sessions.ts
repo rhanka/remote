@@ -262,7 +262,23 @@ export function createSessionsRouter(
           secret,
         });
       }
-      void provisioner.provision(descriptor, emit, provisionOptions);
+      // A provisioning failure (k8s API error, e.g. quota exceeded) must NOT
+      // crash the control-plane via an unhandled promise rejection — that would
+      // take down every other session (the store is in-process). Catch it,
+      // surface a `failed` lifecycle event, and clean up the orphaned record.
+      void provisioner
+        .provision(descriptor, emit, provisionOptions)
+        .catch((error: unknown) => {
+          console.error(
+            `[control-plane] provision failed for ${descriptor.id}:`,
+            error,
+          );
+          bus.publish(descriptor.id, "session.lifecycle.changed", {
+            previousState: "requested",
+            nextState: "failed",
+          });
+          stopSessionInternal(descriptor.id, "provision.failed");
+        });
       const response: CreateSessionResponse = { session: descriptor };
       return c.json(response, 201);
     },
