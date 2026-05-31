@@ -960,10 +960,19 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "-r, --resume [convId]",
       "resume the most recent (or a specific) conversation on the remote CLI",
     )
+    .option(
+      "--no-attach",
+      "create the remote session without hijacking this terminal; print the attach command instead (for bulk migration / reconnecting your own terminal)",
+    )
     .action(
       async (
         profile: string,
-        opts: { remote?: string; workspace?: string; resume?: string | true },
+        opts: {
+          remote?: string;
+          workspace?: string;
+          resume?: string | true;
+          attach?: boolean;
+        },
       ) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
         await migrateForward({
@@ -971,6 +980,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           remoteUrl,
           ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
           ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+          // commander sets opts.attach=false for --no-attach (default true).
+          ...(opts.attach === false ? { noAttach: true } : {}),
         });
       },
     );

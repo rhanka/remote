@@ -66,6 +66,13 @@ export type MigrateForwardOptions = {
    * Pass `true` for the most-recent conversation, or a specific id string.
    */
   readonly resume?: string | true;
+  /**
+   * When true, do NOT hijack the current terminal: push + create the remote
+   * session, print the `remote attach` command, and return. Used to migrate
+   * many sessions non-interactively and to let YOUR terminal reconnect to the
+   * remote session itself (rather than this process taking it over).
+   */
+  readonly noAttach?: boolean;
   /** Inject a custom fetch for tests. */
   readonly fetchImpl?: typeof fetch;
   /** Override process.cwd() for tests. */
@@ -396,11 +403,18 @@ export async function migrateForward(
   stderr.write(
     `[remote] migrated to remote session ${session.id} on ${remoteUrl} (workspace ${marker.workspaceId})\n`,
   );
+  // Step 5: hand off terminal — unless --no-attach (bulk / reconnect-yourself).
+  if (options.noAttach) {
+    stderr.write(
+      `[remote] session ready (not attached). Reconnect your terminal with:\n` +
+        `    remote attach ${remoteUrl} ${session.id}\n`,
+    );
+    return { workspaceId: marker.workspaceId, sessionId: session.id };
+  }
+
   stderr.write(
     `[remote] terminal is now REMOTE — press Ctrl+P Ctrl+Q to detach without stopping the session\n`,
   );
-
-  // Step 5: hand off terminal.
   const attached = await attach({
     baseUrl: remoteUrl,
     sessionId: session.id,

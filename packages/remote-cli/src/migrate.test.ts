@@ -297,6 +297,34 @@ describe("migrateForward", () => {
     expect(pushSession?.credentials).toBeUndefined();
   });
 
+  it("with noAttach: creates the session, does NOT attach, prints the attach command", async () => {
+    const stderr = stubStream();
+    mockCreateRemoteSession.mockImplementation(
+      (_url: string, body: { profile: string; workspaceSync?: boolean }) => {
+        if (body.workspaceSync && body.profile === "shell")
+          return Promise.resolve({ id: PUSH_SESSION_ID });
+        return Promise.resolve({ id: SESSION_ID });
+      },
+    );
+
+    const result = await migrateForward({
+      profile: "claude",
+      remoteUrl: REMOTE_URL,
+      noAttach: true,
+      cwd: makeTempCwd("forward-noattach"),
+      stderr,
+    });
+
+    expect(result.sessionId).toBe(SESSION_ID);
+    // attach is called once for the throwaway PUSH session, but NEVER for the
+    // main session when noAttach is set.
+    const mainAttach = (mockAttach.mock.calls as Array<[{ sessionId?: string }]>).find(
+      (c) => c[0]?.sessionId === SESSION_ID,
+    );
+    expect(mainAttach).toBeUndefined();
+    expect(stderr.lines.join("")).toContain(`remote attach ${REMOTE_URL} ${SESSION_ID}`);
+  });
+
   it("passes --resume args to createRemoteSession when resume is given", async () => {
     const stderr = stubStream();
     const capturedBodies: Array<{ profile: string; startupArgs?: readonly string[] }> = [];
