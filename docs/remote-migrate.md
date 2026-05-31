@@ -161,3 +161,37 @@ remote claude --resume
 | `--remote <url>` | Control-plane URL (defaults to `remote config show`) |
 | `--workspace <id>` | Pull from a specific workspace id (default: `.remote/workspace.json`) |
 | `--on-conflict <mode>` | `backup` or `keep-local` (default: block) |
+
+---
+
+## Validated on Scaleway Kapsule (migration POC, 2026-05-31)
+
+The forward path was validated end-to-end against the live SCW control-plane
+(`sentropic-remote` namespace, control-plane `v0.4.1`): 5 projects pushed to 5
+distinct workspaces, 5 sessions created and confirmed `Running`, project files
+present in each Pod's `/workspace`, and the terminal/attach channel live
+(`202 Accepted`). Gotchas worth knowing:
+
+- **The workspace source must be a git repo.** `workspace push` / `migrate
+  forward` archive **git-tracked files** (`git ls-files`, respecting
+  `.gitignore`). A non-git directory pushes nothing ("no files to sync"). Run
+  `git init` first if needed.
+- **One concurrent session per workspace.** Workspace PVCs are `ReadWriteOnce`
+  and Kapsule has no `ReadWriteMany` storage class (all `csi.scaleway.com` =
+  block/RWO). So you cannot co-mount one workspace into several live session
+  Pods at once. For **multi-agent-on-one-project**, give each agent its own
+  workspace and reconcile via `migrate back` / `workspace pull` (3-way merge),
+  or run them sequentially. (RWX co-mount is tracked tech debt.)
+- **Credentials are auto-bundled at session creation.** `migrate forward
+  <profile>` collects the local profile creds (`~/.codex/auth.json`,
+  `~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`) and sends them in
+  the create request — no manual `auth push` needed for a fresh session.
+  `remote auth push <sessionId>` is only for **refreshing** a running session's
+  creds.
+- **Reaching the control-plane.** With no public ingress, port-forward it:
+  `kubectl -n sentropic-remote port-forward svc/sentropic-remote-control-plane
+  8080:8080`, then `remote config set http://localhost:8080`. (A stable
+  `remote.<domain>` ingress is the durable alternative.)
+- **Capacity.** The `sentropic-remote` quota allows ~16 concurrent sessions;
+  node capacity is handled by the burst-pool autoscaler. Idle ("open but not
+  active") sessions cost little.
