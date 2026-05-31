@@ -54,6 +54,7 @@ import {
 } from "./session-restore.js";
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
+import { migrateForward, migrateBack } from "./migrate.js";
 
 import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
 
@@ -94,6 +95,13 @@ export type {
   SmokeRemoteProfileOptions,
   SmokeRemoteProfileResult,
 } from "./smoke.js";
+export { migrateForward, migrateBack } from "./migrate.js";
+export type {
+  MigrateForwardOptions,
+  MigrateForwardResult,
+  MigrateBackOptions,
+  MigrateBackResult,
+} from "./migrate.js";
 
 type ProfileOpts = {
   resume?: string | true;
@@ -369,7 +377,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       .option(
         "-p, --port <port>",
         "expose the in-process control-plane on this port",
-        (value) => Number(value),
+        (value: string) => Number(value),
       )
       .option(
         "--remote <url>",
@@ -924,6 +932,84 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stdout.write("[remote] no default remote configured\n");
       }
     });
+
+  // ---------------------------------------------------------------------------
+  // migrate
+  // ---------------------------------------------------------------------------
+
+  const migrateCommand = program
+    .command("migrate")
+    .description(
+      "Round-trip a local CLI session to a remote (SCW k8s) session and back",
+    );
+
+  migrateCommand
+    .command("forward <profile>")
+    .description(
+      "Migrate the current terminal session to a remote k8s session for <profile>. " +
+        "Links the cwd to a workspace (or reuses the existing one), pushes project files, " +
+        "creates a remote session, and hands off this terminal to it. " +
+        "Press Ctrl+P Ctrl+Q to detach without stopping the remote session.",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--workspace <id>",
+      "workspace id to bind (defaults to .remote/workspace.json or creates a new workspace)",
+    )
+    .option(
+      "-r, --resume [convId]",
+      "resume the most recent (or a specific) conversation on the remote CLI",
+    )
+    .action(
+      async (
+        profile: string,
+        opts: { remote?: string; workspace?: string; resume?: string | true },
+      ) => {
+        const remoteUrl = getConfiguredRemote(opts.remote);
+        await migrateForward({
+          profile,
+          remoteUrl,
+          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+          ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+        });
+      },
+    );
+
+  migrateCommand
+    .command("back")
+    .description(
+      "Pull the remote workspace and conversation state back to local, stop the remote session, " +
+        "and print the command to resume the CLI locally. Does NOT spawn the local CLI.",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--workspace <id>",
+      "workspace id to pull (defaults to .remote/workspace.json)",
+    )
+    .option(
+      "--on-conflict <mode>",
+      "conflict resolution for diverged conversations: backup | keep-local (default: block)",
+    )
+    .action(
+      async (opts: {
+        remote?: string;
+        workspace?: string;
+        onConflict?: string;
+      }) => {
+        const remoteUrl = getConfiguredRemote(opts.remote);
+        const onConflict =
+          opts.onConflict === "backup"
+            ? ("backup" as const)
+            : opts.onConflict === "keep-local"
+              ? ("keep-local" as const)
+              : ("block" as const);
+        await migrateBack({
+          remoteUrl,
+          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+          onConflict,
+        });
+      },
+    );
 
   program
     .command("attach <urlOrSessionId> [sessionId]")
