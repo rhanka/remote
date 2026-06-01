@@ -18,6 +18,9 @@ Apply them first; this Makefile won't touch them.
 ## Differences vs `deploy/k3s/`
 
 - `imagePullPolicy: Always` so Kapsule pulls from GHCR every rollout.
+- The SCW POC manifest tracks the GHCR `:main` images so urgent migration
+  fixes can be deployed immediately after the main-branch image workflow
+  finishes. Pin a release tag again once the migration POC is stable.
 - `SESSION_STORAGE_CLASS=matchid-rwx` +
   `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany` env (Scaleway File Storage CSI,
   via the shared `poc-k8s` StorageClass).
