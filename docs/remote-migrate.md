@@ -181,15 +181,19 @@ forward` archive **git-tracked files** (`git ls-files`, respecting
   `matchid-rwx`. The SCW manifest now requests
   `SESSION_STORAGE_CLASS=matchid-rwx`,
   `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany`,
-  `SESSION_WORKSPACE_SIZE=100G` (Scaleway File Storage minimum, decimal-sized), and schedules
-  session Pods on
+  `SESSION_WORKSPACE_SIZE=100G` (Scaleway File Storage minimum, decimal-sized),
+  and schedules session Pods on
   `k8s.scaleway.com/pool-name=burst-rwx`, whose POP2 nodes are compatible with
   File Storage CSI. Do not use the older `burst` pool unless it has been
   recreated as POP2; on existing POC clusters it may still be DEV1-XL. This
   removes the Kubernetes co-mount blocker for several live session Pods on one
-  workspace PVC. It does **not** remove application-level contention: for the
-  5-session migration POC, prefer one real project per workspace unless
-  intentionally testing multi-agent edits on the same project.
+  workspace PVC. For several distinct workspace PVCs, keep the `burst-rwx` pool
+  `max-size` at least as high as the number of active File Storage volumes; the
+  5-session POC used `min-size=0`, `max-size=5`, and a temporary `size=5` after
+  Kapsule reported `exceed max volume count` on three POP2 nodes. It does
+  **not** remove application-level contention: for the 5-session migration POC,
+  prefer one real project per workspace unless intentionally testing multi-agent
+  edits on the same project.
 - **Credentials are auto-bundled at session creation.** `migrate forward
 <profile>` collects the local profile creds (`~/.codex/auth.json`,
   `~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`) and sends them in

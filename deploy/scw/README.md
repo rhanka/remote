@@ -29,6 +29,10 @@ Apply them first; this Makefile won't touch them.
 - `SESSION_NODE_SELECTOR=k8s.scaleway.com/pool-name=burst-rwx` so session Pods
   land on the POP2 burst pool required by File Storage CSI. The older `burst`
   pool can be DEV1-XL on existing clusters and is not sufficient for RWX.
+- The POC `burst-rwx` pool must allow enough nodes for the active workspace
+  volumes. During the 5-session migration POC it was set to `min-size=0`,
+  `max-size=5`, `size=5`, because Kapsule reported `exceed max volume count`
+  when five File Storage volumes tried to share three POP2 nodes.
 - Resource requests/limits sized for a real workload (100m/128Mi → 500m/512Mi).
 - Optional Ingress via Traefik + cert-manager Let's Encrypt.
 
