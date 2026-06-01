@@ -1,6 +1,7 @@
 import type { SessionDescriptor } from "@sentropic/remote-protocol";
 
 export type ResourceQuantities = Readonly<Record<string, string>>;
+export type K8sPvcAccessMode = "ReadWriteOnce" | "ReadWriteMany";
 
 export type K8sVolumeMount = {
   readonly name: string;
@@ -32,6 +33,7 @@ export type K8sPodSpec = {
   };
   readonly spec: {
     readonly restartPolicy: "Never";
+    readonly nodeSelector?: Readonly<Record<string, string>>;
     readonly containers: ReadonlyArray<{
       readonly name: string;
       readonly image: string;
@@ -59,7 +61,7 @@ export type K8sPvcSpec = {
     readonly labels: Readonly<Record<string, string>>;
   };
   readonly spec: {
-    readonly accessModes: ReadonlyArray<"ReadWriteOnce">;
+    readonly accessModes: ReadonlyArray<K8sPvcAccessMode>;
     readonly resources: { readonly requests: ResourceQuantities };
     readonly storageClassName?: string;
   };
@@ -82,6 +84,8 @@ export type SpecBuilderOptions = {
   readonly image: string;
   readonly imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
   readonly storageClassName?: string;
+  readonly storageAccessMode?: K8sPvcAccessMode;
+  readonly nodeSelector?: Readonly<Record<string, string>>;
   readonly defaultWorkspaceSize: string;
   readonly controlPlaneEndpoint: string;
   readonly home: string;
@@ -95,6 +99,7 @@ const AUTH_STAGING_DIR = "/run/auth-bundle";
 export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
   namespace: "sentropic-remote",
   image: "ghcr.io/rhanka/sentropic-remote-session-agent:v0.4.1",
+  storageAccessMode: "ReadWriteOnce",
   defaultWorkspaceSize: "1Gi",
   controlPlaneEndpoint: "http://sentropic-remote-control-plane:8080",
   home: "/root",
@@ -147,7 +152,7 @@ export function buildWorkspacePvcSpec(
       },
     },
     spec: {
-      accessModes: ["ReadWriteOnce"],
+      accessModes: [options.storageAccessMode ?? "ReadWriteOnce"],
       resources: {
         requests: {
           storage: options.defaultWorkspaceSize,
@@ -174,7 +179,7 @@ export function buildSessionPvcSpec(
       labels: sessionLabels(descriptor),
     },
     spec: {
-      accessModes: ["ReadWriteOnce"],
+      accessModes: [options.storageAccessMode ?? "ReadWriteOnce"],
       resources: {
         requests: {
           storage: options.defaultWorkspaceSize,
@@ -284,6 +289,9 @@ export function buildSessionPodSpec(
     },
     spec: {
       restartPolicy: "Never",
+      ...(options.nodeSelector && Object.keys(options.nodeSelector).length > 0
+        ? { nodeSelector: options.nodeSelector }
+        : {}),
       containers: [
         {
           name: POD_CONTAINER,
@@ -300,7 +308,12 @@ export function buildSessionPodSpec(
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: options.home },
             ...(descriptor.workspaceId
-              ? [{ name: "SESSION_WORKSPACE_ID", value: descriptor.workspaceId }]
+              ? [
+                  {
+                    name: "SESSION_WORKSPACE_ID",
+                    value: descriptor.workspaceId,
+                  },
+                ]
               : []),
             ...(workspaceSync
               ? [{ name: "SESSION_WORKSPACE_SYNC", value: "1" }]
@@ -324,7 +337,12 @@ export function buildSessionPodSpec(
                 ]
               : []),
             ...(startupArgs.length > 0
-              ? [{ name: "SESSION_STARTUP_ARGS", value: JSON.stringify(startupArgs) }]
+              ? [
+                  {
+                    name: "SESSION_STARTUP_ARGS",
+                    value: JSON.stringify(startupArgs),
+                  },
+                ]
               : []),
           ],
           volumeMounts,

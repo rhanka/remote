@@ -98,11 +98,11 @@ remote migrate back [--remote <url>] [--workspace <id>] [--on-conflict <mode>]
 
 When both local and remote have diverged for the same file or conversation:
 
-| `--on-conflict` | behaviour |
-|---|---|
-| (omitted — default) | block: leave conflict markers, exit 1 |
-| `backup` | duplicate local under a fresh conversation id, then take remote |
-| `keep-local` | discard remote changes for diverged items |
+| `--on-conflict`     | behaviour                                                       |
+| ------------------- | --------------------------------------------------------------- |
+| (omitted — default) | block: leave conflict markers, exit 1                           |
+| `backup`            | duplicate local under a fresh conversation id, then take remote |
+| `keep-local`        | discard remote changes for diverged items                       |
 
 ### Example
 
@@ -148,19 +148,19 @@ remote claude --resume
 
 ### `migrate forward <profile>`
 
-| Flag | Description |
-|---|---|
-| `--remote <url>` | Control-plane URL (defaults to `remote config show`) |
-| `--workspace <id>` | Bind to a specific workspace id (default: `.remote/workspace.json`) |
-| `-r, --resume [convId]` | Pass the profile's native resume flag to the remote CLI |
+| Flag                    | Description                                                         |
+| ----------------------- | ------------------------------------------------------------------- |
+| `--remote <url>`        | Control-plane URL (defaults to `remote config show`)                |
+| `--workspace <id>`      | Bind to a specific workspace id (default: `.remote/workspace.json`) |
+| `-r, --resume [convId]` | Pass the profile's native resume flag to the remote CLI             |
 
 ### `migrate back`
 
-| Flag | Description |
-|---|---|
-| `--remote <url>` | Control-plane URL (defaults to `remote config show`) |
-| `--workspace <id>` | Pull from a specific workspace id (default: `.remote/workspace.json`) |
-| `--on-conflict <mode>` | `backup` or `keep-local` (default: block) |
+| Flag                   | Description                                                           |
+| ---------------------- | --------------------------------------------------------------------- |
+| `--remote <url>`       | Control-plane URL (defaults to `remote config show`)                  |
+| `--workspace <id>`     | Pull from a specific workspace id (default: `.remote/workspace.json`) |
+| `--on-conflict <mode>` | `backup` or `keep-local` (default: block)                             |
 
 ---
 
@@ -173,25 +173,61 @@ present in each Pod's `/workspace`, and the terminal/attach channel live
 (`202 Accepted`). Gotchas worth knowing:
 
 - **The workspace source must be a git repo.** `workspace push` / `migrate
-  forward` archive **git-tracked files** (`git ls-files`, respecting
+forward` archive **git-tracked files** (`git ls-files`, respecting
   `.gitignore`). A non-git directory pushes nothing ("no files to sync"). Run
   `git init` first if needed.
-- **One concurrent session per workspace.** Workspace PVCs are `ReadWriteOnce`
-  and Kapsule has no `ReadWriteMany` storage class (all `csi.scaleway.com` =
-  block/RWO). So you cannot co-mount one workspace into several live session
-  Pods at once. For **multi-agent-on-one-project**, give each agent its own
-  workspace and reconcile via `migrate back` / `workspace pull` (3-way merge),
-  or run them sequentially. (RWX co-mount is tracked tech debt.)
+- **RWX storage exists on the SCW POC cluster.** Scaleway File Storage CSI
+  (`filestorage.csi.scaleway.com`) is exposed in `poc-k8s` as StorageClass
+  `matchid-rwx`. The SCW manifest now requests
+  `SESSION_STORAGE_CLASS=matchid-rwx`,
+  `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany`, and schedules session Pods on
+  `k8s.scaleway.com/pool-name=burst`, whose POP2 nodes are compatible with File
+  Storage CSI. This removes the Kubernetes co-mount blocker for several live
+  session Pods on one workspace PVC. It does **not** remove application-level
+  contention: for the 5-session migration POC, prefer one real project per
+  workspace unless intentionally testing multi-agent edits on the same project.
 - **Credentials are auto-bundled at session creation.** `migrate forward
-  <profile>` collects the local profile creds (`~/.codex/auth.json`,
+<profile>` collects the local profile creds (`~/.codex/auth.json`,
   `~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`) and sends them in
   the create request — no manual `auth push` needed for a fresh session.
   `remote auth push <sessionId>` is only for **refreshing** a running session's
   creds.
 - **Reaching the control-plane.** With no public ingress, port-forward it:
   `kubectl -n sentropic-remote port-forward svc/sentropic-remote-control-plane
-  8080:8080`, then `remote config set http://localhost:8080`. (A stable
+8080:8080`, then `remote config set http://localhost:8080`. (A stable
   `remote.<domain>` ingress is the durable alternative.)
-- **Capacity.** The `sentropic-remote` quota allows ~16 concurrent sessions;
-  node capacity is handled by the burst-pool autoscaler. Idle ("open but not
-  active") sessions cost little.
+- **Capacity.** Node capacity is handled by the `burst` pool autoscaler. Before
+  bulk creation, check the live `sentropic-remote` quota (`pods`, PVCs, Secrets,
+  CPU/memory) because older `poc-k8s` manifests capped practical concurrency to
+  4 session Pods while the target POC needs 5.
+
+## Bulk migration checklist for real sessions
+
+Use this when migrating several currently local projects without inventing
+sessions or workspace ids:
+
+```bash
+# One terminal keeps the control-plane reachable when no public ingress is used.
+make -C ../poc-k8s tenant-port-forward \
+  TENANT=sentropic-remote SVC=sentropic-remote-control-plane PORT=8080
+remote config set http://localhost:8080
+
+# Prove the cluster-side RWX path before creating the batch.
+make -C ../poc-k8s filestorage-csi-status
+kubectl -n sentropic-remote get resourcequota,pvc,pods
+
+# For each real project directory:
+cd ~/src/<real-project>
+git status --short --branch
+remote workspace status || remote workspace link --name <real-project>
+remote migrate forward codex --resume --no-attach
+
+# After the batch:
+remote ls
+kubectl -n sentropic-remote get pods,pvc -o wide
+```
+
+`--no-attach` is the right mode for "open but not active" sessions: it creates
+the remote session and prints the `remote attach <url> <sessionId>` command
+without hijacking the current terminal. Reconnect a local terminal with that
+attach command when you want to work in the remote PTY.

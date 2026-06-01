@@ -114,6 +114,7 @@ export {
   resourceNames,
   sessionLabels,
   type K8sPodSpec,
+  type K8sPvcAccessMode,
   type K8sPvcSpec,
   type K8sSecretSpec,
   type K8sVolume,

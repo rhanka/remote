@@ -18,7 +18,11 @@ Apply them first; this Makefile won't touch them.
 ## Differences vs `deploy/k3s/`
 
 - `imagePullPolicy: Always` so Kapsule pulls from GHCR every rollout.
-- `SESSION_STORAGE_CLASS=scw-bssd` env (Scaleway Block Storage, ReadWriteOnce).
+- `SESSION_STORAGE_CLASS=matchid-rwx` +
+  `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany` env (Scaleway File Storage CSI,
+  via the shared `poc-k8s` StorageClass).
+- `SESSION_NODE_SELECTOR=k8s.scaleway.com/pool-name=burst` so session Pods land
+  on the POP2 burst pool required by File Storage CSI.
 - Resource requests/limits sized for a real workload (100m/128Mi → 500m/512Mi).
 - Optional Ingress via Traefik + cert-manager Let's Encrypt.
 
@@ -26,7 +30,8 @@ Apply them first; this Makefile won't touch them.
 
 ```bash
 make kubeconfig                     # ~/.kube/poc.yaml
-make apply-platform apply-sentropic-remote
+make filestorage-csi-enable apply-platform apply-sentropic-remote
+make filestorage-csi-status         # confirms filestorage.csi.scaleway.com + matchid-rwx
 ```
 
 ## Deploy this tenant
@@ -56,6 +61,18 @@ make -C ../poc-k8s tenant-port-forward \
   TENANT=sentropic-remote SVC=sentropic-remote-control-plane PORT=8080
 remote codex --remote http://localhost:8080
 ```
+
+For bulk migration of local projects into open-but-detached remote sessions,
+run from each real project directory:
+
+```bash
+remote migrate forward codex --resume --no-attach
+remote ls
+```
+
+The command links/reuses that project's workspace, pushes git-tracked files to
+the RWX PVC, creates the remote session, and prints the attach command to use
+when reconnecting a local terminal.
 
 The CLI bundles your local `~/.codex/auth.json` (and equivalents for claude /
 antigravity) as a per-session K8s Secret mounted readonly in the Pod, so the

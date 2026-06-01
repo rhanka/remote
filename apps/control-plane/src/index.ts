@@ -47,6 +47,8 @@ type InjectWebSocket = ReturnType<
   typeof createNodeWebSocket
 >["injectWebSocket"];
 
+type StorageAccessMode = "ReadWriteOnce" | "ReadWriteMany";
+
 export type ControlPlaneApp = Hono<{ Variables: ValidationVars }> & {
   injectWebSocket: InjectWebSocket;
 };
@@ -168,6 +170,8 @@ export function provisionerFromEnv(): SessionProvisioner {
     image?: string;
     imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
     storageClassName?: string;
+    storageAccessMode?: StorageAccessMode;
+    nodeSelector?: Record<string, string>;
     controlPlaneEndpoint?: string;
   } = { namespace };
   if (process.env.SESSION_AGENT_IMAGE)
@@ -182,12 +186,45 @@ export function provisionerFromEnv(): SessionProvisioner {
   }
   if (process.env.SESSION_STORAGE_CLASS)
     overrides.storageClassName = process.env.SESSION_STORAGE_CLASS;
+  if (process.env.SESSION_STORAGE_ACCESS_MODE)
+    overrides.storageAccessMode = parseStorageAccessMode(
+      process.env.SESSION_STORAGE_ACCESS_MODE,
+    );
+  if (process.env.SESSION_NODE_SELECTOR)
+    overrides.nodeSelector = parseNodeSelector(
+      process.env.SESSION_NODE_SELECTOR,
+    );
   if (process.env.CONTROL_PLANE_ENDPOINT)
     overrides.controlPlaneEndpoint = process.env.CONTROL_PLANE_ENDPOINT;
   return new K8sSessionProvisioner(
     KubernetesObjectApiClient.fromDefault(),
     overrides,
   );
+}
+
+function parseStorageAccessMode(raw: string): StorageAccessMode {
+  if (raw === "ReadWriteOnce" || raw === "ReadWriteMany") return raw;
+  throw new Error(
+    `Invalid SESSION_STORAGE_ACCESS_MODE "${raw}". Expected ReadWriteOnce or ReadWriteMany.`,
+  );
+}
+
+function parseNodeSelector(raw: string): Record<string, string> {
+  const selector: Record<string, string> = {};
+  for (const entry of raw.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0 || separator === trimmed.length - 1) {
+      throw new Error(
+        `Invalid SESSION_NODE_SELECTOR entry "${trimmed}". Expected key=value pairs separated by commas.`,
+      );
+    }
+    selector[trimmed.slice(0, separator).trim()] = trimmed
+      .slice(separator + 1)
+      .trim();
+  }
+  return selector;
 }
 
 export async function startControlPlane(): Promise<void> {

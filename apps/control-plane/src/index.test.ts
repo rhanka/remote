@@ -20,7 +20,7 @@ import { Ajv } from "ajv";
 import addFormats from "ajv-formats";
 import { describe, expect, it, vi } from "vitest";
 
-import { createControlPlane } from "./index.js";
+import { createControlPlane, provisionerFromEnv } from "./index.js";
 import { SessionEventBus } from "./sessions/events.js";
 
 const validRequest: CreateSessionRequest = {
@@ -60,6 +60,40 @@ describe("control plane", () => {
     });
   });
 
+  it("threads File Storage RWX and node selector env into the k8s provisioner", () => {
+    const saved = {
+      K8S_NAMESPACE: process.env.K8S_NAMESPACE,
+      SESSION_STORAGE_CLASS: process.env.SESSION_STORAGE_CLASS,
+      SESSION_STORAGE_ACCESS_MODE: process.env.SESSION_STORAGE_ACCESS_MODE,
+      SESSION_NODE_SELECTOR: process.env.SESSION_NODE_SELECTOR,
+    };
+    try {
+      process.env.K8S_NAMESPACE = "sentropic-remote";
+      process.env.SESSION_STORAGE_CLASS = "matchid-rwx";
+      process.env.SESSION_STORAGE_ACCESS_MODE = "ReadWriteMany";
+      process.env.SESSION_NODE_SELECTOR = "k8s.scaleway.com/pool-name=burst";
+
+      const provisioner = provisionerFromEnv() as unknown as {
+        options: {
+          storageClassName?: string;
+          storageAccessMode?: string;
+          nodeSelector?: Record<string, string>;
+        };
+      };
+
+      expect(provisioner.options.storageClassName).toBe("matchid-rwx");
+      expect(provisioner.options.storageAccessMode).toBe("ReadWriteMany");
+      expect(provisioner.options.nodeSelector).toEqual({
+        "k8s.scaleway.com/pool-name": "burst",
+      });
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("serves an OpenAPI 3.1 document referencing protocol components", async () => {
     const app = createControlPlane();
     const response = await app.request("/openapi.json");
@@ -88,7 +122,9 @@ describe("control plane", () => {
 
     // The bearer security scheme is declared and applied document-wide.
     const securitySchemes = (
-      doc.components as { securitySchemes?: Record<string, { scheme?: string }> }
+      doc.components as {
+        securitySchemes?: Record<string, { scheme?: string }>;
+      }
     ).securitySchemes;
     expect(securitySchemes?.bearerAuth?.scheme).toBe("bearer");
     expect(doc.security).toEqual([{ bearerAuth: [] }]);
@@ -570,7 +606,11 @@ describe("control plane", () => {
     type Call =
       | { op: "provisionWorkspace"; id: string }
       | { op: "destroyWorkspace"; id: string }
-      | { op: "provision"; sessionId: string; workspaceId?: string | undefined };
+      | {
+          op: "provision";
+          sessionId: string;
+          workspaceId?: string | undefined;
+        };
     const calls: Call[] = [];
     const provisioner = {
       async provision(descriptor: { id: string; workspaceId?: string }) {
@@ -614,7 +654,11 @@ describe("control plane", () => {
     await app.request("/sessions", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ profile: "shell", target: "k3s", workspaceId: wsId }),
+      body: JSON.stringify({
+        profile: "shell",
+        target: "k3s",
+        workspaceId: wsId,
+      }),
     });
     expect(
       calls.some((c) => c.op === "provision" && c.workspaceId === wsId),
@@ -809,7 +853,8 @@ describe("control plane", () => {
     process.env.REMOTE_AUTH = "bearer";
     delete process.env.REMOTE_AUTH_SECRET;
     delete process.env.REMOTE_SESSION_TOKEN_SECRET;
-    process.env.REMOTE_AUTH_JWKS_URL = "https://issuer.example/.well-known/jwks.json";
+    process.env.REMOTE_AUTH_JWKS_URL =
+      "https://issuer.example/.well-known/jwks.json";
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       createControlPlane();

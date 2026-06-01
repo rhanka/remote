@@ -5,6 +5,7 @@ import {
   DEFAULT_BUILDER_OPTIONS,
   buildSessionPodSpec,
   buildSessionPvcSpec,
+  buildWorkspacePvcSpec,
   resourceNames,
   sessionLabels,
 } from "./spec.js";
@@ -65,6 +66,24 @@ describe("k8s spec builders", () => {
     expect(container.resources?.requests?.memory).toBe("256Mi");
   });
 
+  it("can build File Storage RWX PVCs when the access mode is overridden", () => {
+    const sessionPvc = buildSessionPvcSpec(baseDescriptor, {
+      ...DEFAULT_BUILDER_OPTIONS,
+      storageClassName: "matchid-rwx",
+      storageAccessMode: "ReadWriteMany",
+    });
+    expect(sessionPvc.spec.storageClassName).toBe("matchid-rwx");
+    expect(sessionPvc.spec.accessModes).toEqual(["ReadWriteMany"]);
+
+    const workspacePvc = buildWorkspacePvcSpec("ws-rwx", {
+      ...DEFAULT_BUILDER_OPTIONS,
+      storageClassName: "matchid-rwx",
+      storageAccessMode: "ReadWriteMany",
+    });
+    expect(workspacePvc.spec.storageClassName).toBe("matchid-rwx");
+    expect(workspacePvc.spec.accessModes).toEqual(["ReadWriteMany"]);
+  });
+
   it("builds a Pod that mounts the PVC at the workspace path", () => {
     const pod = buildSessionPodSpec(baseDescriptor);
     expect(pod.kind).toBe("Pod");
@@ -92,6 +111,17 @@ describe("k8s spec builders", () => {
     }
   });
 
+  it("can target session Pods to a specific node pool", () => {
+    const pod = buildSessionPodSpec(baseDescriptor, {
+      ...DEFAULT_BUILDER_OPTIONS,
+      nodeSelector: { "k8s.scaleway.com/pool-name": "burst" },
+    });
+
+    expect(pod.spec.nodeSelector).toEqual({
+      "k8s.scaleway.com/pool-name": "burst",
+    });
+  });
+
   it("mounts the retained workspace PVC when the session is bound to a workspace", () => {
     const bound: SessionDescriptor = {
       ...baseDescriptor,
@@ -109,7 +139,9 @@ describe("k8s spec builders", () => {
     const unbound = buildSessionPodSpec(baseDescriptor);
     const uvol = unbound.spec.volumes.find((v) => v.name === "workspace");
     if (uvol && "persistentVolumeClaim" in uvol) {
-      expect(uvol.persistentVolumeClaim.claimName).toMatch(/^session-.*-workspace$/);
+      expect(uvol.persistentVolumeClaim.claimName).toMatch(
+        /^session-.*-workspace$/,
+      );
     }
   });
 
@@ -121,7 +153,12 @@ describe("k8s spec builders", () => {
       ),
     ).toBeUndefined();
 
-    const on = buildSessionPodSpec(baseDescriptor, DEFAULT_BUILDER_OPTIONS, [], true);
+    const on = buildSessionPodSpec(
+      baseDescriptor,
+      DEFAULT_BUILDER_OPTIONS,
+      [],
+      true,
+    );
     expect(
       on.spec.containers[0]!.env.find(
         (e) => e.name === "SESSION_WORKSPACE_SYNC",
@@ -138,7 +175,9 @@ describe("k8s spec builders", () => {
     };
     const pod = buildSessionPodSpec(descriptor);
     const env = pod.spec.containers[0]!.env;
-    const startupEnv = env.find((entry) => entry.name === "SESSION_STARTUP_ARGS");
+    const startupEnv = env.find(
+      (entry) => entry.name === "SESSION_STARTUP_ARGS",
+    );
     expect(startupEnv?.value).toBe(JSON.stringify(["config", "install"]));
   });
 
@@ -166,9 +205,7 @@ describe("k8s spec builders", () => {
       (entry) => entry.name === "SESSION_AUTH_BUNDLE_PATHS",
     );
     expect(stagingEnv?.value).toBe("/run/auth-bundle");
-    expect(pathsEnv?.value).toBe(
-      ".codex/auth.json:.claude/.credentials.json",
-    );
+    expect(pathsEnv?.value).toBe(".codex/auth.json:.claude/.credentials.json");
 
     const authVolume = pod.spec.volumes.find((vol) => vol.name === "auth");
     expect(authVolume).toBeDefined();
