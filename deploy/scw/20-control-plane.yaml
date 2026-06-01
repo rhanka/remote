@@ -39,7 +39,7 @@ spec:
             - name: SESSION_STORAGE_ACCESS_MODE
               value: "ReadWriteMany"
             - name: SESSION_NODE_SELECTOR
-              value: "k8s.scaleway.com/pool-name=burst"
+              value: "k8s.scaleway.com/pool-name=burst-rwx"
           ports:
             - name: http
               containerPort: 8080

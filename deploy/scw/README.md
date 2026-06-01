@@ -24,8 +24,9 @@ Apply them first; this Makefile won't touch them.
 - `SESSION_STORAGE_CLASS=matchid-rwx` +
   `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany` env (Scaleway File Storage CSI,
   via the shared `poc-k8s` StorageClass).
-- `SESSION_NODE_SELECTOR=k8s.scaleway.com/pool-name=burst` so session Pods land
-  on the POP2 burst pool required by File Storage CSI.
+- `SESSION_NODE_SELECTOR=k8s.scaleway.com/pool-name=burst-rwx` so session Pods
+  land on the POP2 burst pool required by File Storage CSI. The older `burst`
+  pool can be DEV1-XL on existing clusters and is not sufficient for RWX.
 - Resource requests/limits sized for a real workload (100m/128Mi → 500m/512Mi).
 - Optional Ingress via Traefik + cert-manager Let's Encrypt.
 
