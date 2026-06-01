@@ -171,6 +171,7 @@ export function provisionerFromEnv(): SessionProvisioner {
     imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
     storageClassName?: string;
     storageAccessMode?: StorageAccessMode;
+    defaultWorkspaceSize?: string;
     nodeSelector?: Record<string, string>;
     controlPlaneEndpoint?: string;
   } = { namespace };
@@ -190,6 +191,8 @@ export function provisionerFromEnv(): SessionProvisioner {
     overrides.storageAccessMode = parseStorageAccessMode(
       process.env.SESSION_STORAGE_ACCESS_MODE,
     );
+  if (process.env.SESSION_WORKSPACE_SIZE)
+    overrides.defaultWorkspaceSize = process.env.SESSION_WORKSPACE_SIZE;
   if (process.env.SESSION_NODE_SELECTOR)
     overrides.nodeSelector = parseNodeSelector(
       process.env.SESSION_NODE_SELECTOR,

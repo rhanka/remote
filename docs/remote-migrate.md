@@ -180,7 +180,9 @@ forward` archive **git-tracked files** (`git ls-files`, respecting
   (`filestorage.csi.scaleway.com`) is exposed in `poc-k8s` as StorageClass
   `matchid-rwx`. The SCW manifest now requests
   `SESSION_STORAGE_CLASS=matchid-rwx`,
-  `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany`, and schedules session Pods on
+  `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany`,
+  `SESSION_WORKSPACE_SIZE=100Gi` (Scaleway File Storage minimum), and schedules
+  session Pods on
   `k8s.scaleway.com/pool-name=burst-rwx`, whose POP2 nodes are compatible with
   File Storage CSI. Do not use the older `burst` pool unless it has been
   recreated as POP2; on existing POC clusters it may still be DEV1-XL. This
