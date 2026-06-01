@@ -72,7 +72,7 @@ describe("control plane", () => {
       process.env.K8S_NAMESPACE = "sentropic-remote";
       process.env.SESSION_STORAGE_CLASS = "matchid-rwx";
       process.env.SESSION_STORAGE_ACCESS_MODE = "ReadWriteMany";
-      process.env.SESSION_WORKSPACE_SIZE = "100Gi";
+      process.env.SESSION_WORKSPACE_SIZE = "100G";
       process.env.SESSION_NODE_SELECTOR = "k8s.scaleway.com/pool-name=burst";
 
       const provisioner = provisionerFromEnv() as unknown as {
@@ -86,7 +86,7 @@ describe("control plane", () => {
 
       expect(provisioner.options.storageClassName).toBe("matchid-rwx");
       expect(provisioner.options.storageAccessMode).toBe("ReadWriteMany");
-      expect(provisioner.options.defaultWorkspaceSize).toBe("100Gi");
+      expect(provisioner.options.defaultWorkspaceSize).toBe("100G");
       expect(provisioner.options.nodeSelector).toEqual({
         "k8s.scaleway.com/pool-name": "burst",
       });

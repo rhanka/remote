@@ -181,7 +181,7 @@ forward` archive **git-tracked files** (`git ls-files`, respecting
   `matchid-rwx`. The SCW manifest now requests
   `SESSION_STORAGE_CLASS=matchid-rwx`,
   `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany`,
-  `SESSION_WORKSPACE_SIZE=100Gi` (Scaleway File Storage minimum), and schedules
+  `SESSION_WORKSPACE_SIZE=100G` (Scaleway File Storage minimum, decimal-sized), and schedules
   session Pods on
   `k8s.scaleway.com/pool-name=burst-rwx`, whose POP2 nodes are compatible with
   File Storage CSI. Do not use the older `burst` pool unless it has been

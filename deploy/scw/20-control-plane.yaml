@@ -39,7 +39,7 @@ spec:
             - name: SESSION_STORAGE_ACCESS_MODE
               value: "ReadWriteMany"
             - name: SESSION_WORKSPACE_SIZE
-              value: "100Gi"
+              value: "100G"
             - name: SESSION_NODE_SELECTOR
               value: "k8s.scaleway.com/pool-name=burst-rwx"
           ports:

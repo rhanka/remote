@@ -24,8 +24,8 @@ Apply them first; this Makefile won't touch them.
 - `SESSION_STORAGE_CLASS=matchid-rwx` +
   `SESSION_STORAGE_ACCESS_MODE=ReadWriteMany` env (Scaleway File Storage CSI,
   via the shared `poc-k8s` StorageClass).
-- `SESSION_WORKSPACE_SIZE=100Gi`, because Scaleway File Storage rejects smaller
-  PVC requests.
+- `SESSION_WORKSPACE_SIZE=100G`, because Scaleway File Storage rejects smaller
+  PVC requests and requires decimal-gigabyte sizing.
 - `SESSION_NODE_SELECTOR=k8s.scaleway.com/pool-name=burst-rwx` so session Pods
   land on the POP2 burst pool required by File Storage CSI. The older `burst`
   pool can be DEV1-XL on existing clusters and is not sufficient for RWX.
