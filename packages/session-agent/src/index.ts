@@ -1,6 +1,7 @@
 import { chmodSync, copyFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import type { SessionAnnounce } from "@sentropic/remote-protocol";
 import { SessionAgent } from "./agent.js";
 import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
@@ -163,8 +164,38 @@ export async function main(): Promise<void> {
   const wsUrl = controlPlaneEndpoint
     .replace(/^http:/, "ws:")
     .replace(/^https:/, "wss:");
+
+  // Build the session.announce base from environment variables.
+  // Secret-free: no credentials, tokens, or auth material.
+  // We construct the object imperatively to satisfy exactOptionalPropertyTypes.
+  const announceBase: SessionAnnounce = (() => {
+    const a: SessionAnnounce = {
+      sessionId,
+      profile: profile as SessionAnnounce["profile"],
+      workspacePath,
+    };
+    const target = process.env.SESSION_TARGET as SessionAnnounce["target"] | undefined;
+    if (target !== undefined) a.target = target;
+    const workspaceId = process.env.SESSION_WORKSPACE_ID;
+    if (workspaceId !== undefined) a.workspaceId = workspaceId;
+    return a;
+  })();
+
   const transport = await connectWebSocketTransport(
     `${wsUrl}/sessions/${sessionId}/agent`,
+    {
+      onOpen(send) {
+        // Refresh cliSessionId on each reconnect so the announce is current.
+        const cliSessionId = detectCliSessionId(profile, process.env.HOME ?? "/root");
+        const body: SessionAnnounce = { ...announceBase };
+        if (cliSessionId !== undefined) body.cliSessionId = cliSessionId;
+        const frame: { type: string; body: SessionAnnounce } = {
+          type: "session.announce",
+          body,
+        };
+        send(JSON.stringify(frame));
+      },
+    },
   );
 
   const spawner =
@@ -223,7 +254,11 @@ export async function main(): Promise<void> {
     }
   })();
 
-  await transport.closed;
+  // Gate process lifetime on the wrapped PTY exiting, NOT on the socket
+  // closing. A transient control-plane restart drops the socket but the agent
+  // self-heals (reconnects + re-announces). Only the deliberate PTY exit path
+  // (terminal.exited → transport.close()) resolves agent.done.
+  await agent.done;
 }
 
 const entrypoint = process.argv[1] ?? "";

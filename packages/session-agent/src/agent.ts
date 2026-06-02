@@ -107,6 +107,15 @@ export class SessionAgent {
   private terminalId = "";
   private stopped = false;
 
+  /**
+   * Resolves when the wrapped process exits (after `terminal.exited` is
+   * published and the transport is closed). Use this in `main()` to gate
+   * process lifetime on the PTY, not the socket.
+   */
+  readonly done: Promise<void>;
+
+  private doneResolve!: () => void;
+
   constructor(options: SessionAgentOptions) {
     this.sessionId = options.sessionId;
     this.profile = options.profile;
@@ -117,6 +126,9 @@ export class SessionAgent {
     this.randomId = options.randomId ?? defaultRandomId;
     this.env = options.env ?? {};
     this.onBeforeExit = options.onBeforeExit;
+    this.done = new Promise<void>((resolve) => {
+      this.doneResolve = resolve;
+    });
   }
 
   start(): void {
@@ -159,7 +171,11 @@ export class SessionAgent {
       };
       if (result.signal) payload.signal = result.signal;
       this.publish("terminal.exited", payload);
-      void this.transport.close();
+      // Deliberately close the transport (graceful shutdown). This is the only
+      // path that resolves transport.closed — a transient socket drop does not.
+      void this.transport.close().then(() => {
+        this.doneResolve();
+      });
     });
   }
 
