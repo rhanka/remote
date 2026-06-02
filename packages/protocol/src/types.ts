@@ -1,5 +1,6 @@
 import type { FromSchema } from "json-schema-to-ts";
 import type {
+  AGENT_MESSAGE_TYPES,
   EVENT_TYPES,
   REMOTE_PROTOCOL_VERSION,
   REMOTE_SCHEMA_VERSION,
@@ -40,6 +41,7 @@ import type {
   refreshSessionCredentialsResponseSchema,
   getSessionResponseSchema,
   listSessionsResponseSchema,
+  sessionAnnounceSchema,
   sessionCredentialsSchema,
   sendInstructionRequestSchema,
   sendInstructionResponseSchema,
@@ -157,6 +159,8 @@ export type SecretRevokedPayload = FromSchema<
 export type AuditRecordedPayload = FromSchema<
   typeof auditRecordedPayloadSchema
 >;
+export type SessionAnnounce = FromSchema<typeof sessionAnnounceSchema>;
+export type AgentMessageType = (typeof AGENT_MESSAGE_TYPES)[number];
 export type RemoteEventEnvelope = {
   protocolVersion: typeof REMOTE_PROTOCOL_VERSION;
   schemaVersion: typeof REMOTE_SCHEMA_VERSION;

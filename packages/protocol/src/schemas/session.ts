@@ -235,3 +235,34 @@ export const sendInstructionResponseSchema = {
     accepted: { type: "boolean" },
   },
 } as const;
+
+/**
+ * Session announce payload — sent by the session-agent to the control-plane
+ * on every (re)connect so the control-plane can repopulate its in-memory store
+ * after a restart.
+ *
+ * Secret-free by design: no credentials, tokens, or auth material are ever
+ * included. Only public descriptor fields sourced from the agent's environment
+ * variables (SESSION_ID, SESSION_PROFILE, SESSION_TARGET, WORKSPACE_PATH,
+ * SESSION_WORKSPACE_ID) and the detected cliSessionId.
+ */
+export const sessionAnnounceSchema = {
+  $id: `${REMOTE_SCHEMA_BASE_URL}/session-announce.schema.json`,
+  title: "SessionAnnounce",
+  type: "object",
+  additionalProperties: false,
+  required: ["sessionId", "profile"],
+  properties: {
+    sessionId: { type: "string", minLength: 1 },
+    profile: embeddedCliProfileSchema,
+    target: embeddedSessionTargetSchema,
+    workspacePath: { type: "string", minLength: 1 },
+    workspaceId: { type: "string", minLength: 1 },
+    cliSessionId: {
+      type: "string",
+      minLength: 1,
+      description:
+        "The wrapped CLI's own conversation/session id, if already detected at announce time.",
+    },
+  },
+} as const;

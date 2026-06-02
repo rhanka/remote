@@ -57,6 +57,13 @@ export const CAPABILITIES = [
   "workspace-export",
 ] as const;
 
+/**
+ * Agent→control-plane message types sent over the agent WS connection.
+ * No credentials or token fields are ever included in these messages
+ * — secret-free by design.
+ */
+export const AGENT_MESSAGE_TYPES = ["session.announce"] as const;
+
 export const EVENT_TYPES = [
   "session.lifecycle.changed",
   "session.health.reported",

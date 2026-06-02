@@ -28,6 +28,7 @@ import {
   riskSchema,
   sendInstructionRequestSchema,
   sendInstructionResponseSchema,
+  sessionAnnounceSchema,
   sessionDescriptorSchema,
   secretDeliverySchema,
   refreshSessionCredentialsRequestSchema,
@@ -205,6 +206,52 @@ describe("session JSON Schemas", () => {
     expect(validateAdditionalStopProperty.errors?.[0]?.keyword).toBe(
       "additionalProperties",
     );
+  });
+});
+
+describe("session.announce schema", () => {
+  it("validates a fully-specified announce (all fields)", () => {
+    expect(
+      ajv.compile(sessionAnnounceSchema)({
+        sessionId: "session_001",
+        profile: "claude",
+        target: "scaleway-kapsule",
+        workspacePath: "/workspace",
+        workspaceId: "ws-001",
+        cliSessionId: "cli_session_abc",
+      }),
+    ).toBe(true);
+  });
+
+  it("validates a minimal announce (only required fields)", () => {
+    expect(
+      ajv.compile(sessionAnnounceSchema)({
+        sessionId: "session_001",
+        profile: "shell",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects an announce missing sessionId", () => {
+    const validate = ajv.compile(sessionAnnounceSchema);
+    expect(validate({ profile: "codex" })).toBe(false);
+    expect(validate.errors?.some((e) => e.keyword === "required")).toBe(true);
+  });
+
+  it("rejects an announce missing profile", () => {
+    const validate = ajv.compile(sessionAnnounceSchema);
+    expect(validate({ sessionId: "session_001" })).toBe(false);
+    expect(validate.errors?.some((e) => e.keyword === "required")).toBe(true);
+  });
+
+  it("is secret-free: schema has no credentials or token fields", () => {
+    const fieldNames = Object.keys(sessionAnnounceSchema.properties);
+    const secretFields = fieldNames.filter((f) =>
+      ["credentials", "token", "secret", "password", "key"].some((s) =>
+        f.toLowerCase().includes(s),
+      ),
+    );
+    expect(secretFields).toHaveLength(0);
   });
 });
 
