@@ -21,6 +21,17 @@
  *      We do NOT spawn the CLI — we print the command so the user can run it.
  */
 
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import { attach, createRemoteSession, stopRemoteSession } from "./attach.js";
 import { coerceCliProfileName, resolveProfile } from "./profiles.js";
 import { collectProfileAuth } from "./auth-bundle.js";
@@ -182,6 +193,64 @@ function buildResumeStartupArgs(
   const config = resolveProfile(profileName);
   if (!config.resumeFlag) return [];
   return resume === true ? [config.resumeFlag] : [config.resumeFlag, resume];
+}
+
+/**
+ * Profile conversation dirs (HOME-relative), mirrored from the session-agent's
+ * restore mapping (`<workspace>/.remote/sessions/<profile>/<relDir>` →
+ * `<home>/<relDir>`).
+ */
+const PROFILE_STATE_DIRS: Readonly<Record<string, string>> = {
+  claude: ".claude/projects",
+};
+
+const STATE_SUBDIR = ".remote/sessions";
+
+/**
+ * Stage the live (most-recent) local conversation for `cwd` into the workspace
+ * under `.remote/sessions/<profile>/<relDir>/<projectDir>` so it rides the
+ * pushed archive and the session-agent restores it into the Pod's HOME — so the
+ * remote CLI `--resume` picks up exactly where the local session left off.
+ *
+ * Uses claude's cwd→dir encoding (slashes → dashes). With path parity (the
+ * Pod's cwd equals `cwd`) the remote CLI derives the identical project dir name,
+ * so the staged conversation is found on resume. Returns the staged conversation
+ * id (filename stem), or undefined if nothing was captured.
+ */
+function captureLiveConversation(
+  cwd: string,
+  profile: string,
+  home: string,
+  stderr: NodeJS.WriteStream,
+): string | undefined {
+  const relDir = PROFILE_STATE_DIRS[profile];
+  if (!relDir) return undefined; // only claude's path-encoded projects for now
+  const projectDir = cwd.replace(/\//g, "-");
+  const src = join(home, relDir, projectDir);
+  if (!existsSync(src)) return undefined;
+
+  let newest: { name: string; mtime: number } | undefined;
+  for (const e of readdirSync(src, { withFileTypes: true })) {
+    if (e.isFile() && e.name.endsWith(".jsonl")) {
+      const m = statSync(join(src, e.name)).mtimeMs;
+      if (!newest || m > newest.mtime) newest = { name: e.name, mtime: m };
+    }
+  }
+  if (!newest) return undefined;
+
+  const dstDir = join(cwd, STATE_SUBDIR, profile, relDir, projectDir);
+  rmSync(join(cwd, STATE_SUBDIR, profile), { recursive: true, force: true });
+  mkdirSync(dstDir, { recursive: true });
+  cpSync(join(src, newest.name), join(dstDir, newest.name));
+  const convId = newest.name.replace(/\.jsonl$/, "");
+  const companion = join(src, convId);
+  if (existsSync(companion)) {
+    cpSync(companion, join(dstDir, convId), { recursive: true });
+  }
+  stderr.write(
+    `[remote] captured live ${profile} conversation ${convId} for resume\n`,
+  );
+  return convId;
 }
 
 /**
@@ -371,6 +440,24 @@ export async function migrateForward(
     stderr,
   );
 
+  // Environment parity ("feel at home"): the project mounts at its real local
+  // path inside the Pod and HOME is reproduced, so the resumed conversation's
+  // absolute paths (cwd, file refs) resolve identically. Persisted on the
+  // workspace marker so every session bound to it is path-identical.
+  const home = marker.home ?? homedir();
+  const workspacePath = marker.path ?? cwd;
+  if (marker.path === undefined || marker.home === undefined) {
+    writeWorkspaceMarker(cwd, { ...marker, path: workspacePath, home });
+  }
+
+  // When resuming, stage the live conversation so it rides the pushed archive
+  // and the session-agent restores it into HOME — the remote CLI then resumes
+  // exactly where the local session left off (path parity makes the project
+  // dir encoding match on both sides).
+  if (resume !== undefined) {
+    captureLiveConversation(cwd, profile, home, stderr);
+  }
+
   // Step 2 & 3: push workspace.
   await pushWorkspace(cwd, remoteUrl, marker.workspaceId, fetchImpl, stderr);
 
@@ -388,6 +475,8 @@ export async function migrateForward(
     {
       profile,
       workspaceId: marker.workspaceId,
+      workspacePath,
+      home,
       workspaceSync: true,
       ...(credentials ? { credentials } : {}),
       ...(resumeArgs.length > 0 ? { startupArgs: resumeArgs } : {}),

@@ -34,7 +34,20 @@ export const sessionDescriptorSchema = {
     id: { type: "string", minLength: 1 },
     profile: embeddedCliProfileSchema,
     target: embeddedSessionTargetSchema,
-    workspacePath: { type: "string", const: "/workspace" },
+    workspacePath: {
+      type: "string",
+      minLength: 1,
+      pattern: "^/",
+      description:
+        "Absolute path where the workspace is mounted inside the session Pod. Defaults to /workspace, but a migrated session sets it to the user's real local project path (e.g. /home/user/src/proj) for path parity, so the resumed conversation's absolute paths resolve.",
+    },
+    home: {
+      type: "string",
+      minLength: 1,
+      pattern: "^/",
+      description:
+        "Absolute HOME to reproduce inside the Pod (e.g. /home/user) for environment parity with the user's local machine. Defaults to /root when absent.",
+    },
     workspaceId: { type: "string", minLength: 1 },
     cliSessionId: {
       type: "string",
@@ -134,6 +147,20 @@ export const createSessionRequestSchema = {
     },
     metadata: metadataSchema,
     credentials: embeddedSessionCredentialsSchema,
+    workspacePath: {
+      type: "string",
+      minLength: 1,
+      pattern: "^/",
+      description:
+        "Absolute path to mount the workspace at inside the Pod (path parity with the caller's local project path). Defaults to /workspace when absent.",
+    },
+    home: {
+      type: "string",
+      minLength: 1,
+      pattern: "^/",
+      description:
+        "Absolute HOME to reproduce inside the Pod (environment parity). Defaults to /root when absent.",
+    },
     workspaceSync: {
       type: "boolean",
       description:

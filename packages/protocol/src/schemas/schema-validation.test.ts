@@ -86,19 +86,35 @@ describe("session JSON Schemas", () => {
     expect(valid).toBe(true);
   });
 
-  it("rejects a session descriptor with a non-MVP workspace path", () => {
+  it("rejects a session descriptor with a relative (non-absolute) workspace path", () => {
     const validate = ajv.compile(sessionDescriptorSchema);
     const valid = validate({
       id: "session_001",
       profile: "codex",
       target: "k3s",
-      workspacePath: "/tmp/workspace",
+      workspacePath: "relative/workspace",
       createdAt: "2026-05-11T12:00:00.000Z",
       createdBy: { id: "user_001", kind: "user" },
     });
 
     expect(valid).toBe(false);
     expect(validate.errors?.[0]?.instancePath).toBe("/workspacePath");
+  });
+
+  it("accepts a session descriptor with the user's real local path (path parity)", () => {
+    const validate = ajv.compile(sessionDescriptorSchema);
+    const valid = validate({
+      id: "session_001",
+      profile: "claude",
+      target: "k3s",
+      workspacePath: "/home/antoinefa/src/surch",
+      home: "/home/antoinefa",
+      createdAt: "2026-05-11T12:00:00.000Z",
+      createdBy: { id: "user_001", kind: "user" },
+    });
+
+    expect(validate.errors).toBeNull();
+    expect(valid).toBe(true);
   });
 
   it("rejects a session descriptor with an invalid createdAt date-time", () => {

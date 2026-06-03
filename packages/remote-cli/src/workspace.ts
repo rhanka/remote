@@ -26,6 +26,14 @@ export function writeBaseSnapshot(cwd: string, archive: Buffer): void {
 export type WorkspaceMarker = {
   readonly remote: string;
   readonly workspaceId: string;
+  /**
+   * Environment parity (the "feel at home" config): the absolute path the
+   * project lives at locally, reproduced as the workspace mount path inside the
+   * remote Pod, and the local HOME to reproduce. Captured at link/migrate time
+   * so every session bound to this workspace resumes with identical paths.
+   */
+  readonly path?: string;
+  readonly home?: string;
 };
 
 export function markerPath(cwd: string): string {
@@ -41,7 +49,12 @@ export function readWorkspaceMarker(cwd: string): WorkspaceMarker | undefined {
       typeof parsed.remote === "string" &&
       typeof parsed.workspaceId === "string"
     ) {
-      return { remote: parsed.remote, workspaceId: parsed.workspaceId };
+      return {
+        remote: parsed.remote,
+        workspaceId: parsed.workspaceId,
+        ...(typeof parsed.path === "string" ? { path: parsed.path } : {}),
+        ...(typeof parsed.home === "string" ? { home: parsed.home } : {}),
+      };
     }
     return undefined;
   } catch (error) {

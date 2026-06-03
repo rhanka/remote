@@ -306,7 +306,7 @@ export function buildSessionPodSpec(
               value: options.controlPlaneEndpoint,
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
-            { name: "HOME", value: options.home },
+            { name: "HOME", value: descriptor.home ?? options.home },
             ...(descriptor.workspaceId
               ? [
                   {

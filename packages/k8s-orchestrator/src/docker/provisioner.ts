@@ -134,7 +134,7 @@ export class DockerSessionProvisioner implements SessionProvisioner {
       "-e", `SESSION_TARGET=${descriptor.target}`,
       "-e", `CONTROL_PLANE_ENDPOINT=${this.controlPlaneEndpoint}`,
       "-e", `WORKSPACE_PATH=${descriptor.workspacePath}`,
-      "-e", `HOME=${this.home}`,
+      "-e", `HOME=${descriptor.home ?? this.home}`,
     ];
     if (descriptor.workspaceId)
       env.push("-e", `SESSION_WORKSPACE_ID=${descriptor.workspaceId}`);

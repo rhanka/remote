@@ -65,7 +65,43 @@ operator — front door + control loop, not redundant.
   carries the namespace + storage handle.
 - **`Workspace`** (in `user-<sha8>`): one per code workspace. Reconciled → ensures
   the tenant volume exists, the `subPath` is created, `fsGroup` set. `status` →
-  `{ pvcName, subPath, fsGroup, phase }`.
+  `{ pvcName, subPath, fsGroup, phase }`. Carries an **`environment`** block (see
+  below) describing how to make the workspace feel identical to the user's local
+  machine.
+
+### Environment parity — the workspace's "feel at home" config
+
+A migration is only fluid if the remote session is **path-identical** to the
+user's local machine. A resumed conversation has absolute paths baked in (cwd,
+file refs, `~`); if the Pod mounts the project at `/workspace` and uses
+`HOME=/root`, every such path breaks and the CLI flails. So the workspace carries
+a durable `environment` block, set once at link/migrate time and honoured by
+**every** consumer (the remote CLI today, **sentropic.sent-tech.ca** tomorrow):
+
+```jsonc
+workspace.environment: {
+  path: "/home/<user>/src/<proj>",  // mount the project here in any consumer (= the local path)
+  home: "/home/<user>",             // HOME to reproduce
+  // couche 2 (deferred): env vars, git identity, dotfiles manifest
+}
+```
+
+Consumers mount the PVC at `environment.path`, set `HOME=environment.home`, and
+run the CLI with `cwd = path`. The CLI's project-dir encoding then matches on both
+sides (no re-encoding), `cd`/file paths resolve, and `~` points home → the resumed
+conversation is byte-for-byte coherent. This is the **portable environment
+contract** remote and sentropic both honour, so a workspace feels the same whether
+opened from the CLI, the web IDE, or a terminal on sentropic.
+
+Status (shipped in remote, pre-`scale`): `workspacePath` + `home` are now
+first-class on the session descriptor + create request (protocol), persisted on the
+local `.remote/workspace.json` marker, and the orchestrator mounts at `workspacePath`
++ sets `HOME` per session. The migrate path also stages the live conversation under
+`.remote/sessions/` so `--resume` carries it. Folding `environment` into the
+`Workspace` CR is the scale-side ratification item.
+- **`Session`** (optional, in `user-<sha8>`): could model a session declaratively
+  later; for now the control-plane keeps creating session Pods imperatively against
+  the `Workspace.status` mount coordinates (so this CRD is deferred — see phasing).
 - **`Session`** (optional, in `user-<sha8>`): could model a session declaratively
   later; for now the control-plane keeps creating session Pods imperatively against
   the `Workspace.status` mount coordinates (so this CRD is deferred — see phasing).

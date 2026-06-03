@@ -64,7 +64,7 @@ function buildDescriptor(
     id: randomId("sess"),
     profile: req.profile,
     target: req.target,
-    workspacePath: "/workspace",
+    workspacePath: req.workspacePath ?? "/workspace",
     createdAt: now,
     createdBy: {
       id: "control-plane",
@@ -73,6 +73,7 @@ function buildDescriptor(
     },
   };
 
+  if (req.home !== undefined) descriptor.home = req.home;
   if (req.workspaceId !== undefined) descriptor.workspaceId = req.workspaceId;
   if (req.displayName !== undefined) descriptor.displayName = req.displayName;
   if (req.labels !== undefined) descriptor.labels = req.labels;
@@ -98,7 +99,7 @@ function descriptorFromAnnounce(announce: SessionAnnounce): SessionDescriptor {
     id: announce.sessionId,
     profile: announce.profile,
     target: announce.target ?? "k3s",
-    workspacePath: "/workspace",
+    workspacePath: announce.workspacePath ?? "/workspace",
     createdAt: now,
     createdBy: {
       id: "control-plane",
