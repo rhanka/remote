@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 
 import { authHeaders } from "./config.js";
 
-const MAX_ARCHIVE_BYTES = 50 * 1024 * 1024; // 50 MiB safety cap
+// Safety cap against accidentally pushing huge directories. Generous because a
+// legitimate migrated conversation (.remote/sessions) can be large — claude
+// transcripts embed base64 images that do not compress.
+const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024; // 256 MiB
 
 function run(
   command: string,

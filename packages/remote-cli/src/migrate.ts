@@ -241,12 +241,12 @@ function captureLiveConversation(
   const dstDir = join(cwd, STATE_SUBDIR, profile, relDir, projectDir);
   rmSync(join(cwd, STATE_SUBDIR, profile), { recursive: true, force: true });
   mkdirSync(dstDir, { recursive: true });
+  // Stage only the main conversation .jsonl — it holds the full conversation.
+  // The companion `<convId>/` dir (subagent transcripts) is auxiliary, only used
+  // to expand subagent detail, and can be huge; skip it to stay lean (the remote
+  // archive has a size cap and rides a fragile port-forward).
   cpSync(join(src, newest.name), join(dstDir, newest.name));
   const convId = newest.name.replace(/\.jsonl$/, "");
-  const companion = join(src, convId);
-  if (existsSync(companion)) {
-    cpSync(companion, join(dstDir, convId), { recursive: true });
-  }
   stderr.write(
     `[remote] captured live ${profile} conversation ${convId} for resume\n`,
   );
