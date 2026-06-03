@@ -14,7 +14,7 @@ const PROFILE_AUTH_FILES: Readonly<Record<CliProfile, ReadonlyArray<string>>> =
     shell: [],
     codex: [".codex/auth.json", ".codex/config.toml"],
     opencode: [],
-    claude: [".claude/.credentials.json"],
+    claude: [".claude/.credentials.json", ".claude.json"],
     agy: [
       ".gemini/oauth_creds.json",
       ".gemini/google_accounts.json",
