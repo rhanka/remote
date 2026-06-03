@@ -7,7 +7,12 @@ import {
   KubernetesObjectApiClient,
   type SessionProvisioner,
 } from "@sentropic/remote-k8s-orchestrator";
-import { REMOTE_PROTOCOL_VERSION } from "@sentropic/remote-protocol";
+import {
+  REMOTE_PROTOCOL_VERSION,
+  sessionAnnounceSchema,
+  type SessionAnnounce,
+} from "@sentropic/remote-protocol";
+import type { ValidateFunction } from "ajv";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
@@ -23,8 +28,12 @@ import {
   withSessionTokens,
 } from "./auth/session-token.js";
 import { buildOpenApiDocument } from "./openapi.js";
-import { buildAgentSocketEvents } from "./routes/agent-ws.js";
+import {
+  buildAgentSocketEvents,
+  type AgentSocketDeps,
+} from "./routes/agent-ws.js";
 import { createSessionsRouter } from "./routes/sessions.js";
+import type { WSEvents } from "hono/ws";
 import { createWorkspacesRouter } from "./routes/workspaces.js";
 import { SessionEventBus } from "./sessions/events.js";
 import { SessionStore } from "./sessions/store.js";
@@ -51,6 +60,10 @@ type StorageAccessMode = "ReadWriteOnce" | "ReadWriteMany";
 
 export type ControlPlaneApp = Hono<{ Variables: ValidationVars }> & {
   injectWebSocket: InjectWebSocket;
+  /** Test seam: build the wired agent-socket events (sharing the live store +
+   * reconcile hook) so a `session.announce` can be driven without a real WS
+   * upgrade. `userId` defaults to off-mode "default". */
+  buildAgentSocketEvents(sessionId: string, userId?: string): WSEvents;
 };
 
 export function createControlPlane(
@@ -103,11 +116,51 @@ export function createControlPlane(
 
   app.get("/openapi.json", (c) => c.json(buildOpenApiDocument()));
 
+  // Build the sessions router up front so the agent-ws route can share its
+  // `reconcileFromAnnounce` hook (bound over the SAME store + sessionTenant).
+  const { router: sessionsRouter, reconcileFromAnnounce } =
+    createSessionsRouter({
+      ajv,
+      store,
+      bus,
+      provisioner,
+      registry,
+      tenantProvisioner,
+    });
+
+  // Announce-body validator (durability: agent re-announce repopulates the
+  // store). `sessionAnnounceSchema` is already registered on `ajv` via
+  // remoteOpenApiComponents, so reuse the compiled instance.
+  const announceValidator: ValidateFunction =
+    (ajv.getSchema(sessionAnnounceSchema.$id) as ValidateFunction | undefined) ??
+    ajv.compile(sessionAnnounceSchema);
+  const validateAnnounce = (body: unknown): body is SessionAnnounce =>
+    announceValidator(body) === true;
+
   app.get(
     "/sessions/:id/agent",
-    nodeWs.upgradeWebSocket((c) => {
+    nodeWs.upgradeWebSocket(async (c) => {
       const id = c.req.param("id") ?? "";
-      return buildAgentSocketEvents(id, { store, bus, registry });
+      // Derive the announce owner from the WS upgrade's auth context. Off-mode
+      // → "default". TODO(bearer-ws-auth): the session-agent does not yet send
+      // an Authorization header on the WS, so under bearer auth this falls back
+      // to "default"; once the agent forwards its session token, the
+      // authenticator here will resolve the real owner with no other change.
+      let userId = "default";
+      try {
+        const auth = await authenticator.authenticate(c.req.raw);
+        userId = auth.userId;
+      } catch {
+        userId = "default";
+      }
+      return buildAgentSocketEvents(id, {
+        store,
+        bus,
+        registry,
+        reconcileFromAnnounce,
+        validateAnnounce,
+        userId,
+      });
     }),
   );
 
@@ -125,17 +178,7 @@ export function createControlPlane(
   app.use("/workspaces", requireAuth);
   app.use("/workspaces/*", requireAuth);
 
-  app.route(
-    "/sessions",
-    createSessionsRouter({
-      ajv,
-      store,
-      bus,
-      provisioner,
-      registry,
-      tenantProvisioner,
-    }),
-  );
+  app.route("/sessions", sessionsRouter);
 
   app.route(
     "/workspaces",
@@ -143,6 +186,17 @@ export function createControlPlane(
   );
 
   app.injectWebSocket = nodeWs.injectWebSocket;
+  app.buildAgentSocketEvents = (sessionId: string, userId = "default") => {
+    const socketDeps: AgentSocketDeps = {
+      store,
+      bus,
+      registry,
+      reconcileFromAnnounce,
+      validateAnnounce,
+      userId,
+    };
+    return buildAgentSocketEvents(sessionId, socketDeps);
+  };
   return app;
 }
 

@@ -21,6 +21,7 @@ import {
   type RemoteEventEnvelope,
   type SendInstructionRequest,
   type SendInstructionResponse,
+  type SessionAnnounce,
   type SessionDescriptor,
   type StopSessionRequest,
   type StopSessionResponse,
@@ -37,6 +38,7 @@ import {
   mintSessionToken,
   sessionTokenSecret,
 } from "../auth/session-token.js";
+import { tenantNamespace } from "../tenancy/namespace.js";
 import {
   StubTenantProvisioner,
   type TenantProvisioner,
@@ -83,6 +85,51 @@ function buildDescriptor(
   return descriptor;
 }
 
+/**
+ * Synthesize a SessionDescriptor from an agent's `session.announce` body.
+ * Used after a control-plane restart: the agent is the durable record, so the
+ * descriptor is reconstructed (createdBy = control-plane, createdAt = now) from
+ * the announce's public fields. `target`/`workspacePath` are required on the
+ * descriptor but optional on the announce — fall back to safe defaults.
+ */
+function descriptorFromAnnounce(announce: SessionAnnounce): SessionDescriptor {
+  const now = new Date().toISOString();
+  const descriptor: SessionDescriptor = {
+    id: announce.sessionId,
+    profile: announce.profile,
+    target: announce.target ?? "k3s",
+    workspacePath: "/workspace",
+    createdAt: now,
+    createdBy: {
+      id: "control-plane",
+      kind: "control-plane",
+      displayName: "Control Plane",
+    },
+  };
+  if (announce.workspaceId !== undefined)
+    descriptor.workspaceId = announce.workspaceId;
+  if (announce.cliSessionId !== undefined)
+    descriptor.cliSessionId = announce.cliSessionId;
+  return descriptor;
+}
+
+/**
+ * Repopulate the in-memory session record from an agent re-announce. Idempotent:
+ * if the session is already known it is left untouched. Bound over the sessions
+ * router's own `store` + `sessionTenant` so the announce path and the
+ * create/stop paths share the exact same state (see createControlPlane wiring).
+ */
+export type ReconcileFromAnnounce = (
+  sessionId: string,
+  announce: SessionAnnounce,
+  context: { userId: string },
+) => SessionDescriptor;
+
+export type SessionsRouter = {
+  readonly router: Hono<{ Variables: ValidationVars }>;
+  readonly reconcileFromAnnounce: ReconcileFromAnnounce;
+};
+
 function notFound(c: { json: (body: unknown, status: number) => Response }) {
   return c.json(
     {
@@ -103,9 +150,7 @@ export type SessionsRouterDeps = {
   readonly tenantProvisioner?: TenantProvisioner;
 };
 
-export function createSessionsRouter(
-  deps: SessionsRouterDeps,
-): Hono<{ Variables: ValidationVars }> {
+export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   const ajv = deps.ajv;
   const store = deps.store ?? new SessionStore();
   const bus = deps.bus ?? new SessionEventBus();
@@ -132,6 +177,28 @@ export function createSessionsRouter(
   // cascade (which fires outside any request) can destroy in the right
   // namespace and delete from the right user partition.
   const sessionTenant = new Map<string, { userId: string; namespace: string }>();
+
+  // Durability seam: an agent re-announce repopulates the store + sessionTenant
+  // after a control-plane restart. Idempotent for an already-known session so a
+  // steady-state (re)connect is a no-op. Shares this closure's `store` +
+  // `sessionTenant` with the create/stop paths.
+  const reconcileFromAnnounce: ReconcileFromAnnounce = (
+    sessionId,
+    announce,
+    context,
+  ) => {
+    const existing = store.get(sessionId);
+    if (existing) return existing;
+    const descriptor = store.put(
+      { ...descriptorFromAnnounce(announce), id: sessionId },
+      context.userId,
+    );
+    sessionTenant.set(descriptor.id, {
+      userId: context.userId,
+      namespace: tenantNamespace(context.userId),
+    });
+    return descriptor;
+  };
 
   const emit: ProvisionerEmit = (sessionId, type, payload) => {
     bus.publish(sessionId, type, payload);
@@ -524,5 +591,5 @@ export function createSessionsRouter(
     });
   });
 
-  return router;
+  return { router, reconcileFromAnnounce };
 }

@@ -925,6 +925,171 @@ describe("control plane", () => {
       { op: "destroy", namespace: expectedNs },
     ]);
   });
+
+  // --- Durability: agent session.announce repopulates the store ------------
+
+  type FakeWs = {
+    sent: string[];
+    closed: { code?: number; reason?: string } | null;
+    send(data: string): void;
+    close(code?: number, reason?: string): void;
+  };
+  function fakeWs(): FakeWs {
+    return {
+      sent: [],
+      closed: null,
+      send(data) {
+        this.sent.push(data);
+      },
+      close(code, reason) {
+        this.closed = {
+          ...(code !== undefined ? { code } : {}),
+          ...(reason !== undefined ? { reason } : {}),
+        };
+      },
+    };
+  }
+  function announceFrame(body: unknown): { data: string } {
+    return { data: JSON.stringify({ type: "session.announce", body }) };
+  }
+
+  it("repopulates an unknown session from an agent announce (restart durability)", async () => {
+    // Simulate a control-plane restart: NO POST /sessions; the store is empty.
+    const app = createControlPlane();
+    const id = "sess-restored-1";
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+
+    // onOpen for an unknown session must NOT immediately close it.
+    events.onOpen?.(new Event("open"), ws as never);
+    expect(ws.closed).toBeNull();
+
+    // The agent's first frame is its session.announce → repopulate.
+    events.onMessage?.(
+      announceFrame({
+        sessionId: id,
+        profile: "codex",
+        target: "k3s",
+        workspacePath: "/workspace",
+        workspaceId: "ws-42",
+      }) as never,
+      ws as never,
+    );
+
+    // Now listable (owner default) and attachable.
+    const listed = await app.request("/sessions");
+    const list = (await listed.json()) as ListSessionsResponse;
+    expect(list.sessions).toHaveLength(1);
+    expect(list.sessions[0]!.id).toBe(id);
+    expect(list.sessions[0]!.profile).toBe("codex");
+    expect(list.sessions[0]!.workspaceId).toBe("ws-42");
+    expect(list.sessions[0]!.createdBy.kind).toBe("control-plane");
+
+    const got = await app.request(`/sessions/${id}`);
+    expect(got.status).toBe(200);
+    const single = (await got.json()) as GetSessionResponse;
+    expect(single.session.id).toBe(id);
+  });
+
+  it("makes a repopulated session stoppable", async () => {
+    const app = createControlPlane();
+    const id = "sess-restored-2";
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+    events.onMessage?.(
+      announceFrame({ sessionId: id, profile: "shell" }) as never,
+      ws as never,
+    );
+
+    const stop = await app.request(`/sessions/${id}/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(stop.status).toBe(200);
+    const after = await app.request("/sessions");
+    expect(((await after.json()) as ListSessionsResponse).sessions).toHaveLength(
+      0,
+    );
+  });
+
+  it("announcing a known session is idempotent (no duplicate, no error)", async () => {
+    const app = createControlPlane();
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+    expect(ws.closed).toBeNull();
+    events.onMessage?.(
+      announceFrame({
+        sessionId: id,
+        profile: "codex",
+        target: "k3s",
+        workspacePath: "/workspace",
+      }) as never,
+      ws as never,
+    );
+
+    const listed = await app.request("/sessions");
+    const list = (await listed.json()) as ListSessionsResponse;
+    expect(list.sessions).toHaveLength(1);
+    // The original descriptor (its displayName) is preserved, not overwritten.
+    expect(list.sessions[0]!.displayName).toBe("demo session");
+  });
+
+  it("ignores a malformed announce without crashing and closes cleanly", async () => {
+    const app = createControlPlane();
+    const id = "sess-bad";
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+
+    // Missing required `profile` → invalid against sessionAnnounceSchema.
+    expect(() =>
+      events.onMessage?.(
+        announceFrame({ sessionId: id }) as never,
+        ws as never,
+      ),
+    ).not.toThrow();
+    // Session not established, socket closed cleanly (1008), no crash.
+    expect(ws.closed?.code).toBe(1008);
+    const listed = await app.request("/sessions");
+    expect(
+      ((await listed.json()) as ListSessionsResponse).sessions,
+    ).toHaveLength(0);
+
+    // Non-JSON garbage is also tolerated.
+    expect(() =>
+      events.onMessage?.({ data: "{not json" } as never, ws as never),
+    ).not.toThrow();
+  });
+
+  it("registers the terminal after a repopulated session can be driven", async () => {
+    const { AgentRegistry } = await import("./agents/registry.js");
+    const registry = new AgentRegistry();
+    const app = createControlPlane({ registry });
+    const id = "sess-restored-3";
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+    events.onMessage?.(
+      announceFrame({ sessionId: id, profile: "shell" }) as never,
+      ws as never,
+    );
+    expect(registry.get(id)).toBeDefined();
+
+    // The control-plane can now forward terminal input to the re-registered agent.
+    const response = await app.request(`/sessions/${id}/terminal/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ terminalId: "t1", data: "ls\n", encoding: "utf8" }),
+    });
+    expect(response.status).toBe(202);
+    expect(ws.sent.some((s) => s.includes("terminal.input"))).toBe(true);
+  });
 });
 
 describe("workspace soft-lock", () => {
