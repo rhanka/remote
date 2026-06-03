@@ -5,6 +5,44 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.4.2 — 2026-06-02
+
+Headline: the control-plane becomes **restart-durable**, and a control-plane
+crash can no longer take down every running session.
+
+### Fixed
+- **A failed provision no longer crashes the control-plane.** A rejecting
+  `K8sSessionProvisioner.provision` (e.g. a k8s `403 exceeded quota`) used to be
+  an unhandled rejection that killed the process — and since the session store
+  is in-process, *every* running session was orphaned. It is now caught: emit a
+  `failed` lifecycle event and clean up the orphaned record.
+
+### Added
+- **Control-plane durability via agent re-announce.** The session-agent's WS
+  transport now self-heals (reconnect with full-jitter backoff) and the agent
+  process lifetime is decoupled from the socket — a transient drop
+  (control-plane restart) no longer ends the agent; only the wrapped PTY exiting
+  does. On every (re)connect the agent sends a `session.announce` frame, and the
+  control-plane repopulates its `SessionStore` + tenant mapping from it. After a
+  restart, running sessions re-announce themselves and become listable /
+  attachable / stoppable again — no datastore, no new RBAC, self-correcting
+  (a terminated agent never reconnects, so no zombies). The store stays behind an
+  interface so a future sentropic-provided DB swaps in unchanged.
+  (Protocol: `session.announce` agent→control-plane frame.)
+- **RWX workspaces** (Scaleway File Storage CSI): the session workspace PVC can
+  be `ReadWriteMany` on a POP2 pool, env-driven (`SESSION_STORAGE_CLASS`,
+  `SESSION_STORAGE_ACCESS_MODE`, `SESSION_WORKSPACE_SIZE`, `SESSION_NODE_SELECTOR`)
+  — enables multiple agents on one workspace.
+- **`remote migrate forward --no-attach`**: create the remote session without
+  hijacking the terminal (bulk migration / reconnect-your-own-terminal); and
+  `migrate forward` now bundles the profile's credentials into the session.
+
+### Notes
+- SCW deployment tracks the `:main` image tag (migration POC); pinned consumers
+  (k3s manifests, Makefile, the session-agent default) move to `:v0.4.2`.
+- Known gap (deferred): the narrow window where a `201` is returned before the
+  Pod is durable in etcd; the durable fix lands with the sentropic DB.
+
 ## v0.4.1 — 2026-05-28
 
 Follow-ups on top of v0.4.0's multi-tenant base.

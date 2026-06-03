@@ -6,7 +6,7 @@ Minimal manifests to run Sentropic Remote on a local Kubernetes cluster.
 
 - `00-namespace.yaml` — `sentropic-remote` namespace.
 - `10-rbac.yaml` — `ServiceAccount`, `Role`, `RoleBinding` granting the control-plane the verbs needed to provision session Pods + PVCs (and read pod logs/exec).
-- `20-control-plane.yaml` — `Deployment` (image `ghcr.io/rhanka/sentropic-remote-control-plane:v0.4.1`, liveness/readiness on `/healthz`) + `ClusterIP` Service `sentropic-remote-control-plane` on port 8080. The session-agent images are pulled by the control-plane on demand when a session is created.
+- `20-control-plane.yaml` — `Deployment` (image `ghcr.io/rhanka/sentropic-remote-control-plane:v0.4.2`, liveness/readiness on `/healthz`) + `ClusterIP` Service `sentropic-remote-control-plane` on port 8080. The session-agent images are pulled by the control-plane on demand when a session is created.
 
 ## Quickstart (k3d)
 
