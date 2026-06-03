@@ -59,11 +59,25 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
     if (list.stdout.byteLength === 0) {
       throw new Error("no files to sync (git ls-files returned nothing)");
     }
+    // Force-include persisted conversation state under .remote/sessions even
+    // though .gitignore typically excludes it (the nested `.claude/` path
+    // segment trips a `.claude/` ignore rule). This is how a migrated session
+    // carries its in-progress conversation onto the remote workspace PVC, where
+    // the session-agent restores it into HOME before the CLI starts.
+    const sessionState = await run(
+      "git",
+      ["ls-files", "-o", "-z", "--", ".remote/sessions"],
+      cwd,
+    );
+    const fileList =
+      sessionState.status === 0 && sessionState.stdout.byteLength > 0
+        ? Buffer.concat([list.stdout, sessionState.stdout])
+        : list.stdout;
     const tar = await runWithStdin(
       "tar",
       ["-czf", "-", "--null", "-T", "-"],
       cwd,
-      list.stdout,
+      fileList,
     );
     if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`);
     archive = tar.stdout;
