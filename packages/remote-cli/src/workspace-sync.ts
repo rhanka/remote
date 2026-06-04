@@ -69,7 +69,15 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
     // the session-agent restores it into HOME before the CLI starts.
     const sessionState = await run(
       "git",
-      ["ls-files", "-o", "-z", "--", ".remote/sessions"],
+      [
+        "ls-files",
+        "-o",
+        "-z",
+        "--",
+        ".remote/sessions",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+      ],
       cwd,
     );
     const fileList =

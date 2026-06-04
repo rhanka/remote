@@ -14,7 +14,7 @@ const PROFILE_AUTH_FILES: Readonly<Record<CliProfile, ReadonlyArray<string>>> =
     shell: [],
     codex: [".codex/auth.json", ".codex/config.toml"],
     opencode: [],
-    claude: [".claude/.credentials.json", ".claude.json"],
+    claude: [".claude/.credentials.json", ".claude.json", ".claude/settings.json"],
     agy: [
       ".gemini/oauth_creds.json",
       ".gemini/google_accounts.json",
@@ -62,13 +62,35 @@ export async function collectProfileAuth(
   for (const relPath of files) {
     try {
       const data = await reader(join(home, relPath));
-      bundle[relPath] = Buffer.from(data).toString("base64");
+      const payload =
+        relPath === ".claude.json" ? sanitizeClaudeConfig(data) : Buffer.from(data);
+      bundle[relPath] = payload.toString("base64");
     } catch {
       // missing auth files are skipped silently; the CLI in-Pod will fall back
       // to its own login flow.
     }
   }
   return bundle;
+}
+
+/**
+ * Strip native-install metadata from a bundled ~/.claude.json. Locally claude
+ * records `installMethod: "native"` + a local binary path (~/.local/bin/claude)
+ * that does not exist in the remote Pod, which makes the in-Pod claude warn
+ * "claude command not found". Dropping these lets the Pod's own install stand.
+ */
+function sanitizeClaudeConfig(data: Uint8Array | Buffer): Buffer {
+  try {
+    const obj = JSON.parse(Buffer.from(data).toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    delete obj.installMethod;
+    delete obj.autoUpdaterStatus;
+    return Buffer.from(JSON.stringify(obj), "utf8");
+  } catch {
+    return Buffer.from(data);
+  }
 }
 
 export function assertRequiredAuthBundle(
