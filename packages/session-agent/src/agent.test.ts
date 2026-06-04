@@ -175,9 +175,10 @@ describe("SessionAgent", () => {
     expect(exited!.payload.exitCode).toBe(-1);
   });
 
-  it("appends startup args from SESSION_STARTUP_ARGS", async () => {
+  it("wraps an interactive CLI in a persistent login shell with startup args", async () => {
     const { transport, sent } = stubTransport();
     const proc = stubProcess();
+    let command: string | null = null;
     let args: ReadonlyArray<string> | null = null;
     const agent = new SessionAgent({
       sessionId: "sess-startup",
@@ -185,6 +186,7 @@ describe("SessionAgent", () => {
       workspacePath: "/workspace",
       transport,
       spawner: (options) => {
+        command = options.command;
         args = options.args;
         return proc;
       },
@@ -194,7 +196,35 @@ describe("SessionAgent", () => {
     proc.finish({ exitCode: 0 });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(args).toEqual(["config", "install"]);
-    expect(sent[0]!.payload.shell).toBe("codex");
+    // Persistent-box: spawned as `/bin/bash -lc <wrapper> remote-session codex config install`.
+    expect(command).toBe("/bin/bash");
+    expect(args![0]).toBe("-lc");
+    expect(args!.slice(2)).toEqual(["remote-session", "codex", "config", "install"]);
+    expect(sent[0]!.payload.shell).toBe("/bin/bash");
+  });
+
+  it("does NOT wrap the shell profile (ephemeral push/pull one-shot)", async () => {
+    const { transport } = stubTransport();
+    const proc = stubProcess();
+    let command: string | null = null;
+    let args: ReadonlyArray<string> | null = null;
+    const agent = new SessionAgent({
+      sessionId: "sess-push",
+      profile: "shell",
+      workspacePath: "/workspace",
+      transport,
+      spawner: (options) => {
+        command = options.command;
+        args = options.args;
+        return proc;
+      },
+      env: { SESSION_STARTUP_ARGS: JSON.stringify(["-c", "exit 0"]) },
+    });
+    agent.start();
+    proc.finish({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(command).toBe("/bin/bash");
+    expect(args).toEqual(["-c", "exit 0"]);
   });
 });

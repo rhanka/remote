@@ -69,6 +69,20 @@ const PROFILE_COMMANDS: Readonly<
   agy: { command: "agy", args: [] },
 };
 
+/**
+ * Persistent-box wrapper. Runs the wrapped CLI as `$1 "$@"`, and when it exits
+ * (Ctrl-C / Ctrl-D / normal quit) drops the user into a live login shell on the
+ * workspace instead of ending the session. The agent's PTY is this shell, so the
+ * session-agent keeps running and its WS stays registered (no deaf zombie, no
+ * destroy-on-exit). The session ends only when the user exits this shell (PTY
+ * exit) or via an explicit stop. `$0` is a label; `$1` is the CLI; rest are args.
+ */
+const PERSISTENT_SHELL_WRAPPER = `cli="$1"; shift
+"$cli" "$@"; code=$?
+printf '\\n[remote] %s exited (code %s) — you are now in a shell on this workspace (%s).\\n' "$cli" "$code" "$PWD"
+printf '[remote] Re-run it (e.g. %s --resume) or type exit / Ctrl-D to stop this remote session.\\n' "$cli"
+exec /bin/bash -l`;
+
 function defaultRandomId(prefix: string): string {
   const random = Math.floor(Math.random() * 1e12)
     .toString(36)
@@ -135,14 +149,31 @@ export class SessionAgent {
     const profile =
       PROFILE_COMMANDS[this.profile] ?? PROFILE_COMMANDS["shell"]!;
     const startupArgs = parseStartupArgs(this.env.SESSION_STARTUP_ARGS);
-    const args = [...profile.args, ...startupArgs];
+    const cliArgs = [...profile.args, ...startupArgs];
     this.terminalId = this.randomId("term");
 
     this.transport.onMessage((envelope) => this.handleIncoming(envelope));
 
+    // For an interactive CLI profile, wrap it in a persistent login shell so
+    // exiting the CLI drops to a live shell on the box rather than destroying
+    // the session. The `shell` profile (ephemeral workspace push/pull sessions
+    // with one-shot startupArgs like `-c "exit 0"`) is spawned directly.
+    let spawnCommand = profile.command;
+    let spawnArgs: ReadonlyArray<string> = cliArgs;
+    if (this.profile !== "shell") {
+      spawnCommand = "/bin/bash";
+      spawnArgs = [
+        "-lc",
+        PERSISTENT_SHELL_WRAPPER,
+        "remote-session",
+        profile.command,
+        ...cliArgs,
+      ];
+    }
+
     const handle = this.spawner({
-      command: profile.command,
-      args,
+      command: spawnCommand,
+      args: spawnArgs,
       cwd: this.workspacePath,
       env: { ...this.env, REMOTE_SESSION_ID: this.sessionId },
       onStdout: (chunk) => this.publishOutput("stdout", chunk),
@@ -152,7 +183,7 @@ export class SessionAgent {
 
     this.publish("terminal.opened", {
       terminalId: this.terminalId,
-      shell: profile.command,
+      shell: spawnCommand,
     });
 
     void handle.exited.then((result) => {
