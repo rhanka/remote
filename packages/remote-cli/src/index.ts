@@ -55,6 +55,12 @@ import {
 import { run } from "./run.js";
 import { smokeRemoteProfile } from "./smoke.js";
 import { migrateForward, migrateBack } from "./migrate.js";
+import {
+  listMigrationCandidates,
+  humanSize,
+  humanAge,
+} from "./migrate-candidates.js";
+import { createInterface } from "node:readline";
 
 import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
 
@@ -989,6 +995,118 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           ...(opts.attach === false ? { noAttach: true } : {}),
           ...(opts.reconnect ? { reconnect: true } : {}),
         });
+      },
+    );
+
+  migrateCommand
+    .command("ls")
+    .description(
+      "List local CLI sessions that can be migrated (claude conversations under ~/.claude/projects)",
+    )
+    .action(() => {
+      const now = Date.now();
+      const candidates = listMigrationCandidates();
+      if (candidates.length === 0) {
+        process.stdout.write(
+          "[remote] no local claude sessions found under ~/.claude/projects\n",
+        );
+        return;
+      }
+      process.stdout.write("#    AGE    SIZE    CONVS  GIT  MIGRATED  PATH\n");
+      candidates.forEach((c, i) => {
+        const n = String(i + 1).padEnd(4);
+        const age = humanAge(c.lastActivity, now).padEnd(6);
+        const size = humanSize(c.sizeBytes).padEnd(7);
+        const convs = String(c.convCount).padEnd(6);
+        const git = (c.isGit ? "yes" : "no").padEnd(4);
+        const mig = (c.linked ? "yes" : "no").padEnd(9);
+        const missing = c.exists ? "" : "  (dir missing)";
+        process.stdout.write(
+          `${n} ${age} ${size} ${convs} ${git} ${mig} ${c.path}${missing}\n`,
+        );
+      });
+      process.stdout.write(
+        "\nMigrate one: cd <path> && remote migrate forward claude --resume\n" +
+          "Pick interactively: remote migrate pick\n",
+      );
+    });
+
+  migrateCommand
+    .command("pick")
+    .description(
+      "Interactively select which local sessions to migrate to the remote cluster (git repos only)",
+    )
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .option("--profile <profile>", "CLI profile to start remotely", "claude")
+    .option("--no-resume", "do not resume the conversation on the remote CLI")
+    .action(
+      async (opts: {
+        remote?: string;
+        profile?: string;
+        resume?: boolean;
+      }) => {
+        const remoteUrl = getConfiguredRemote(opts.remote);
+        const profile = opts.profile ?? "claude";
+        const now = Date.now();
+        const candidates = listMigrationCandidates().filter(
+          (c) => c.exists && c.isGit,
+        );
+        if (candidates.length === 0) {
+          process.stdout.write(
+            "[remote] no migratable git-backed sessions found\n",
+          );
+          return;
+        }
+        process.stdout.write("Local sessions you can migrate:\n\n");
+        candidates.forEach((c, i) => {
+          const age = humanAge(c.lastActivity, now).padStart(4);
+          const size = humanSize(c.sizeBytes).padStart(6);
+          const tag = c.linked ? " [already migrated]" : "";
+          process.stdout.write(
+            `  ${String(i + 1).padStart(2)}) ${age} ago  ${size}  ${c.path}${tag}\n`,
+          );
+        });
+        const rl = createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(
+            "\nNumbers to migrate (e.g. 1,3,5 — empty to cancel): ",
+            resolve,
+          );
+        });
+        rl.close();
+        const chosen = answer
+          .split(/[\s,]+/)
+          .map((s) => Number.parseInt(s, 10))
+          .filter(
+            (n) => Number.isInteger(n) && n >= 1 && n <= candidates.length,
+          )
+          .map((n) => candidates[n - 1]!);
+        if (chosen.length === 0) {
+          process.stdout.write("[remote] nothing selected — cancelled\n");
+          return;
+        }
+        for (const c of chosen) {
+          process.stdout.write(`\n=== migrating ${c.path} ===\n`);
+          try {
+            await migrateForward({
+              profile,
+              remoteUrl,
+              cwd: c.path,
+              ...(opts.resume === false ? {} : { resume: true }),
+              noAttach: true,
+            });
+          } catch (err) {
+            process.stderr.write(
+              `[remote] failed to migrate ${c.path}: ${String(err)}\n`,
+            );
+          }
+        }
       },
     );
 
