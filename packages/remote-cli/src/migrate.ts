@@ -84,6 +84,13 @@ export type MigrateForwardOptions = {
    * remote session itself (rather than this process taking it over).
    */
   readonly noAttach?: boolean;
+  /**
+   * Revive a session on the EXISTING workspace without re-pushing the project
+   * (preserves work done remotely) — for bringing a session back after an
+   * accidental exit. Path/HOME parity + resume still apply; the conversation is
+   * the one already on the retained PVC.
+   */
+  readonly reconnect?: boolean;
   /** Inject a custom fetch for tests. */
   readonly fetchImpl?: typeof fetch;
   /** Override process.cwd() for tests. */
@@ -450,16 +457,23 @@ export async function migrateForward(
     writeWorkspaceMarker(cwd, { ...marker, path: workspacePath, home });
   }
 
-  // When resuming, stage the live conversation so it rides the pushed archive
-  // and the session-agent restores it into HOME — the remote CLI then resumes
-  // exactly where the local session left off (path parity makes the project
-  // dir encoding match on both sides).
-  if (resume !== undefined) {
-    captureLiveConversation(cwd, profile, home, stderr);
+  if (options.reconnect) {
+    // Revive on the existing PVC: no capture, no push — the conversation and any
+    // work done remotely are already on the retained workspace volume.
+    stderr.write(
+      `[remote] reconnect: reusing workspace ${marker.workspaceId} as-is (no push)\n`,
+    );
+  } else {
+    // When resuming, stage the live conversation so it rides the pushed archive
+    // and the session-agent restores it into HOME — the remote CLI then resumes
+    // exactly where the local session left off (path parity makes the project
+    // dir encoding match on both sides).
+    if (resume !== undefined) {
+      captureLiveConversation(cwd, profile, home, stderr);
+    }
+    // Step 2 & 3: push workspace.
+    await pushWorkspace(cwd, remoteUrl, marker.workspaceId, fetchImpl, stderr);
   }
-
-  // Step 2 & 3: push workspace.
-  await pushWorkspace(cwd, remoteUrl, marker.workspaceId, fetchImpl, stderr);
 
   // Step 4: create remote session. Bundle the profile's local credentials so
   // the migrated CLI is authenticated in-pod, mirroring the `remote <profile>`

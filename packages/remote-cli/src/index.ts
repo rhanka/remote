@@ -964,6 +964,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--no-attach",
       "create the remote session without hijacking this terminal; print the attach command instead (for bulk migration / reconnecting your own terminal)",
     )
+    .option(
+      "--reconnect",
+      "revive a session on the EXISTING workspace without re-pushing files (preserves work done remotely) — use after an accidental exit (Ctrl+C/Ctrl+D) to bring the session back from its retained PVC with path parity + --resume",
+    )
     .action(
       async (
         profile: string,
@@ -972,6 +976,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           workspace?: string;
           resume?: string | true;
           attach?: boolean;
+          reconnect?: boolean;
         },
       ) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
@@ -982,6 +987,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
           // commander sets opts.attach=false for --no-attach (default true).
           ...(opts.attach === false ? { noAttach: true } : {}),
+          ...(opts.reconnect ? { reconnect: true } : {}),
         });
       },
     );
