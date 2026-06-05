@@ -1,8 +1,20 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { authHeaders } from "./config.js";
+
+// Largest .git we ship in the workspace archive. Over this, the repo history is
+// not transferred (the user restores it in-Pod via git fetch/clone).
+const MAX_GIT_BYTES = 128 * 1024 * 1024; // 128 MiB
+
+/** Best-effort directory size in bytes via `du -sk`. Infinity on failure (so we skip). */
+async function dirSizeBytes(absPath: string): Promise<number> {
+  const r = await run("du", ["-sk", absPath], dirname(absPath));
+  if (r.status !== 0) return Number.POSITIVE_INFINITY;
+  const kb = parseInt(r.stdout.toString("utf8").trim().split(/\s+/)[0] ?? "", 10);
+  return Number.isFinite(kb) ? kb * 1024 : Number.POSITIVE_INFINITY;
+}
 
 // Safety cap against accidentally pushing huge directories. Generous because a
 // legitimate migrated conversation (.remote/sessions) can be large — claude
@@ -84,11 +96,21 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
     );
     // Force-include the .git directory (git ls-files never lists it) so the
     // remote workspace is a real git repo — commit/push works in the Pod and
-    // the remote/branch config travels. (A worktree's .git is a file; including
-    // it alone is harmless.)
-    const gitDir = existsSync(join(cwd, ".git"))
-      ? Buffer.from(".git\0", "utf8")
-      : Buffer.alloc(0);
+    // the remote/branch config travels. Size-gated: huge histories blow the
+    // archive cap and the tunnel, so over MAX_GIT_BYTES we skip the objects and
+    // let the user restore git in-Pod (git fetch/clone — gh auth is bundled).
+    let gitDir = Buffer.alloc(0);
+    if (existsSync(join(cwd, ".git"))) {
+      const gitBytes = await dirSizeBytes(join(cwd, ".git"));
+      if (gitBytes <= MAX_GIT_BYTES) {
+        gitDir = Buffer.from(".git\0", "utf8");
+      } else {
+        process.stderr.write(
+          `[remote] .git is ${(gitBytes / 1024 / 1024).toFixed(0)} MiB (> ${MAX_GIT_BYTES / 1024 / 1024} MiB) — not shipped; ` +
+            `restore git in the Pod with 'git fetch'/'git clone' (gh auth is bundled if you pass --with gh)\n`,
+        );
+      }
+    }
     const fileList = Buffer.concat([
       list.stdout,
       sessionState.status === 0 ? sessionState.stdout : Buffer.alloc(0),
