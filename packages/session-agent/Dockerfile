@@ -87,6 +87,16 @@ RUN curl -fsSL "https://github.com/scaleway/scaleway-cli/releases/download/v${SC
       -o /usr/local/bin/scw \
  && chmod +x /usr/local/bin/scw
 
+# Put rust/go on the DEFAULT PATH: the session runs the CLI in a login shell
+# (`bash -lc`), which resets PATH to the system default and would otherwise drop
+# /usr/local/cargo/bin and /usr/local/go/bin. Symlink the binaries into
+# /usr/local/bin (already on every shell's PATH); CARGO_HOME/RUSTUP_HOME stay in
+# the inherited env. Also export them via profile.d for interactive logins.
+RUN ln -sf /usr/local/cargo/bin/* /usr/local/bin/ \
+ && ln -sf /usr/local/go/bin/* /usr/local/bin/ \
+ && printf 'export CARGO_HOME=/usr/local/cargo\nexport RUSTUP_HOME=/usr/local/rustup\nexport PATH=/usr/local/cargo/bin:/usr/local/go/bin:$PATH\n' \
+      > /etc/profile.d/dev-toolchains.sh
+
 # Copy the entire installed workspace (with hoisted node_modules) plus the
 # compiled dist outputs. node-pty's native binary built in the builder stage
 # is preserved this way without rerunning native compilation.
