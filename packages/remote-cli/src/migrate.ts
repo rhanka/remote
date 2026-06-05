@@ -229,6 +229,30 @@ const STATE_SUBDIR = ".remote/sessions";
  * so the staged conversation is found on resume. Returns the staged conversation
  * id (filename stem), or undefined if nothing was captured.
  */
+/**
+ * Most-recent local conversation id for `cwd` (the active session), or
+ * undefined. Used to pass the exact id to the remote CLI's `--resume <id>` so it
+ * resumes directly instead of showing the interactive picker.
+ */
+function newestLocalConvId(
+  cwd: string,
+  profile: string,
+  home: string,
+): string | undefined {
+  const relDir = PROFILE_STATE_DIRS[profile];
+  if (!relDir) return undefined;
+  const src = join(home, relDir, cwd.replace(/\//g, "-"));
+  if (!existsSync(src)) return undefined;
+  let newest: { name: string; mtime: number } | undefined;
+  for (const e of readdirSync(src, { withFileTypes: true })) {
+    if (e.isFile() && e.name.endsWith(".jsonl")) {
+      const m = statSync(join(src, e.name)).mtimeMs;
+      if (!newest || m > newest.mtime) newest = { name: e.name, mtime: m };
+    }
+  }
+  return newest?.name.replace(/\.jsonl$/, "");
+}
+
 function captureLiveConversation(
   cwd: string,
   profile: string,
@@ -493,6 +517,16 @@ export async function migrateForward(
     writeWorkspaceMarker(cwd, { ...marker, path: workspacePath, home });
   }
 
+  // Resume the EXACT conversation by id so the remote CLI loads it directly
+  // instead of showing its interactive picker. `resume === true` ("most recent")
+  // is resolved to the local conversation id — which matches what the agent
+  // restores in the Pod thanks to path parity (same project-dir encoding).
+  let resolvedResume = resume;
+  if (resume === true) {
+    const cid = newestLocalConvId(cwd, profile, home);
+    if (cid) resolvedResume = cid;
+  }
+
   if (options.reconnect) {
     // Revive on the existing PVC: no capture, no push — the conversation and any
     // work done remotely are already on the retained workspace volume.
@@ -531,7 +565,10 @@ export async function migrateForward(
   const credentials: Readonly<Record<string, string>> | undefined =
     Object.keys(authFiles).length > 0 ? authFiles : undefined;
 
-  const resumeArgs = resume !== undefined ? buildResumeStartupArgs(profile, resume) : [];
+  const resumeArgs =
+    resolvedResume !== undefined
+      ? buildResumeStartupArgs(profile, resolvedResume)
+      : [];
   const session = await createRemoteSession(
     remoteUrl,
     {
