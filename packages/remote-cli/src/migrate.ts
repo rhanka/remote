@@ -321,6 +321,22 @@ function writeGitMetadata(cwd: string, stderr: NodeJS.WriteStream): void {
 }
 
 /**
+ * Friendly project name for display in `remote ls`/`status`/`secrets`: the short
+ * GitHub repo name (last segment of origin) if it's a git repo, else the source
+ * directory basename.
+ */
+function friendlyName(cwd: string): string {
+  const r = spawnSync("git", ["remote", "get-url", "origin"], {
+    cwd,
+    encoding: "utf8",
+  });
+  const origin = r.status === 0 ? r.stdout.trim() : "";
+  const m = origin ? /([^/:]+?)(?:\.git)?$/.exec(origin) : null;
+  if (m && m[1]) return m[1];
+  return cwd.replace(/\/+$/, "").split("/").pop() ?? cwd;
+}
+
+/**
  * Push workspace project files to the remote, reusing the same pattern as
  * `workspace push` in index.ts.
  */
@@ -576,6 +592,7 @@ export async function migrateForward(
       workspaceId: marker.workspaceId,
       workspacePath,
       home,
+      displayName: friendlyName(cwd),
       workspaceSync: true,
       ...(credentials ? { credentials } : {}),
       ...(resumeArgs.length > 0 ? { startupArgs: resumeArgs } : {}),

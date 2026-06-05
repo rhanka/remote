@@ -344,6 +344,7 @@ export async function listRemoteSessions(
     profile: string;
     target: string;
     createdAt: string;
+    workspaceId?: string;
     workspacePath?: string;
     displayName?: string;
     cliSessionId?: string;
@@ -363,6 +364,7 @@ export async function listRemoteSessions(
       profile: string;
       target: string;
       createdAt: string;
+      workspaceId?: string;
       workspacePath?: string;
       displayName?: string;
       cliSessionId?: string;

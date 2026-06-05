@@ -369,6 +369,21 @@ function resolveTools(withOpt?: string): string[] {
   return known;
 }
 
+/** Friendly project name for a session: displayName, else the workspace dir basename, else the id. */
+function projectName(s: {
+  displayName?: string;
+  workspacePath?: string;
+  id: string;
+}): string {
+  const dn = s.displayName?.trim();
+  if (dn) return dn;
+  if (s.workspacePath) {
+    const base = s.workspacePath.replace(/\/+$/, "").split("/").pop();
+    if (base) return base;
+  }
+  return s.id;
+}
+
 function resolveUrlAndSessionId(
   first: string,
   second: string | undefined,
@@ -1117,7 +1132,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       if (remote.length === 0) process.stdout.write("  (none)\n");
       for (const s of remote) {
         process.stdout.write(
-          `  ${mark(s.id).padEnd(11)} ${s.id}  ${(s.profile ?? "").padEnd(7)} ${s.workspacePath ?? s.target ?? ""}  creds: ${secretsSummary(s.id)}\n`,
+          `  ${mark(s.id).padEnd(11)} ${projectName(s).padEnd(20)} ${(s.profile ?? "").padEnd(7)} ${s.id}  creds: ${secretsSummary(s.id)}\n`,
         );
       }
 
@@ -1176,14 +1191,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
 
       const sessions = await listRemoteSessions(url);
-      process.stdout.write(`Transmitted secrets per session @ ${url}:\n`);
+      process.stdout.write(`Transmitted secrets per project @ ${url}:\n`);
       if (sessions.length === 0) {
         process.stdout.write("  (none)\n");
         return;
       }
       for (const s of sessions) {
         process.stdout.write(
-          `  ${s.id}  ${(s.profile ?? "").padEnd(7)} ${secretsSummary(s.id)}\n`,
+          `  ${projectName(s).padEnd(22)} ${secretsSummary(s.id)}   (${s.id})\n`,
         );
       }
       process.stdout.write(
@@ -1465,21 +1480,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write("[remote] no sessions\n");
         return;
       }
-      const rows = sessions.map((s) =>
-        [
-          s.id,
-          s.profile,
-          s.cliSessionId ?? "-",
-          s.target,
-          s.createdAt,
-          s.displayName ?? "",
-        ].join("\t"),
-      );
+      const w = (s: string, n: number) => s.padEnd(n);
       process.stdout.write(
-        ["ID\tPROFILE\tCLI_SESSION\tTARGET\tCREATED\tDISPLAY", ...rows].join(
-          "\n",
-        ) + "\n",
+        `${w("PROJECT", 22)} ${w("WORKSPACE", 13)} ${w("PROFILE", 7)} ${w("SESSION", 15)} TARGET\n`,
       );
+      for (const s of sessions) {
+        process.stdout.write(
+          `${w(projectName(s), 22)} ${w(s.workspaceId ?? "-", 13)} ${w(s.profile, 7)} ${w(s.id, 15)} ${s.target}\n`,
+        );
+      }
     });
 
   program
