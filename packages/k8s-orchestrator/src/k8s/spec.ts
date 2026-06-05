@@ -91,6 +91,16 @@ export type SpecBuilderOptions = {
   readonly home: string;
 };
 
+// HOME-relative conversation/log dir each CLI writes, persisted on the PVC via a
+// subPath mount (mirrors session-state's PROFILE_STATE_DIRS on the agent side).
+const CONVERSATION_DIRS: Readonly<Record<string, string>> = {
+  claude: ".claude/projects",
+  "claude-code": ".claude/projects",
+  codex: ".codex/sessions",
+  agy: ".gemini/antigravity-cli/conversations",
+  antigravity: ".gemini/antigravity-cli/conversations",
+};
+
 const PVC_VOLUME = "workspace";
 const AUTH_VOLUME = "auth";
 const POD_CONTAINER = "session-agent";
@@ -252,6 +262,22 @@ export function buildSessionPodSpec(
       persistentVolumeClaim: { claimName },
     },
   ];
+
+  // Persist the wrapped CLI's conversation log DURABLY by mounting it from the
+  // (retained, RWX) workspace PVC via subPath — declarative, no runtime symlink
+  // surgery. The migrate seeds the conversation at the matching PVC subPath, so
+  // it surfaces here on resume and every in-session write lands on the volume
+  // (survives pod restart/re-deport). Narrow on purpose: only the conversation
+  // dir, never all of HOME (auth files stay Secret-sourced + ephemeral).
+  const convRelDir = CONVERSATION_DIRS[descriptor.profile];
+  if (convRelDir) {
+    const sessionHome = descriptor.home ?? options.home;
+    volumeMounts.push({
+      name: PVC_VOLUME,
+      mountPath: `${sessionHome}/${convRelDir}`,
+      subPath: `.remote/sessions/${descriptor.profile}/${convRelDir}`,
+    });
+  }
 
   if (authPaths.length > 0) {
     for (const relPath of authPaths) {
