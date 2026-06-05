@@ -395,6 +395,33 @@ export async function refreshRemoteSession(
   return { sessionId: json.sessionId, accepted: json.accepted };
 }
 
+/**
+ * Probe whether a session's terminal can receive input (i.e. the session-agent
+ * is connected). Sends an empty (no-op) input frame: 202 = agent connected,
+ * 503 = no agent (deaf/zombie), anything else = unknown.
+ */
+export async function sessionTerminalHealth(
+  baseUrl: string,
+  sessionId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<"ready" | "agent-down" | "unknown"> {
+  try {
+    const response = await fetchImpl(
+      joinUrl(baseUrl, `/sessions/${sessionId}/terminal/input`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ terminalId: sessionId, data: "", encoding: "utf8" }),
+      },
+    );
+    if (response.status === 202) return "ready";
+    if (response.status === 503) return "agent-down";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export async function createRemoteSession(
   baseUrl: string,
   body: {

@@ -49,6 +49,8 @@ vi.mock("./config.js", () => ({
   setTunnel: () => {},
   getDefaultTarget: () => "scaleway-kapsule",
   setDefaultTarget: () => {},
+  getDefaultTools: () => [],
+  setDefaultTools: () => {},
   DEFAULT_SESSION_TARGET: "scaleway-kapsule",
   authHeaders: () => ({}),
   resolveConfigPath: () => "/tmp/remote-cli-test-config.json",

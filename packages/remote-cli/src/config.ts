@@ -25,6 +25,8 @@ export type RemoteCliConfig = {
   tunnel?: TunnelConfig;
   /** Session target label (where the workload runs). Defaults to scaleway-kapsule. */
   defaultTarget?: string;
+  /** Tool CLIs whose auth to bundle into deported sessions by default (scw, gh, …). */
+  defaultTools?: string[];
 };
 
 /** Default session target when none is configured/passed. */
@@ -86,6 +88,12 @@ export function readRemoteConfig(): RemoteCliConfig {
       if (typeof parsed.token === "string") config.token = parsed.token;
       if (typeof parsed.defaultTarget === "string")
         config.defaultTarget = parsed.defaultTarget;
+      if (
+        Array.isArray(parsed.defaultTools) &&
+        parsed.defaultTools.every((t: unknown) => typeof t === "string")
+      ) {
+        config.defaultTools = parsed.defaultTools;
+      }
       const tunnel = parseTunnel(parsed.tunnel);
       if (tunnel) config.tunnel = tunnel;
       return config;
@@ -126,6 +134,14 @@ export function getDefaultTarget(): SessionTarget {
 
 export function setDefaultTarget(value: string): void {
   writeRemoteConfig({ ...readRemoteConfig(), defaultTarget: value });
+}
+
+export function getDefaultTools(): string[] {
+  return readRemoteConfig().defaultTools ?? [];
+}
+
+export function setDefaultTools(tools: string[]): void {
+  writeRemoteConfig({ ...readRemoteConfig(), defaultTools: tools });
 }
 
 export function getTunnel(): TunnelConfig | undefined {

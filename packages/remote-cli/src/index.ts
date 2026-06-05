@@ -10,20 +10,28 @@ import {
   getRemoteSession,
   listRemoteSessions,
   refreshRemoteSession,
+  sessionTerminalHealth,
   stopRemoteSession,
 } from "./attach.js";
 import {
   clearDefaultRemote,
   getDefaultRemote,
   getDefaultTarget,
+  getDefaultTools,
   getTunnel,
   setDefaultRemote,
   setDefaultTarget,
+  setDefaultTools,
   setToken,
   setTunnel,
   type TunnelConfig,
 } from "./config.js";
 import { ensureConnected, stopTunnel } from "./tunnel.js";
+import {
+  detectToolAuth,
+  KNOWN_TOOLS,
+  partitionTools,
+} from "./auth-tools.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -341,6 +349,23 @@ function getConfiguredRemoteOptional(): string | undefined {
 
 function looksLikeUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
+}
+
+/**
+ * Resolve the tool list to bundle: `--with a,b` overrides the configured
+ * default (`remote config tools …`). Unknown tools are dropped with a warning.
+ */
+function resolveTools(withOpt?: string): string[] {
+  const raw = withOpt
+    ? withOpt.split(",").map((s) => s.trim()).filter(Boolean)
+    : getDefaultTools();
+  const { known, unknown } = partitionTools(raw);
+  if (unknown.length > 0) {
+    process.stderr.write(
+      `[remote] ignoring unknown tools: ${unknown.join(", ")} (known: ${KNOWN_TOOLS.join(", ")})\n`,
+    );
+  }
+  return known;
 }
 
 function resolveUrlAndSessionId(
@@ -937,6 +962,28 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     });
 
   configCommand
+    .command("tools <list>")
+    .description(
+      `Set the default tool CLIs whose auth is bundled into deported sessions (comma-separated, known: ${KNOWN_TOOLS.join(", ")}; use "none" to clear)`,
+    )
+    .action((list: string) => {
+      const requested =
+        list.trim() === "none"
+          ? []
+          : list.split(",").map((s) => s.trim()).filter(Boolean);
+      const { known, unknown } = partitionTools(requested);
+      if (unknown.length > 0) {
+        process.stderr.write(
+          `[remote] unknown tools ignored: ${unknown.join(", ")}\n`,
+        );
+      }
+      setDefaultTools(known);
+      process.stderr.write(
+        `[remote] default tools: ${known.length > 0 ? known.join(", ") : "(none)"}\n`,
+      );
+    });
+
+  configCommand
     .command("clear")
     .description("Clear default remote URL")
     .action(() => {
@@ -953,6 +1000,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         remote ? `${remote}\n` : "[remote] no default remote configured\n",
       );
       process.stdout.write(`target: ${getDefaultTarget()}\n`);
+      const tools = getDefaultTools();
+      if (tools.length > 0) process.stdout.write(`tools: ${tools.join(", ")}\n`);
       const tunnel = getTunnel();
       if (tunnel) {
         process.stdout.write(
@@ -1022,6 +1071,46 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       );
     });
 
+  program
+    .command("status")
+    .description(
+      "Show which local tool CLIs are authenticated (candidates to deport) and the health of remote sessions",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(async (opts: { remote?: string }) => {
+      process.stdout.write(
+        "Local tool auth (deport with --with <tools> or 'remote config tools'):\n",
+      );
+      for (const t of detectToolAuth()) {
+        process.stdout.write(
+          `  ${t.present ? "✓" : "·"} ${t.tool.padEnd(8)} ${
+            t.present ? "authenticated locally" : `not set up — ${t.loginHint}`
+          }\n`,
+        );
+      }
+
+      const url = getConfiguredRemote(opts.remote);
+      await ensureConnected(url);
+      const sessions = await listRemoteSessions(url);
+      process.stdout.write(`\nRemote sessions @ ${url}:\n`);
+      if (sessions.length === 0) {
+        process.stdout.write("  (none)\n");
+        return;
+      }
+      for (const s of sessions) {
+        const health = await sessionTerminalHealth(url, s.id);
+        const mark =
+          health === "ready"
+            ? "● ready"
+            : health === "agent-down"
+              ? "○ agent-down"
+              : "? unknown";
+        process.stdout.write(
+          `  ${mark.padEnd(13)} ${s.id}  ${(s.profile ?? "").padEnd(7)} ${s.target ?? ""}\n`,
+        );
+      }
+    });
+
   // ---------------------------------------------------------------------------
   // migrate
   // ---------------------------------------------------------------------------
@@ -1057,6 +1146,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--reconnect",
       "revive a session on the EXISTING workspace without re-pushing files (preserves work done remotely) — use after an accidental exit (Ctrl+C/Ctrl+D) to bring the session back from its retained PVC with path parity + --resume",
     )
+    .option(
+      "--with <tools>",
+      `comma-separated tool CLIs whose local auth to also bundle into the Pod (known: ${KNOWN_TOOLS.join(", ")}); defaults to 'remote config tools'`,
+    )
     .action(
       async (
         profile: string,
@@ -1066,10 +1159,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           resume?: string | true;
           attach?: boolean;
           reconnect?: boolean;
+          with?: string;
         },
       ) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
         await ensureConnected(remoteUrl);
+        const tools = resolveTools(opts.with);
         await migrateForward({
           profile,
           remoteUrl,
@@ -1078,6 +1173,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           // commander sets opts.attach=false for --no-attach (default true).
           ...(opts.attach === false ? { noAttach: true } : {}),
           ...(opts.reconnect ? { reconnect: true } : {}),
+          ...(tools.length > 0 ? { tools } : {}),
         });
       },
     );
@@ -1126,15 +1222,21 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option("--profile <profile>", "CLI profile to start remotely", "claude")
     .option("--no-resume", "do not resume the conversation on the remote CLI")
+    .option(
+      "--with <tools>",
+      `comma-separated tool CLIs whose auth to bundle (known: ${KNOWN_TOOLS.join(", ")}); defaults to 'remote config tools'`,
+    )
     .action(
       async (opts: {
         remote?: string;
         profile?: string;
         resume?: boolean;
+        with?: string;
       }) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
         await ensureConnected(remoteUrl);
         const profile = opts.profile ?? "claude";
+        const tools = resolveTools(opts.with);
         const now = Date.now();
         const candidates = listMigrationCandidates().filter(
           (c) => c.exists && c.isGit,
@@ -1185,6 +1287,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
               cwd: c.path,
               ...(opts.resume === false ? {} : { resume: true }),
               noAttach: true,
+              ...(tools.length > 0 ? { tools } : {}),
             });
           } catch (err) {
             process.stderr.write(

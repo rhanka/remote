@@ -35,6 +35,7 @@ import { join } from "node:path";
 import { attach, createRemoteSession, stopRemoteSession } from "./attach.js";
 import { coerceCliProfileName, resolveProfile } from "./profiles.js";
 import { collectProfileAuth } from "./auth-bundle.js";
+import { collectToolAuth } from "./auth-tools.js";
 import {
   acquireWorkspaceLock,
   createWorkspace,
@@ -91,6 +92,8 @@ export type MigrateForwardOptions = {
    * the one already on the retained PVC.
    */
   readonly reconnect?: boolean;
+  /** Tool CLIs whose local auth to also bundle into the Pod (scw, gh, aws, …). */
+  readonly tools?: ReadonlyArray<string>;
   /** Inject a custom fetch for tests. */
   readonly fetchImpl?: typeof fetch;
   /** Override process.cwd() for tests. */
@@ -479,9 +482,17 @@ export async function migrateForward(
   // the migrated CLI is authenticated in-pod, mirroring the `remote <profile>`
   // run path. Missing creds are tolerated (the session still starts; shell /
   // opencode need none) — we warn rather than hard-fail.
-  let credentials: Readonly<Record<string, string>> | undefined;
-  const bundle = await collectProfileAuth(profile);
-  if (Object.keys(bundle).length > 0) credentials = bundle;
+  const authFiles: Record<string, string> = { ...(await collectProfileAuth(profile)) };
+  // Also bundle the auth of selected tool CLIs (scw, gh, aws, gcloud, az) so
+  // they work inside the Pod — opt-in via `tools`.
+  let bundledTools: string[] = [];
+  if (options.tools && options.tools.length > 0) {
+    const { bundle: toolBundle, bundled } = await collectToolAuth(options.tools);
+    Object.assign(authFiles, toolBundle);
+    bundledTools = bundled;
+  }
+  const credentials: Readonly<Record<string, string>> | undefined =
+    Object.keys(authFiles).length > 0 ? authFiles : undefined;
 
   const resumeArgs = resume !== undefined ? buildResumeStartupArgs(profile, resume) : [];
   const session = await createRemoteSession(
@@ -502,6 +513,9 @@ export async function migrateForward(
       ? `[remote] bundled ${profile} creds: ${Object.keys(credentials).join(", ")}\n`
       : `[remote] no ${profile} creds found locally — session starts unauthenticated\n`,
   );
+  if (bundledTools.length > 0) {
+    stderr.write(`[remote] bundled tool auth: ${bundledTools.join(", ")}\n`);
+  }
 
   stderr.write(
     `[remote] migrated to remote session ${session.id} on ${remoteUrl} (workspace ${marker.workspaceId})\n`,

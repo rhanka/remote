@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 import { authHeaders } from "./config.js";
 
@@ -80,10 +82,18 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
       ],
       cwd,
     );
-    const fileList =
-      sessionState.status === 0 && sessionState.stdout.byteLength > 0
-        ? Buffer.concat([list.stdout, sessionState.stdout])
-        : list.stdout;
+    // Force-include the .git directory (git ls-files never lists it) so the
+    // remote workspace is a real git repo — commit/push works in the Pod and
+    // the remote/branch config travels. (A worktree's .git is a file; including
+    // it alone is harmless.)
+    const gitDir = existsSync(join(cwd, ".git"))
+      ? Buffer.from(".git\0", "utf8")
+      : Buffer.alloc(0);
+    const fileList = Buffer.concat([
+      list.stdout,
+      sessionState.status === 0 ? sessionState.stdout : Buffer.alloc(0),
+      gitDir,
+    ]);
     const tar = await runWithStdin(
       "tar",
       ["-czf", "-", "--null", "-T", "-"],
