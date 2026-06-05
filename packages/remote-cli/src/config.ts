@@ -2,10 +2,47 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+/**
+ * How the CLI reaches the control-plane when the configured URL is not directly
+ * routable (no public ingress). When set, the CLI brings this tunnel up on
+ * demand (kubectl port-forward) at connect/attach/ls/migrate time — so the user
+ * never manages a port-forward by hand.
+ */
+export type TunnelConfig = {
+  /** kubeconfig path (a leading ~ is expanded); defaults to kubectl's default. */
+  kubeconfig?: string;
+  namespace: string;
+  service: string;
+  localPort: number;
+  remotePort: number;
+};
+
 export type RemoteCliConfig = {
   defaultRemote?: string;
   token?: string;
+  tunnel?: TunnelConfig;
 };
+
+function parseTunnel(raw: unknown): TunnelConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const t = raw as Record<string, unknown>;
+  if (
+    typeof t.namespace !== "string" ||
+    typeof t.service !== "string" ||
+    typeof t.localPort !== "number" ||
+    typeof t.remotePort !== "number"
+  ) {
+    return undefined;
+  }
+  const tunnel: TunnelConfig = {
+    namespace: t.namespace,
+    service: t.service,
+    localPort: t.localPort,
+    remotePort: t.remotePort,
+  };
+  if (typeof t.kubeconfig === "string") tunnel.kubeconfig = t.kubeconfig;
+  return tunnel;
+}
 
 // Resolved lazily so tests can redirect the config home via
 // REMOTE_CLI_CONFIG_HOME without clobbering the real ~/.config.
@@ -40,6 +77,8 @@ export function readRemoteConfig(): RemoteCliConfig {
       if (typeof parsed.defaultRemote === "string")
         config.defaultRemote = parsed.defaultRemote;
       if (typeof parsed.token === "string") config.token = parsed.token;
+      const tunnel = parseTunnel(parsed.tunnel);
+      if (tunnel) config.tunnel = tunnel;
       return config;
     }
     return {};
@@ -67,8 +106,21 @@ export function setDefaultRemote(rawUrl: string): string {
 }
 
 export function clearDefaultRemote(): void {
-  const { token } = readRemoteConfig();
-  writeRemoteConfig(token ? { token } : {});
+  const { defaultRemote: _drop, ...rest } = readRemoteConfig();
+  writeRemoteConfig(rest);
+}
+
+export function getTunnel(): TunnelConfig | undefined {
+  return readRemoteConfig().tunnel;
+}
+
+export function setTunnel(tunnel: TunnelConfig): void {
+  writeRemoteConfig({ ...readRemoteConfig(), tunnel });
+}
+
+export function clearTunnel(): void {
+  const { tunnel: _drop, ...rest } = readRemoteConfig();
+  writeRemoteConfig(rest);
 }
 
 export function getToken(): string | undefined {

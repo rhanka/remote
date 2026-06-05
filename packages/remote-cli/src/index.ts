@@ -15,9 +15,13 @@ import {
 import {
   clearDefaultRemote,
   getDefaultRemote,
+  getTunnel,
   setDefaultRemote,
   setToken,
+  setTunnel,
+  type TunnelConfig,
 } from "./config.js";
+import { ensureConnected, stopTunnel } from "./tunnel.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -161,6 +165,7 @@ async function runProfile(
   commandArgs: readonly string[] = [],
 ): Promise<void> {
   if (opts.remote) {
+    await ensureConnected(opts.remote);
     let credentials: Readonly<Record<string, string>> | undefined;
     if (opts.auth !== false && isCliProfile(profileName)) {
       if (opts.authRefresh !== false) {
@@ -929,14 +934,79 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   configCommand
     .command("show")
-    .description("Display configured default remote URL")
+    .description("Display configured default remote URL (and tunnel, if any)")
     .action(() => {
       const remote = getDefaultRemote();
-      if (remote) {
-        process.stdout.write(`${remote}\n`);
-      } else {
-        process.stdout.write("[remote] no default remote configured\n");
+      process.stdout.write(
+        remote ? `${remote}\n` : "[remote] no default remote configured\n",
+      );
+      const tunnel = getTunnel();
+      if (tunnel) {
+        process.stdout.write(
+          `tunnel: kubectl -n ${tunnel.namespace} port-forward svc/${tunnel.service} ${tunnel.localPort}:${tunnel.remotePort}` +
+            `${tunnel.kubeconfig ? ` (kubeconfig ${tunnel.kubeconfig})` : ""}\n`,
+        );
       }
+    });
+
+  configCommand
+    .command("tunnel")
+    .description(
+      "Configure how the CLI reaches the control-plane when there is no public ingress (kubectl port-forward, opened automatically on connect/attach/ls/migrate)",
+    )
+    .requiredOption("--namespace <ns>", "namespace of the control-plane service")
+    .requiredOption("--service <svc>", "control-plane Service name")
+    .option("--kubeconfig <path>", "kubeconfig path (~ is expanded)")
+    .option("--local-port <port>", "local port", (v: string) => parseInt(v, 10), 8080)
+    .option("--remote-port <port>", "service port", (v: string) => parseInt(v, 10), 8080)
+    .action(
+      (opts: {
+        namespace: string;
+        service: string;
+        kubeconfig?: string;
+        localPort: number;
+        remotePort: number;
+      }) => {
+        const tunnel: TunnelConfig = {
+          namespace: opts.namespace,
+          service: opts.service,
+          localPort: opts.localPort,
+          remotePort: opts.remotePort,
+          ...(opts.kubeconfig ? { kubeconfig: opts.kubeconfig } : {}),
+        };
+        setTunnel(tunnel);
+        process.stderr.write(
+          `[remote] tunnel configured: kubectl -n ${tunnel.namespace} port-forward svc/${tunnel.service} ${tunnel.localPort}:${tunnel.remotePort}\n`,
+        );
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // connect / disconnect — manage the on-demand tunnel
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("connect")
+    .description(
+      "Ensure the control-plane is reachable, opening the configured tunnel if needed",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(async (opts: { remote?: string }) => {
+      const url = getConfiguredRemote(opts.remote);
+      await ensureConnected(url);
+      process.stderr.write(`[remote] connected: ${url}\n`);
+    });
+
+  program
+    .command("disconnect")
+    .description("Close the managed control-plane tunnel (if any)")
+    .action(() => {
+      const stopped = stopTunnel();
+      process.stderr.write(
+        stopped
+          ? "[remote] tunnel closed\n"
+          : "[remote] no managed tunnel was running\n",
+      );
     });
 
   // ---------------------------------------------------------------------------
@@ -986,6 +1056,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         },
       ) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
+        await ensureConnected(remoteUrl);
         await migrateForward({
           profile,
           remoteUrl,
@@ -1049,6 +1120,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         resume?: boolean;
       }) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
+        await ensureConnected(remoteUrl);
         const profile = opts.profile ?? "claude";
         const now = Date.now();
         const candidates = listMigrationCandidates().filter(
@@ -1153,6 +1225,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .action(async (first: string, second: string | undefined) => {
       const { url, sessionId } = resolveUrlAndSessionId(first, second);
+      await ensureConnected(url);
       process.stderr.write(
         `[remote] attaching to ${url}/sessions/${sessionId}\n`,
       );
@@ -1189,7 +1262,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .command("ls [url]")
     .description("List sessions on a remote control-plane")
     .action(async (url: string | undefined) => {
-      const sessions = await listRemoteSessions(getConfiguredRemote(url));
+      const remote = getConfiguredRemote(url);
+      await ensureConnected(remote);
+      const sessions = await listRemoteSessions(remote);
       if (sessions.length === 0) {
         process.stderr.write("[remote] no sessions\n");
         return;

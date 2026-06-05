@@ -45,6 +45,10 @@ vi.mock("./config.js", () => ({
   getDefaultRemote,
   setDefaultRemote,
   setToken,
+  getTunnel: () => undefined,
+  setTunnel: () => {},
+  authHeaders: () => ({}),
+  resolveConfigPath: () => "/tmp/remote-cli-test-config.json",
 }));
 
 vi.mock("./run.js", () => ({
