@@ -1074,39 +1074,57 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   program
     .command("status")
     .description(
-      "Show which local tool CLIs are authenticated (candidates to deport) and the health of remote sessions",
+      "Unified view: local active CLI sessions + remote sessions (correlated by path, with agent health) + local tool auth",
     )
     .option("--remote <url>", "control-plane URL (defaults to configured remote)")
     .action(async (opts: { remote?: string }) => {
-      process.stdout.write(
-        "Local tool auth (deport with --with <tools> or 'remote config tools'):\n",
-      );
-      for (const t of detectToolAuth()) {
+      const now = Date.now();
+      const ACTIVE_MS = 10 * 60 * 1000;
+
+      // Remote sessions + health, indexed by workspace path for correlation.
+      const url = getConfiguredRemote(opts.remote);
+      await ensureConnected(url);
+      const remote = await listRemoteSessions(url);
+      const health = new Map<string, string>();
+      for (const s of remote) health.set(s.id, await sessionTerminalHealth(url, s.id));
+      const remoteByPath = new Map<string, (typeof remote)[number]>();
+      for (const s of remote) if (s.workspacePath) remoteByPath.set(s.workspacePath, s);
+      const mark = (id: string): string => {
+        const h = health.get(id);
+        return h === "ready" ? "● ready" : h === "agent-down" ? "○ down" : "? unknown";
+      };
+
+      // LOCAL sessions (claude conversations), newest first; "●" = active <10min.
+      const local = listMigrationCandidates();
+      process.stdout.write("LOCAL sessions (claude):\n");
+      if (local.length === 0) process.stdout.write("  (none)\n");
+      for (const c of local) {
+        const r = c.exists ? remoteByPath.get(c.path) : undefined;
+        const dot = now - c.lastActivity < ACTIVE_MS ? "●" : "·";
+        const tail = r
+          ? `→ remote ${r.id} (${mark(r.id)})`
+          : c.linked
+            ? "(migrated, not live)"
+            : "";
         process.stdout.write(
-          `  ${t.present ? "✓" : "·"} ${t.tool.padEnd(8)} ${
-            t.present ? "authenticated locally" : `not set up — ${t.loginHint}`
-          }\n`,
+          `  ${dot} ${humanAge(c.lastActivity, now).padStart(4)} ago  ${c.path}${c.isGit ? "" : " [non-git]"}  ${tail}\n`,
         );
       }
 
-      const url = getConfiguredRemote(opts.remote);
-      await ensureConnected(url);
-      const sessions = await listRemoteSessions(url);
-      process.stdout.write(`\nRemote sessions @ ${url}:\n`);
-      if (sessions.length === 0) {
-        process.stdout.write("  (none)\n");
-        return;
-      }
-      for (const s of sessions) {
-        const health = await sessionTerminalHealth(url, s.id);
-        const mark =
-          health === "ready"
-            ? "● ready"
-            : health === "agent-down"
-              ? "○ agent-down"
-              : "? unknown";
+      // REMOTE sessions (cluster), with health + mapped path.
+      process.stdout.write(`\nREMOTE sessions @ ${url}:\n`);
+      if (remote.length === 0) process.stdout.write("  (none)\n");
+      for (const s of remote) {
         process.stdout.write(
-          `  ${mark.padEnd(13)} ${s.id}  ${(s.profile ?? "").padEnd(7)} ${s.target ?? ""}\n`,
+          `  ${mark(s.id).padEnd(11)} ${s.id}  ${(s.profile ?? "").padEnd(7)} ${s.workspacePath ?? s.target ?? ""}\n`,
+        );
+      }
+
+      // Local tool auth (what you can bundle into a deported session).
+      process.stdout.write("\nLOCAL tool auth (deport with --with / 'config tools'):\n");
+      for (const t of detectToolAuth()) {
+        process.stdout.write(
+          `  ${t.present ? "✓" : "·"} ${t.tool.padEnd(8)} ${t.present ? "authenticated" : `not set up — ${t.loginHint}`}\n`,
         );
       }
     });
