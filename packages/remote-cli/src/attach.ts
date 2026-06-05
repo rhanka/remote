@@ -1,6 +1,7 @@
 import type { RemoteEventEnvelope } from "@sentropic/remote-protocol";
 
 import { authHeaders, DEFAULT_SESSION_TARGET } from "./config.js";
+import { ensureConnected } from "./tunnel.js";
 
 export type InputRetryOptions = {
   readonly maxAttempts?: number;
@@ -80,7 +81,7 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
     );
   }
 
-  const reader = sseResponse.body.getReader();
+  let reader = sseResponse.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
   let finishedResolve!: () => void;
@@ -256,38 +257,78 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
 
   (async () => {
     let buffer = "";
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const { events, rest } = parseSseEvents(buffer);
-        buffer = rest;
-        for (const ev of events) {
-          if (
-            ev.event &&
-            ev.event !== "terminal.output" &&
-            ev.event !== "terminal.exited"
-          )
-            continue;
-          try {
-            const envelope = JSON.parse(ev.data) as RemoteEventEnvelope;
-            if (envelope.type === "terminal.output") {
-              const payload = envelope.payload as { data?: string };
-              if (typeof payload.data === "string") stdout.write(payload.data);
-            } else if (envelope.type === "terminal.exited") {
-              await close();
-              return;
+    // Outer loop: stream → on unexpected end (network change / sleep / tunnel
+    // drop / CP restart) reconnect instead of dying. The wrapped session keeps
+    // running server-side; only output buffered during the gap is missed.
+    for (;;) {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const { events, rest } = parseSseEvents(buffer);
+          buffer = rest;
+          for (const ev of events) {
+            if (
+              ev.event &&
+              ev.event !== "terminal.output" &&
+              ev.event !== "terminal.exited"
+            )
+              continue;
+            try {
+              const envelope = JSON.parse(ev.data) as RemoteEventEnvelope;
+              if (envelope.type === "terminal.output") {
+                const payload = envelope.payload as { data?: string };
+                if (typeof payload.data === "string") stdout.write(payload.data);
+              } else if (envelope.type === "terminal.exited") {
+                await close();
+                return;
+              }
+            } catch {
+              // ignore malformed
             }
-          } catch {
-            // ignore malformed
           }
         }
+      } catch {
+        // stream aborted or network error -> reconnect below (or exit if closed)
       }
-    } catch {
-      // stream aborted or network error -> just close
-    } finally {
-      await close();
+      if (closed) return;
+
+      // Reconnect: heal the tunnel and reopen the events stream.
+      stderr.write("\r\n[remote] connection lost — reconnecting…\r\n");
+      buffer = "";
+      let reopened = false;
+      for (let attempt = 0; attempt < 120 && !closed; attempt++) {
+        try {
+          await ensureConnected(baseUrl, stderr);
+          const resp = await doFetch(
+            joinUrl(baseUrl, `/sessions/${sessionId}/events`),
+            {
+              headers: { accept: "text/event-stream", ...authHeaders() },
+              signal: controller.signal,
+            },
+          );
+          if (resp.status === 404) {
+            stderr.write("[remote] session ended\r\n");
+            await close();
+            return;
+          }
+          if (resp.ok && resp.body) {
+            reader = resp.body.getReader();
+            reopened = true;
+            stderr.write("[remote] reconnected\r\n");
+            break;
+          }
+        } catch {
+          // keep retrying
+        }
+        if (closed) return;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (!reopened) {
+        await close();
+        return;
+      }
     }
   })();
 

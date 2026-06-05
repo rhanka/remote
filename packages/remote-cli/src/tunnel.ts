@@ -121,12 +121,17 @@ export async function ensureConnected(
 
   if (await isReachable(url)) return;
 
-  if (!tunnelAlive()) {
-    stderr.write(
-      `[remote] control-plane unreachable — opening tunnel (kubectl port-forward ${tunnel.service} :${tunnel.localPort})\n`,
-    );
-    startTunnelProcess(tunnel);
-  }
+  // Unreachable. A running tunnel PID is NOT proof the tunnel works: after a
+  // control-plane redeploy (forward targets a dead pod), a laptop sleep, or a
+  // network change, the port-forward keeps a local listener but its stream is
+  // dead. So a stale-but-alive tunnel must be torn down and rebuilt — never
+  // trust the PID alone. Always (re)start fresh when unreachable.
+  const reopening = tunnelAlive();
+  stopTunnel();
+  stderr.write(
+    `[remote] control-plane unreachable — ${reopening ? "tunnel stale, reopening" : "opening tunnel"} (kubectl port-forward ${tunnel.service} :${tunnel.localPort})\n`,
+  );
+  startTunnelProcess(tunnel);
 
   for (let attempt = 0; attempt < 30; attempt++) {
     await new Promise<void>((r) => setTimeout(r, 500));
