@@ -1,5 +1,14 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 
 /**
  * HOME-relative conversation/state directories each CLI writes, persisted with
@@ -26,6 +35,58 @@ function copyDir(src: string, dst: string): boolean {
   mkdirSync(dst, { recursive: true });
   cpSync(src, dst, { recursive: true });
   return true;
+}
+
+/**
+ * Make the CLI's conversation/state DURABLE by symlinking each HOME state dir to
+ * the retained workspace PVC: `<home>/<relDir>` → `<workspace>/.remote/sessions/
+ * <profile>/<relDir>`. The CLI then writes its conversation log directly onto
+ * the PVC, so it SURVIVES pod restarts / re-deports (HOME is the pod's ephemeral
+ * fs; the PVC is retained). This replaces the old copy-on-start restore, which
+ * lost any history written between start and the next snapshot when a Pod died.
+ *
+ * Seeds the PVC from any pre-existing real HOME dir (without overwriting newer
+ * PVC content), then swaps the HOME dir for a symlink. Idempotent.
+ */
+export function linkSessionState(
+  profile: string,
+  home: string,
+  workspacePath: string,
+): ReadonlyArray<string> {
+  const linked: string[] = [];
+  for (const rel of stateDirsFor(profile)) {
+    const pvc = join(workspacePath, STATE_SUBDIR, profile, rel);
+    const homeDir = join(home, rel);
+    try {
+      mkdirSync(pvc, { recursive: true });
+
+      // Already a symlink (re-run)? leave it.
+      let isLink = false;
+      try {
+        isLink = lstatSync(homeDir).isSymbolicLink();
+      } catch {
+        isLink = false;
+      }
+      if (isLink) {
+        linked.push(rel);
+        continue;
+      }
+
+      // Real dir with content (claude created it, or a prior copy)? seed the PVC
+      // without overwriting newer PVC files, then remove it.
+      if (existsSync(homeDir)) {
+        cpSync(homeDir, pvc, { recursive: true, force: false, errorOnExist: false });
+        rmSync(homeDir, { recursive: true, force: true });
+      }
+
+      mkdirSync(dirname(homeDir), { recursive: true });
+      symlinkSync(pvc, homeDir);
+      linked.push(rel);
+    } catch {
+      // best-effort: a failure here must not block the session start
+    }
+  }
+  return linked;
 }
 
 /**

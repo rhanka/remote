@@ -10,7 +10,7 @@ import { exportWorkspace, materializeWorkspace } from "./workspace-sync.js";
 import { bootstrapGit } from "./git-bootstrap.js";
 import {
   detectCliSessionId,
-  restoreSessionState,
+  linkSessionState,
   snapshotSessionState,
 } from "./session-state.js";
 import { clearPresence, writePresence } from "./h2a-presence.js";
@@ -23,6 +23,7 @@ export type {
   ExportWorkspaceOptions,
 } from "./workspace-sync.js";
 export {
+  linkSessionState,
   restoreSessionState,
   snapshotSessionState,
   detectCliSessionId,
@@ -143,17 +144,19 @@ export async function main(): Promise<void> {
     }
   }
 
-  // Restore any conversation state persisted in the (retained) workspace so a
-  // CLI conversation can resume across sessions bound to the same workspace.
+  // Make conversation state DURABLE: symlink the CLI's state dirs onto the
+  // retained workspace PVC so the conversation log is persisted live and
+  // survives pod restarts / re-deports (HOME is the Pod's ephemeral fs). This
+  // resumes a conversation across sessions AND never loses in-session history.
   try {
-    const restored = restoreSessionState(profile, home, workspacePath);
-    if (restored.length > 0) {
+    const linked = linkSessionState(profile, home, workspacePath);
+    if (linked.length > 0) {
       console.log(
-        `[session-agent] restored session state: ${restored.join(", ")}`,
+        `[session-agent] conversation persisted on PVC (durable): ${linked.join(", ")}`,
       );
     }
   } catch (error) {
-    console.error("[session-agent] session-state restore failed:", error);
+    console.error("[session-agent] session-state link failed:", error);
   }
 
   // Project this session as an h2a presence file in the workspace (DEC-059),
