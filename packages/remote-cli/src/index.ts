@@ -33,6 +33,7 @@ import {
   partitionTools,
 } from "./auth-tools.js";
 import { transmittedSecrets, secretsSummary } from "./secrets.js";
+import { localConvStat, remoteConvStat, alignment } from "./convsync.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -1204,6 +1205,46 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       process.stdout.write(
         "\n(⚠ = account-wide cloud cred. Detail: remote secrets status <sessionId>.)\n",
       );
+    });
+
+  // ---------------------------------------------------------------------------
+  // diff — is the remote session's conversation aligned with the local one?
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("diff [sessionId]")
+    .description(
+      "Check whether each remote session's conversation log is in sync with the latest LOCAL conversation (metrics only — content never transferred)",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(async (sessionId: string | undefined, opts: { remote?: string }) => {
+      const url = getConfiguredRemote(opts.remote);
+      await ensureConnected(url);
+      const all = await listRemoteSessions(url);
+      const sessions = sessionId ? all.filter((s) => s.id === sessionId) : all;
+      if (sessions.length === 0) {
+        process.stdout.write("[remote] no matching session\n");
+        return;
+      }
+      const icon: Record<string, string> = {
+        "in-sync": "✓ in-sync   ",
+        "local-ahead": "↑ local-ahead",
+        "remote-ahead": "↓ remote-ahead",
+        diverged: "⚠ diverged  ",
+        missing: "· n/a       ",
+      };
+      for (const s of sessions) {
+        if (!s.workspacePath) {
+          process.stdout.write(`  ${projectName(s)}: no workspace path\n`);
+          continue;
+        }
+        const local = localConvStat(s.workspacePath);
+        const remote = remoteConvStat(s.id, s.workspacePath);
+        const v = alignment(local, remote);
+        process.stdout.write(
+          `${(icon[v.state] ?? v.state).padEnd(14)} ${projectName(s).padEnd(18)} ${v.detail}\n`,
+        );
+      }
     });
 
   // ---------------------------------------------------------------------------
