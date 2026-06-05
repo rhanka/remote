@@ -32,6 +32,7 @@ import {
   KNOWN_TOOLS,
   partitionTools,
 } from "./auth-tools.js";
+import { transmittedSecrets, secretsSummary } from "./secrets.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -1116,7 +1117,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       if (remote.length === 0) process.stdout.write("  (none)\n");
       for (const s of remote) {
         process.stdout.write(
-          `  ${mark(s.id).padEnd(11)} ${s.id}  ${(s.profile ?? "").padEnd(7)} ${s.workspacePath ?? s.target ?? ""}\n`,
+          `  ${mark(s.id).padEnd(11)} ${s.id}  ${(s.profile ?? "").padEnd(7)} ${s.workspacePath ?? s.target ?? ""}  creds: ${secretsSummary(s.id)}\n`,
         );
       }
 
@@ -1127,6 +1128,67 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           `  ${t.present ? "✓" : "·"} ${t.tool.padEnd(8)} ${t.present ? "authenticated" : `not set up — ${t.loginHint}`}\n`,
         );
       }
+    });
+
+  // ---------------------------------------------------------------------------
+  // secrets — audit what auth/credentials were transmitted to a session
+  // ---------------------------------------------------------------------------
+
+  const secretsCommand = program
+    .command("secrets")
+    .description("Audit the credentials transmitted to remote sessions");
+
+  secretsCommand
+    .command("status [sessionId]")
+    .description(
+      "Show what auth/credentials each remote session received (live k8s Secret, key names only — values are never shown). Pass a sessionId for per-file detail.",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(async (sessionId: string | undefined, opts: { remote?: string }) => {
+      const url = getConfiguredRemote(opts.remote);
+      await ensureConnected(url);
+
+      if (sessionId) {
+        const entries = transmittedSecrets(sessionId);
+        if (entries === undefined) {
+          process.stdout.write(
+            `[remote] cannot read secrets for ${sessionId} (no tunnel configured, or no auth Secret)\n`,
+          );
+          return;
+        }
+        process.stdout.write(`Secrets transmitted to ${sessionId} (live, names only):\n`);
+        if (entries.length === 0) {
+          process.stdout.write("  (none)\n");
+          return;
+        }
+        for (const e of entries) {
+          process.stdout.write(
+            `  ${e.path}${e.tool !== "?" ? `  [${e.tool}]` : ""}${e.broad ? "  ⚠ account-wide cloud credential" : ""}\n`,
+          );
+        }
+        const broad = entries.filter((e) => e.broad).map((e) => e.tool);
+        if (broad.length > 0) {
+          process.stdout.write(
+            `\n⚠ broad cloud credentials sent: ${[...new Set(broad)].join(", ")} — revoke by re-deporting without them (--with) if unintended.\n`,
+          );
+        }
+        return;
+      }
+
+      const sessions = await listRemoteSessions(url);
+      process.stdout.write(`Transmitted secrets per session @ ${url}:\n`);
+      if (sessions.length === 0) {
+        process.stdout.write("  (none)\n");
+        return;
+      }
+      for (const s of sessions) {
+        process.stdout.write(
+          `  ${s.id}  ${(s.profile ?? "").padEnd(7)} ${secretsSummary(s.id)}\n`,
+        );
+      }
+      process.stdout.write(
+        "\n(⚠ = account-wide cloud cred. Detail: remote secrets status <sessionId>.)\n",
+      );
     });
 
   // ---------------------------------------------------------------------------

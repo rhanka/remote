@@ -48,6 +48,18 @@ const TOOL_AUTH: Readonly<Record<string, ToolSpec>> = {
 
 export const KNOWN_TOOLS = Object.keys(TOOL_AUTH);
 
+/** Tools carrying long-lived, account-wide cloud credentials (flagged in audits). */
+const BROAD_TOOLS = new Set(["aws", "gcloud", "azure"]);
+
+/** Flattened {relpath, tool, broad} for every tool auth file — for secret audits. */
+export const TOOL_AUTH_INFO: ReadonlyArray<{
+  relpath: string;
+  tool: string;
+  broad: boolean;
+}> = Object.entries(TOOL_AUTH).flatMap(([tool, spec]) =>
+  spec.files.map((relpath) => ({ relpath, tool, broad: BROAD_TOOLS.has(tool) })),
+);
+
 export type ToolAuthStatus = {
   readonly tool: string;
   readonly present: boolean;

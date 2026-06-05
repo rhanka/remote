@@ -9,7 +9,9 @@ import type { CliProfile } from "@sentropic/remote-protocol";
  * Secret so the in-cluster binary can read its OAuth credentials without
  * re-authing in-Pod.
  */
-const PROFILE_AUTH_FILES: Readonly<Record<CliProfile, ReadonlyArray<string>>> =
+export const PROFILE_AUTH_FILES: Readonly<
+  Record<CliProfile, ReadonlyArray<string>>
+> =
   {
     shell: [],
     codex: [".codex/auth.json", ".codex/config.toml"],
