@@ -2,6 +2,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+import type { SessionTarget } from "@sentropic/remote-protocol";
+
 /**
  * How the CLI reaches the control-plane when the configured URL is not directly
  * routable (no public ingress). When set, the CLI brings this tunnel up on
@@ -21,7 +23,12 @@ export type RemoteCliConfig = {
   defaultRemote?: string;
   token?: string;
   tunnel?: TunnelConfig;
+  /** Session target label (where the workload runs). Defaults to scaleway-kapsule. */
+  defaultTarget?: string;
 };
+
+/** Default session target when none is configured/passed. */
+export const DEFAULT_SESSION_TARGET: SessionTarget = "scaleway-kapsule";
 
 function parseTunnel(raw: unknown): TunnelConfig | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -77,6 +84,8 @@ export function readRemoteConfig(): RemoteCliConfig {
       if (typeof parsed.defaultRemote === "string")
         config.defaultRemote = parsed.defaultRemote;
       if (typeof parsed.token === "string") config.token = parsed.token;
+      if (typeof parsed.defaultTarget === "string")
+        config.defaultTarget = parsed.defaultTarget;
       const tunnel = parseTunnel(parsed.tunnel);
       if (tunnel) config.tunnel = tunnel;
       return config;
@@ -108,6 +117,15 @@ export function setDefaultRemote(rawUrl: string): string {
 export function clearDefaultRemote(): void {
   const { defaultRemote: _drop, ...rest } = readRemoteConfig();
   writeRemoteConfig(rest);
+}
+
+export function getDefaultTarget(): SessionTarget {
+  const configured = readRemoteConfig().defaultTarget;
+  return (configured as SessionTarget | undefined) ?? DEFAULT_SESSION_TARGET;
+}
+
+export function setDefaultTarget(value: string): void {
+  writeRemoteConfig({ ...readRemoteConfig(), defaultTarget: value });
 }
 
 export function getTunnel(): TunnelConfig | undefined {

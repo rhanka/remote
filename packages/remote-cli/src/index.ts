@@ -15,8 +15,10 @@ import {
 import {
   clearDefaultRemote,
   getDefaultRemote,
+  getDefaultTarget,
   getTunnel,
   setDefaultRemote,
+  setDefaultTarget,
   setToken,
   setTunnel,
   type TunnelConfig,
@@ -193,7 +195,7 @@ async function runProfile(
     }
     const session = await createRemoteSession(opts.remote, {
       profile: profileName,
-      target: opts.target ?? "k3s",
+      target: opts.target ?? getDefaultTarget(),
       ...(startupArgs.length > 0 ? { startupArgs } : {}),
       ...(credentials ? { credentials } : {}),
       ...(opts.sync ? { workspaceSync: true } : {}),
@@ -860,7 +862,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     const result = await smokeRemoteProfile({
       profile,
       baseUrl: remote,
-      target: opts.target ?? "k3s",
+      target: opts.target ?? getDefaultTarget(),
       timeoutMs: opts.timeout ?? 120_000,
       ...(opts.auth !== undefined ? { auth: opts.auth } : {}),
       ...(opts.authRefresh !== undefined
@@ -925,6 +927,16 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     });
 
   configCommand
+    .command("target <target>")
+    .description(
+      "Set the default session target label (where the workload runs), e.g. scaleway-kapsule",
+    )
+    .action((target: string) => {
+      setDefaultTarget(target);
+      process.stderr.write(`[remote] default target set to ${target}\n`);
+    });
+
+  configCommand
     .command("clear")
     .description("Clear default remote URL")
     .action(() => {
@@ -940,6 +952,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       process.stdout.write(
         remote ? `${remote}\n` : "[remote] no default remote configured\n",
       );
+      process.stdout.write(`target: ${getDefaultTarget()}\n`);
       const tunnel = getTunnel();
       if (tunnel) {
         process.stdout.write(

@@ -1,6 +1,6 @@
 import type { RemoteEventEnvelope } from "@sentropic/remote-protocol";
 
-import { authHeaders } from "./config.js";
+import { authHeaders, DEFAULT_SESSION_TARGET } from "./config.js";
 
 export type InputRetryOptions = {
   readonly maxAttempts?: number;
@@ -415,7 +415,7 @@ export async function createRemoteSession(
 ): Promise<{ id: string }> {
   const payload: Record<string, unknown> = {
     profile: body.profile,
-    target: body.target ?? "k3s",
+    target: body.target ?? DEFAULT_SESSION_TARGET,
   };
   if (body.displayName) payload.displayName = body.displayName;
   if (body.workspaceSync) payload.workspaceSync = true;
