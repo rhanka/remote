@@ -12,6 +12,7 @@
 
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -101,7 +102,38 @@ export async function collectToolAuth(
         // missing/unreadable file → skip
       }
     }
+    // gh stores its token in the OS keyring (not hosts.yml) when login used
+    // secure storage, so the bundled hosts.yml has no `oauth_token` and the Pod
+    // can't auth (no keyring/dbus). Regenerate a file-based hosts.yml carrying
+    // the token from `gh auth token` so the Pod authenticates without a keyring.
+    if (tool === "gh") {
+      const ghHosts = buildGhHostsYaml();
+      if (ghHosts) {
+        bundle[".config/gh/hosts.yml"] = Buffer.from(ghHosts, "utf8").toString("base64");
+        contributed = true;
+      }
+    }
     if (contributed) bundled.push(tool);
   }
   return { bundle, bundled };
+}
+
+/**
+ * Build a self-contained `~/.config/gh/hosts.yml` with the token resolved via
+ * `gh auth token` (works regardless of keyring vs file storage), so the Pod's
+ * gh is authenticated from the file alone — no OS keyring / dbus needed.
+ */
+function buildGhHostsYaml(): string | undefined {
+  const token = spawnSync("gh", ["auth", "token"], { encoding: "utf8" })
+    .stdout?.trim();
+  if (!token) return undefined;
+  const user =
+    spawnSync("gh", ["api", "user", "--jq", ".login"], { encoding: "utf8" })
+      .stdout?.trim() || "";
+  return (
+    `github.com:\n` +
+    `    oauth_token: ${token}\n` +
+    `    git_protocol: https\n` +
+    (user ? `    user: ${user}\n` : "")
+  );
 }
