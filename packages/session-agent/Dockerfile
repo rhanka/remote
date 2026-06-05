@@ -54,6 +54,39 @@ ARG ANTIGRAVITY_INSTALL_URL=https://antigravity.google/cli/install.sh
 RUN curl -fsSL "${ANTIGRAVITY_INSTALL_URL}" | bash -s -- --dir /usr/local/bin \
  && agy --help >/dev/null
 
+# --- Fat dev environment: build tools, language toolchains, cloud CLIs -------
+# A deported session is a real dev box: it must build/test the project and
+# authenticate to the clouds the user works with (gh/scw auth is bundled in).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config python3 python3-pip python3-venv \
+        jq ripgrep unzip less vim-tiny \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go
+ARG GO_VERSION=1.23.4
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Rust (system-wide via rustup) with rustfmt + clippy
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+ && rustup component add rustfmt clippy \
+ && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
+
+# GitHub CLI (gh)
+ARG GH_VERSION=2.63.2
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+      | tar -xz -C /tmp \
+ && mv "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+ && rm -rf /tmp/gh_*
+
+# Scaleway CLI (scw)
+ARG SCW_VERSION=2.34.0
+RUN curl -fsSL "https://github.com/scaleway/scaleway-cli/releases/download/v${SCW_VERSION}/scaleway-cli_${SCW_VERSION}_linux_amd64" \
+      -o /usr/local/bin/scw \
+ && chmod +x /usr/local/bin/scw
+
 # Copy the entire installed workspace (with hoisted node_modules) plus the
 # compiled dist outputs. node-pty's native binary built in the builder stage
 # is preserved this way without rerunning native compilation.

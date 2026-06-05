@@ -7,6 +7,7 @@ import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
 import { exportWorkspace, materializeWorkspace } from "./workspace-sync.js";
+import { bootstrapGit } from "./git-bootstrap.js";
 import {
   detectCliSessionId,
   restoreSessionState,
@@ -114,6 +115,16 @@ export async function main(): Promise<void> {
     } catch (error) {
       console.error("[session-agent] workspace sync failed:", error);
     }
+  }
+
+  // Clone-on-start: if the archive carried no .git (large history skipped by the
+  // CLI) but recorded the origin, fetch history from origin (gh auth bundled)
+  // so the repo is real (commit/push) without transferring the .git.
+  try {
+    const gitMsg = bootstrapGit(workspacePath);
+    if (gitMsg) console.log(`[session-agent] ${gitMsg}`);
+  } catch (error) {
+    console.error("[session-agent] git bootstrap failed:", error);
   }
 
   if (process.env.SESSION_WORKSPACE_EXPORT === "1") {

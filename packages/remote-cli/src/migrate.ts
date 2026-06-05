@@ -28,7 +28,9 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -264,6 +266,37 @@ function captureLiveConversation(
 }
 
 /**
+ * Record the repo's origin/branch/HEAD into `<cwd>/.remote/git.json` so the
+ * session-agent can bootstrap git in the Pod (clone-on-start) when the full
+ * `.git` was too big to ship — the Pod fetches history from origin (gh auth is
+ * bundled) instead of transferring it. No-op outside a git repo / without an
+ * origin remote.
+ */
+function writeGitMetadata(cwd: string, stderr: NodeJS.WriteStream): void {
+  const git = (args: string[]): string => {
+    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+    return r.status === 0 ? r.stdout.trim() : "";
+  };
+  const origin = git(["remote", "get-url", "origin"]);
+  if (!origin) return;
+  const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
+  const head = git(["rev-parse", "HEAD"]);
+  try {
+    mkdirSync(join(cwd, ".remote"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".remote", "git.json"),
+      JSON.stringify({ origin, branch, head }, null, 2),
+      "utf8",
+    );
+    stderr.write(
+      `[remote] recorded git origin for clone-on-start: ${origin} (${branch || "HEAD"})\n`,
+    );
+  } catch {
+    // best-effort
+  }
+}
+
+/**
  * Push workspace project files to the remote, reusing the same pattern as
  * `workspace push` in index.ts.
  */
@@ -467,6 +500,10 @@ export async function migrateForward(
       `[remote] reconnect: reusing workspace ${marker.workspaceId} as-is (no push)\n`,
     );
   } else {
+    // Record git origin so the Pod can clone-on-start when .git is too big to
+    // ship (the size-gate in buildWorkspaceArchive skips large histories).
+    writeGitMetadata(cwd, stderr);
+
     // When resuming, stage the live conversation so it rides the pushed archive
     // and the session-agent restores it into HOME — the remote CLI then resumes
     // exactly where the local session left off (path parity makes the project

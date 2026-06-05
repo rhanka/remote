@@ -89,6 +89,7 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
         "-z",
         "--",
         ".remote/sessions",
+        ".remote/git.json",
         ".claude/settings.json",
         ".claude/settings.local.json",
       ],
