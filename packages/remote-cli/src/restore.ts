@@ -8,7 +8,14 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -219,17 +226,43 @@ function projLatest(arr: DiscoveredSession[]): number {
   return arr.reduce((m, s) => Math.max(m, s.mtimeMs), 0);
 }
 
-/** Build the per-tab command: local resume via `remote run`, or SCW via `attach --exec`. */
+/** Per-tab command: local resume via `remote run`, or SCW via `attach --exec`. */
 function tabCommand(tab: LayoutTab): string {
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   if (tab.remoteId) {
     // SCW: attach straight into the Pod's tmux (live, copy-friendly).
-    return `remote attach ${q(tab.remoteId)} --exec; exec bash`;
+    return `remote attach ${q(tab.remoteId)} --exec`;
   }
   return (
     `remote run ${q(tab.tool ?? "shell")} ${q(tab.cwd)} ` +
-    `--resume ${q(tab.sid ?? "")} --name ${q(tab.label)} --attach; exec bash`
+    `--resume ${q(tab.sid ?? "")} --name ${q(tab.label)} --attach`
   );
+}
+
+// gnome-terminal applies ONE trailing `-- command` to EVERY tab of an
+// invocation (you cannot give each tab its own `--`). So all tabs run the same
+// dispatcher; each claims (under flock) the first map line matching its $PWD
+// and runs that tab's command — exactly how ~/bin/resume-dev-sessions worked.
+const DISPATCHER = `map="$1"
+lock="$map.lock"
+exec 9>"$lock"; flock 9
+line=$(awk -F'\\t' -v c="$PWD" '$1==c{print;exit}' "$map")
+if [ -n "$line" ]; then
+  awk -F'\\t' -v c="$PWD" 'BEGIN{d=0} d==0 && $1==c {d=1; next} {print}' "$map" > "$map.tmp" && mv "$map.tmp" "$map"
+fi
+flock -u 9
+cmd=$(printf '%s' "$line" | cut -f2-)
+if [ -n "$cmd" ]; then eval "$cmd"; else echo "[remote] rien a reprendre pour $PWD" >&2; fi
+exec bash -l`;
+
+let mapCounter = 0;
+
+function runDir(): string {
+  const base = process.env.XDG_RUNTIME_DIR
+    ? join(process.env.XDG_RUNTIME_DIR, "sentropic-remote")
+    : join(homedir(), ".config", "sentropic", "remote-cli", "run");
+  mkdirSync(base, { recursive: true });
+  return base;
 }
 
 /** Launch the layout in gnome-terminal: one window per group, one tab per session. */
@@ -238,35 +271,37 @@ export function launchLayout(
   stderr: NodeJS.WriteStream = process.stderr,
 ): void {
   for (const win of windows) {
-    // Each tab gets its OWN `-- bash -lc <resume cmd>` segment, so every tab
-    // relaunches its own session (gnome-terminal otherwise applies one trailing
-    // command to all tabs of the invocation).
+    // Map keyed by per-tab working directory -> the tab's command. Tabs sharing
+    // a cwd (several sessions of one project) each claim a distinct line FIFO.
+    const slug = win.title.replace(/[^a-zA-Z0-9]+/g, "-");
+    const mapPath = join(
+      runDir(),
+      `restore-${process.pid}-${slug}-${mapCounter++}.map`,
+    );
+    const body =
+      win.tabs.map((t) => `${t.cwd}\t${tabCommand(t)}`).join("\n") + "\n";
+    writeFileSync(mapPath, body, "utf8");
+
+    const args: string[] = [];
+    win.tabs.forEach((tab, i) => {
+      args.push(
+        i === 0 ? "--window" : "--tab",
+        `--working-directory=${tab.cwd}`,
+        `--title=${tab.label}`,
+      );
+    });
+    // ONE shared dispatcher command for all tabs of this window.
+    args.push("--", "bash", "-lc", DISPATCHER, "remote-restore", mapPath);
+
     stderr.write(
       `[remote] fenêtre "${win.title}" (${win.tabs.length} onglet(s))\n`,
     );
-    spawn("gnome-terminal", buildGnomeArgs(win), {
+    spawn("gnome-terminal", args, {
       stdio: "ignore",
       detached: true,
       env: process.env,
     }).unref();
   }
-}
-
-/** gnome-terminal args: per-tab working-dir + title + its own resume command. */
-function buildGnomeArgs(win: LayoutWindow): string[] {
-  const args: string[] = [];
-  win.tabs.forEach((tab, i) => {
-    args.push(
-      i === 0 ? "--window" : "--tab",
-      `--working-directory=${tab.cwd}`,
-      `--title=${tab.label}`,
-      "--",
-      "bash",
-      "-lc",
-      tabCommand(tab),
-    );
-  });
-  return args;
 }
 
 export type RestoreOptions = {
