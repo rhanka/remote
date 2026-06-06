@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -44,7 +45,8 @@ import {
   startLocalSession,
   tmuxAvailable,
 } from "./tmux.js";
-import { restore as restoreLayout } from "./restore.js";
+import { restore as restoreLayout, type RestoreOptions } from "./restore.js";
+import { getLayoutConfig } from "./config.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -1558,12 +1560,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     );
 
   program
-    .command("restore")
+    .command("restore [group]")
     .description(
-      "Relance les sessions dev LOCALES récentes (claude/codex sous ~/src/*) dans leur layout — une fenêtre par groupe, un onglet par session, chacun une session tmux gérée par remote (durable, nom live, rattachable). Layout configurable (champ `layout` de la config). Remplace ~/bin/resume-dev-sessions.",
+      "Relance les sessions dev dans leur layout (fenêtre par groupe, onglet par session). Sans argument: tous les groupes. Avec [group]: ce lot seulement (ex: `remote restore \"full remote\"`). Groupes LOCAUX = claude/codex sous ~/src/* (tmux via `remote run`); groupes REMOTE = sessions SCW (`remote attach <id> --exec`). Layout: champ `layout` de la config.",
     )
     .option("--dry-run", "affiche le layout calculé sans ouvrir de terminaux")
-    .action((opts: { dryRun?: boolean }) => {
+    .action(async (group: string | undefined, opts: { dryRun?: boolean }) => {
       if (!tmuxAvailable()) {
         process.stderr.write(
           "[remote] tmux requis pour restore (sudo apt install tmux)\n",
@@ -1571,16 +1573,41 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.exitCode = 1;
         return;
       }
-      const { total } = restoreLayout(
-        opts.dryRun ? { dryRun: true } : {},
+      const norm = (s: string) =>
+        s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      const cfg = getLayoutConfig();
+      const needRemote = cfg.groups.some(
+        (g) => g.remote && (!group || norm(g.title) === norm(group)),
       );
+
+      const restoreOpts: RestoreOptions = {};
+      if (group) restoreOpts.group = group;
+      if (opts.dryRun) restoreOpts.dryRun = true;
+
+      if (needRemote) {
+        const url = getConfiguredRemote();
+        await ensureConnected(url);
+        const sessions = await listRemoteSessions(url);
+        restoreOpts.remoteTabs = sessions.map((s) => {
+          const wp = s.workspacePath;
+          const cwd = wp && existsSync(wp) ? wp : homedir();
+          return { id: s.id, label: projectName(s), cwd };
+        });
+        if (restoreOpts.remoteTabs.length === 0) {
+          process.stderr.write(
+            "[remote] aucune session SCW (remote ls vide) pour le groupe remote\n",
+          );
+        }
+      }
+
+      const { total } = restoreLayout(restoreOpts);
       if (total === 0) {
         process.stderr.write(
-          "[remote] aucune session locale récente à reprendre\n",
+          `[remote] rien à relancer${group ? ` pour le groupe "${group}"` : ""}\n`,
         );
       } else {
         process.stderr.write(
-          `[remote] ${total} session(s)${opts.dryRun ? " (dry-run, rien ouvert)" : " relancée(s)"}\n`,
+          `[remote] ${total} onglet(s)${opts.dryRun ? " (dry-run, rien ouvert)" : " relancé(s)"}\n`,
         );
       }
     });

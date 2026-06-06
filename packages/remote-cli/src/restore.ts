@@ -25,11 +25,17 @@ export type DiscoveredSession = {
 export type LayoutTab = {
   cwd: string;
   label: string;
-  tool: string;
-  sid: string;
+  /** local resume (claude/codex tmux) */
+  tool?: string;
+  sid?: string;
+  /** SCW session attached via `remote attach <id> --exec` */
+  remoteId?: string;
 };
 
 export type LayoutWindow = { title: string; tabs: LayoutTab[] };
+
+/** A pre-resolved SCW tab for a remote group (built by the caller from `remote ls`). */
+export type RemoteTab = { id: string; label: string; cwd: string };
 
 /** claude encodes a cwd into its project-dir name by replacing "/" with "-". */
 function encodeCwd(cwd: string): string {
@@ -169,8 +175,9 @@ export function groupSessions(
   const windows: LayoutWindow[] = [];
 
   for (const g of cfg.groups) {
+    if (g.remote) continue; // remote groups are filled from SCW by the caller
     const tabs: LayoutTab[] = [];
-    for (const project of g.projects) {
+    for (const project of g.projects ?? []) {
       grouped.add(project);
       for (const slot of slotsFor(project)) {
         if (tabs.length >= cfg.maxPerWindow) break;
@@ -212,13 +219,16 @@ function projLatest(arr: DiscoveredSession[]): number {
   return arr.reduce((m, s) => Math.max(m, s.mtimeMs), 0);
 }
 
-/** Build the per-tab command that relaunches the session via `remote run`. */
+/** Build the per-tab command: local resume via `remote run`, or SCW via `attach --exec`. */
 function tabCommand(tab: LayoutTab): string {
-  // shell-quote args for the inner bash -lc.
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+  if (tab.remoteId) {
+    // SCW: attach straight into the Pod's tmux (live, copy-friendly).
+    return `remote attach ${q(tab.remoteId)} --exec; exec bash`;
+  }
   return (
-    `remote run ${q(tab.tool)} ${q(tab.cwd)} ` +
-    `--resume ${q(tab.sid)} --name ${q(tab.label)} --attach; exec bash`
+    `remote run ${q(tab.tool ?? "shell")} ${q(tab.cwd)} ` +
+    `--resume ${q(tab.sid ?? "")} --name ${q(tab.label)} --attach; exec bash`
   );
 }
 
@@ -259,21 +269,66 @@ function buildGnomeArgs(win: LayoutWindow): string[] {
   return args;
 }
 
-/** Full restore: discover -> group -> launch. Returns a summary. */
+export type RestoreOptions = {
+  dryRun?: boolean;
+  /** Launch only the group whose title matches (exact or slug-normalized). */
+  group?: string;
+  /** Pre-resolved SCW tabs (from `remote ls`), used to fill `remote: true` groups. */
+  remoteTabs?: RemoteTab[];
+  stderr?: NodeJS.WriteStream;
+};
+
+function titleMatches(title: string, query: string): boolean {
+  const norm = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return norm(title) === norm(query);
+}
+
+/** Full restore: discover (local) + inject SCW (remote) -> order -> filter -> launch. */
 export function restore(
-  opts: { dryRun?: boolean; stderr?: NodeJS.WriteStream } = {},
+  opts: RestoreOptions = {},
 ): { windows: LayoutWindow[]; total: number; dropped: number } {
   const cfg = getLayoutConfig();
-  const sessions = discoverSessions(cfg.maxAgeHours * 3600 * 1000);
-  const { windows, dropped } = groupSessions(sessions, cfg);
-  const total = windows.reduce((n, w) => n + w.tabs.length, 0);
   const stderr = opts.stderr ?? process.stderr;
+
+  // Local windows (groups + shared).
+  const sessions = discoverSessions(cfg.maxAgeHours * 3600 * 1000);
+  const { windows: localWindows, dropped } = groupSessions(sessions, cfg);
+  const localByTitle = new Map(localWindows.map((w) => [w.title, w]));
+
+  // Remote windows: each `remote: true` group is filled with the SCW tabs.
+  const remoteTabs = opts.remoteTabs ?? [];
+  const remoteByTitle = new Map<string, LayoutWindow>();
+  for (const g of cfg.groups) {
+    if (!g.remote) continue;
+    const tabs: LayoutTab[] = remoteTabs
+      .slice(0, cfg.maxPerWindow)
+      .map((t) => ({ label: t.label, cwd: t.cwd, remoteId: t.id }));
+    if (tabs.length > 0) remoteByTitle.set(g.title, { title: g.title, tabs });
+  }
+
+  // Order: follow cfg.groups (local or remote), then any shared windows.
+  let windows: LayoutWindow[] = [];
+  for (const g of cfg.groups) {
+    const w = g.remote ? remoteByTitle.get(g.title) : localByTitle.get(g.title);
+    if (w) windows.push(w);
+  }
+  for (const w of localWindows) {
+    if (!cfg.groups.some((g) => g.title === w.title)) windows.push(w);
+  }
+
+  // Scope to a single group/batch if requested.
+  if (opts.group) windows = windows.filter((w) => titleMatches(w.title, opts.group!));
+
+  const total = windows.reduce((n, w) => n + w.tabs.length, 0);
   for (const w of windows) {
     stderr.write(`  ${w.title} (${w.tabs.length}):\n`);
     for (const t of w.tabs)
-      stderr.write(`    - ${t.label}  ${t.tool}  ${t.cwd}\n`);
+      stderr.write(
+        `    - ${t.label}  ${t.remoteId ? `SCW:${t.remoteId}` : `${t.tool} (local)`}  ${t.cwd}\n`,
+      );
   }
-  if (dropped > 0)
+  if (dropped > 0 && !opts.group)
     stderr.write(`  (! ${dropped} session(s) ignorée(s), plafond atteint)\n`);
   if (!opts.dryRun && total > 0) launchLayout(windows, stderr);
   return { windows, total, dropped };

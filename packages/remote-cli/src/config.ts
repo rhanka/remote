@@ -19,8 +19,16 @@ export type TunnelConfig = {
   remotePort: number;
 };
 
-/** A named terminal window grouping specific projects (see `remote restore`). */
-export type LayoutGroup = { title: string; projects: string[] };
+/**
+ * A named terminal window in `remote restore`. A LOCAL group lists `projects`
+ * (resumed as local tmux sessions). A REMOTE group (`remote: true`) has its tabs
+ * filled from the SCW control-plane's live sessions (attached via `--exec`).
+ */
+export type LayoutGroup = {
+  title: string;
+  projects?: string[];
+  remote?: boolean;
+};
 
 /** Layout for `remote restore`: how recent local sessions map to windows/tabs. */
 export type LayoutConfig = {
