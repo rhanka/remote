@@ -92,6 +92,7 @@ describe("k8s spec builders", () => {
     expect(pref?.podAffinityTerm.topologyKey).toBe("kubernetes.io/hostname");
     expect(pref?.podAffinityTerm.labelSelector.matchLabels).toEqual({
       "app.kubernetes.io/name": "sentropic-remote",
+      "app.kubernetes.io/component": "control-plane",
     });
   });
 

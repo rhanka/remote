@@ -331,12 +331,15 @@ export function buildSessionPodSpec(
       ...(options.nodeSelector && Object.keys(options.nodeSelector).length > 0
         ? { nodeSelector: options.nodeSelector }
         : {}),
-      // Pack sessions into the INTERSTICES of nodes that already run remote
-      // workloads (the control-plane is always present), instead of pinning a
-      // near-empty dedicated node. Soft preference: a session still schedules
-      // anywhere it fits, but prefers a node already hosting a sentropic-remote
-      // pod — so remote adds ~0 dedicated nodes and only spills to a new node on
-      // real saturation, never hypothetical.
+      // Pack sessions into the INTERSTICE of the node that already runs the
+      // control-plane (always present, on a shared-infra node), instead of
+      // pinning a near-empty dedicated node. We target the control-plane
+      // SPECIFICALLY (not any sentropic-remote pod): matching "any remote pod"
+      // is satisfied on every node that holds a session too, so Scaleway's
+      // spreading tiebreak (LeastAllocated) wins and the session lands on the
+      // emptiest node anyway. Anchoring to the single control-plane node makes
+      // the preference decisive. Soft: a session still schedules anywhere it
+      // fits and only spills to a new node on real saturation.
       affinity: {
         podAffinity: {
           preferredDuringSchedulingIgnoredDuringExecution: [
@@ -344,7 +347,10 @@ export function buildSessionPodSpec(
               weight: 100,
               podAffinityTerm: {
                 labelSelector: {
-                  matchLabels: { "app.kubernetes.io/name": "sentropic-remote" },
+                  matchLabels: {
+                    "app.kubernetes.io/name": "sentropic-remote",
+                    "app.kubernetes.io/component": "control-plane",
+                  },
                 },
                 topologyKey: "kubernetes.io/hostname",
               },
