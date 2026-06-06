@@ -373,6 +373,11 @@ export function buildSessionPodSpec(
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: descriptor.home ?? options.home },
+            // UTF-8 locale so accented output (é, è, à…) renders instead of
+            // ASCII fallback ("_"). C.UTF-8 is always present in glibc (no
+            // locale-gen needed).
+            { name: "LANG", value: "C.UTF-8" },
+            { name: "LC_ALL", value: "C.UTF-8" },
             // Run interactive CLIs inside a durable tmux session in the Pod
             // (detach-safe; enables `remote attach --exec`). The agent ignores
             // this for the one-shot `shell` profile.
