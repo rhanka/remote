@@ -122,7 +122,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       );
     }
 
-    await this.client.create(
+    await this.createAwaitingDeletion(
       buildSessionPodSpec(descriptor, opts, authPaths),
     );
 
@@ -131,6 +131,30 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       previousState: "starting",
       nextState: "ready",
     });
+  }
+
+  /**
+   * Create a resource, tolerating a slow predecessor still terminating. On
+   * refresh we delete()+create() a same-named Pod; a large Pod can still be in
+   * graceful shutdown when create() fires, yielding a 409 ("object is being
+   * deleted: pods … already exists"). Retry the create until the name frees up.
+   */
+  private async createAwaitingDeletion(
+    spec: ReturnType<typeof buildSessionPodSpec>,
+    attempts = 60,
+    delayMs = 1000,
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.client.create(spec);
+        return;
+      } catch (error) {
+        const message = String(error);
+        const terminating = /being deleted|already exists/i.test(message);
+        if (!terminating || attempt >= attempts) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
   }
 
   async destroy(

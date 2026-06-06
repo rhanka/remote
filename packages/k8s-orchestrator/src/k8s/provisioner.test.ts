@@ -205,6 +205,43 @@ describe("K8sSessionProvisioner", () => {
     ]);
   });
 
+  it("retries the Pod create on refresh while a same-named Pod is still terminating", async () => {
+    let podCreateAttempts = 0;
+    const createdPod = { done: false };
+    const client: K8sClient = {
+      async create<T extends KubernetesObject>(spec: T): Promise<T> {
+        if (spec.kind === "Pod") {
+          podCreateAttempts += 1;
+          if (podCreateAttempts === 1) {
+            throw new Error(
+              'HTTP-Code: 409 object is being deleted: pods "session-sess-test1" already exists',
+            );
+          }
+          createdPod.done = true;
+        }
+        return spec;
+      },
+      async delete(): Promise<void> {
+        return;
+      },
+      async read<T extends KubernetesObject>(): Promise<T | undefined> {
+        return undefined;
+      },
+    };
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "demo-ns",
+    });
+
+    await provisioner.refresh(descriptor, () => undefined, {
+      credentials: { ".codex/auth.json": "NEW_TOKEN" },
+    });
+
+    // The 409 on the first Pod create (predecessor still terminating) is
+    // retried until it frees up — the refresh succeeds rather than throwing.
+    expect(podCreateAttempts).toBe(2);
+    expect(createdPod.done).toBe(true);
+  });
+
   it("provisions into the namespace passed in options", async () => {
     const { client, ops } = recordingClient();
     const provisioner = new K8sSessionProvisioner(client, {
