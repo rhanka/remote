@@ -44,6 +44,7 @@ import {
   startLocalSession,
   tmuxAvailable,
 } from "./tmux.js";
+import { restore as restoreLayout } from "./restore.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -1555,6 +1556,34 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(`[remote] attach with: remote attach ${slug}\n`);
       },
     );
+
+  program
+    .command("restore")
+    .description(
+      "Relance les sessions dev LOCALES récentes (claude/codex sous ~/src/*) dans leur layout — une fenêtre par groupe, un onglet par session, chacun une session tmux gérée par remote (durable, nom live, rattachable). Layout configurable (champ `layout` de la config). Remplace ~/bin/resume-dev-sessions.",
+    )
+    .option("--dry-run", "affiche le layout calculé sans ouvrir de terminaux")
+    .action((opts: { dryRun?: boolean }) => {
+      if (!tmuxAvailable()) {
+        process.stderr.write(
+          "[remote] tmux requis pour restore (sudo apt install tmux)\n",
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const { total } = restoreLayout(
+        opts.dryRun ? { dryRun: true } : {},
+      );
+      if (total === 0) {
+        process.stderr.write(
+          "[remote] aucune session locale récente à reprendre\n",
+        );
+      } else {
+        process.stderr.write(
+          `[remote] ${total} session(s)${opts.dryRun ? " (dry-run, rien ouvert)" : " relancée(s)"}\n`,
+        );
+      }
+    });
 
   program
     .command("attach <urlOrSessionId> [sessionId]")

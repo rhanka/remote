@@ -19,6 +19,31 @@ export type TunnelConfig = {
   remotePort: number;
 };
 
+/** A named terminal window grouping specific projects (see `remote restore`). */
+export type LayoutGroup = { title: string; projects: string[] };
+
+/** Layout for `remote restore`: how recent local sessions map to windows/tabs. */
+export type LayoutConfig = {
+  /** Only resume sessions touched within this many hours. */
+  maxAgeHours: number;
+  /** Max tabs per terminal window. */
+  maxPerWindow: number;
+  /** Number of shared round-robin windows for ungrouped projects. */
+  sharedWindows: number;
+  /** Per-project: how many recent sessions to resume (default 1). */
+  multiSession: Record<string, number>;
+  /** Explicit windows; their projects leave the shared pool. */
+  groups: LayoutGroup[];
+};
+
+export const DEFAULT_LAYOUT: LayoutConfig = {
+  maxAgeHours: 48,
+  maxPerWindow: 12,
+  sharedWindows: 2,
+  multiSession: {},
+  groups: [],
+};
+
 export type RemoteCliConfig = {
   defaultRemote?: string;
   token?: string;
@@ -27,6 +52,8 @@ export type RemoteCliConfig = {
   defaultTarget?: string;
   /** Tool CLIs whose auth to bundle into deported sessions by default (scw, gh, …). */
   defaultTools?: string[];
+  /** `remote restore` layout (windows/tabs from recent local sessions). */
+  layout?: Partial<LayoutConfig>;
 };
 
 /** Default session target when none is configured/passed. */
@@ -96,6 +123,8 @@ export function readRemoteConfig(): RemoteCliConfig {
       }
       const tunnel = parseTunnel(parsed.tunnel);
       if (tunnel) config.tunnel = tunnel;
+      if (parsed.layout && typeof parsed.layout === "object")
+        config.layout = parsed.layout as Partial<LayoutConfig>;
       return config;
     }
     return {};
@@ -155,6 +184,28 @@ export function setTunnel(tunnel: TunnelConfig): void {
 export function clearTunnel(): void {
   const { tunnel: _drop, ...rest } = readRemoteConfig();
   writeRemoteConfig(rest);
+}
+
+/** Layout config merged with defaults (used by `remote restore`). */
+export function getLayoutConfig(): LayoutConfig {
+  const raw = readRemoteConfig().layout ?? {};
+  return {
+    maxAgeHours:
+      typeof raw.maxAgeHours === "number" ? raw.maxAgeHours : DEFAULT_LAYOUT.maxAgeHours,
+    maxPerWindow:
+      typeof raw.maxPerWindow === "number" ? raw.maxPerWindow : DEFAULT_LAYOUT.maxPerWindow,
+    sharedWindows:
+      typeof raw.sharedWindows === "number" ? raw.sharedWindows : DEFAULT_LAYOUT.sharedWindows,
+    multiSession:
+      raw.multiSession && typeof raw.multiSession === "object"
+        ? raw.multiSession
+        : DEFAULT_LAYOUT.multiSession,
+    groups: Array.isArray(raw.groups) ? raw.groups : DEFAULT_LAYOUT.groups,
+  };
+}
+
+export function setLayoutConfig(layout: Partial<LayoutConfig>): void {
+  writeRemoteConfig({ ...readRemoteConfig(), layout });
 }
 
 export function getToken(): string | undefined {
