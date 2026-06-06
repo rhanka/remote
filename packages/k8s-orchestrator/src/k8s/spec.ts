@@ -34,6 +34,19 @@ export type K8sPodSpec = {
   readonly spec: {
     readonly restartPolicy: "Never";
     readonly nodeSelector?: Readonly<Record<string, string>>;
+    readonly affinity?: {
+      readonly podAffinity?: {
+        readonly preferredDuringSchedulingIgnoredDuringExecution: ReadonlyArray<{
+          readonly weight: number;
+          readonly podAffinityTerm: {
+            readonly labelSelector: {
+              readonly matchLabels: Readonly<Record<string, string>>;
+            };
+            readonly topologyKey: string;
+          };
+        }>;
+      };
+    };
     readonly containers: ReadonlyArray<{
       readonly name: string;
       readonly image: string;
@@ -318,6 +331,27 @@ export function buildSessionPodSpec(
       ...(options.nodeSelector && Object.keys(options.nodeSelector).length > 0
         ? { nodeSelector: options.nodeSelector }
         : {}),
+      // Pack sessions into the INTERSTICES of nodes that already run remote
+      // workloads (the control-plane is always present), instead of pinning a
+      // near-empty dedicated node. Soft preference: a session still schedules
+      // anywhere it fits, but prefers a node already hosting a sentropic-remote
+      // pod — so remote adds ~0 dedicated nodes and only spills to a new node on
+      // real saturation, never hypothetical.
+      affinity: {
+        podAffinity: {
+          preferredDuringSchedulingIgnoredDuringExecution: [
+            {
+              weight: 100,
+              podAffinityTerm: {
+                labelSelector: {
+                  matchLabels: { "app.kubernetes.io/name": "sentropic-remote" },
+                },
+                topologyKey: "kubernetes.io/hostname",
+              },
+            },
+          ],
+        },
+      },
       containers: [
         {
           name: POD_CONTAINER,

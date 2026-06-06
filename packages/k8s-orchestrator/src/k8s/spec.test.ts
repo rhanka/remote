@@ -84,6 +84,17 @@ describe("k8s spec builders", () => {
     expect(workspacePvc.spec.accessModes).toEqual(["ReadWriteMany"]);
   });
 
+  it("prefers co-locating sessions with existing remote pods (interstice packing)", () => {
+    const pod = buildSessionPodSpec(baseDescriptor);
+    const pref =
+      pod.spec.affinity?.podAffinity
+        ?.preferredDuringSchedulingIgnoredDuringExecution?.[0];
+    expect(pref?.podAffinityTerm.topologyKey).toBe("kubernetes.io/hostname");
+    expect(pref?.podAffinityTerm.labelSelector.matchLabels).toEqual({
+      "app.kubernetes.io/name": "sentropic-remote",
+    });
+  });
+
   it("builds a Pod that mounts the PVC at the workspace path", () => {
     const pod = buildSessionPodSpec(baseDescriptor);
     expect(pod.kind).toBe("Pod");
