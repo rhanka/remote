@@ -34,8 +34,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         openssh-client \
         tini \
+        tmux \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# tmux config for deported sessions: long scrollback and copy-to-local-clipboard
+# (OSC52) so `remote attach --exec` lets you select & copy the CLI's output
+# straight into your local clipboard. Installed system-wide.
+RUN printf '%s\n' \
+        'set -g history-limit 50000' \
+        'set -g set-clipboard on' \
+        'set -g mouse on' \
+        "set -g status-right '#[fg=green]remote#[default]'" \
+    > /etc/tmux.conf
 
 # Install the agent CLIs available system-wide so any session profile maps to
 # a real binary on $PATH. Versions are pinned at image build time.

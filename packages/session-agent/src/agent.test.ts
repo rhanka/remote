@@ -203,6 +203,37 @@ describe("SessionAgent", () => {
     expect(sent[0]!.payload.shell).toBe("/bin/bash");
   });
 
+  it("runs the CLI inside a tmux session when SESSION_TMUX=1", async () => {
+    const { transport } = stubTransport();
+    const proc = stubProcess();
+    let command: string | null = null;
+    let args: ReadonlyArray<string> | null = null;
+    const agent = new SessionAgent({
+      sessionId: "sess-tmux",
+      profile: "claude",
+      workspacePath: "/workspace",
+      transport,
+      spawner: (options) => {
+        command = options.command;
+        args = options.args;
+        return proc;
+      },
+      env: { SESSION_TMUX: "1" },
+    });
+    agent.start();
+    proc.finish({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Still `/bin/bash -lc <wrapper> remote-session claude` — the wrapper is the
+    // tmux box (creates/attaches the durable "main" session, reattach loop).
+    expect(command).toBe("/bin/bash");
+    expect(args![0]).toBe("-lc");
+    expect(args![1]).toContain("tmux new-session");
+    expect(args![1]).toContain("tmux has-session");
+    expect(args![1]).toContain("tmux attach");
+    expect(args!.slice(2)).toEqual(["remote-session", "claude"]);
+  });
+
   it("does NOT wrap the shell profile (ephemeral push/pull one-shot)", async () => {
     const { transport } = stubTransport();
     const proc = stubProcess();

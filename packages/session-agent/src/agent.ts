@@ -83,6 +83,32 @@ printf '\\n[remote] %s exited (code %s) — you are now in a shell on this works
 printf '[remote] Re-run it (e.g. %s --resume) or type exit / Ctrl-D to stop this remote session.\\n' "$cli"
 exec /bin/bash -l`;
 
+/**
+ * tmux-backed persistent box (enabled by SESSION_TMUX=1). Runs the wrapped CLI
+ * inside a durable tmux session ("main") and the agent's PTY just proxies a
+ * tmux CLIENT over the WS. Two wins over the bare wrapper:
+ *  - Detaching (Ctrl-b d, or an `--exec` client leaving) does NOT end the
+ *    session — the proxy re-attaches in a loop; the session ends only when the
+ *    tmux session itself ends (CLI exited AND its drop-to-shell exited).
+ *  - `remote attach <id> --exec` can open a second client straight into the Pod
+ *    (kubectl exec) for native scrollback + copy-to-clipboard, side by side.
+ * `$0` is a label, `$1` is the CLI, the rest are its args (same shape as the
+ * bare wrapper). The inner drop-to-shell block is single-quoted (no `'` inside)
+ * so it survives intact through to the tmux-spawned shell.
+ */
+const TMUX_BOX_WRAPPER = `ses=main
+cli="$1"; shift
+if ! tmux has-session -t "$ses" 2>/dev/null; then
+  tmux new-session -d -s "$ses" /bin/bash -lc 'cli="$1"; shift
+"$cli" "$@"; code=$?
+printf "\\n[remote] %s exited (code %s) — you are now in a shell on this workspace (%s).\\n" "$cli" "$code" "$PWD"
+printf "[remote] Re-run it (e.g. %s --resume) or type exit / Ctrl-D to stop this remote session.\\n" "$cli"
+exec /bin/bash -l' remote-session "$cli" "$@"
+fi
+while tmux has-session -t "$ses" 2>/dev/null; do
+  tmux attach -t "$ses" || sleep 1
+done`;
+
 function defaultRandomId(prefix: string): string {
   const random = Math.floor(Math.random() * 1e12)
     .toString(36)
@@ -161,10 +187,16 @@ export class SessionAgent {
     let spawnCommand = profile.command;
     let spawnArgs: ReadonlyArray<string> = cliArgs;
     if (this.profile !== "shell") {
+      // SESSION_TMUX=1 → run the CLI inside a durable tmux session (detach-safe,
+      // enables `--exec` attach); otherwise the bare persistent-box wrapper.
+      const wrapper =
+        this.env.SESSION_TMUX === "1"
+          ? TMUX_BOX_WRAPPER
+          : PERSISTENT_SHELL_WRAPPER;
       spawnCommand = "/bin/bash";
       spawnArgs = [
         "-lc",
-        PERSISTENT_SHELL_WRAPPER,
+        wrapper,
         "remote-session",
         profile.command,
         ...cliArgs,

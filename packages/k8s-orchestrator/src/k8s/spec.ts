@@ -333,6 +333,10 @@ export function buildSessionPodSpec(
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: descriptor.home ?? options.home },
+            // Run interactive CLIs inside a durable tmux session in the Pod
+            // (detach-safe; enables `remote attach --exec`). The agent ignores
+            // this for the one-shot `shell` profile.
+            { name: "SESSION_TMUX", value: "1" },
             ...(descriptor.workspaceId
               ? [
                   {
