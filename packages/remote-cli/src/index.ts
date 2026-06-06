@@ -47,6 +47,7 @@ import {
 } from "./tmux.js";
 import { restore as restoreLayout, type RestoreOptions } from "./restore.js";
 import { getLayoutConfig } from "./config.js";
+import { softRefreshSession } from "./soft-refresh.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -919,6 +920,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option("--all", "bundle and send every local profile's credentials")
     .option(
+      "--soft",
+      "push fresh creds INTO the running Pod + relaunch the CLI in place (no Pod recreate; keeps HOME + conversation; fixes the ~8h token logout)",
+    )
+    .option(
       "--no-auth-refresh",
       "skip the local auth status preflight before bundling",
     )
@@ -926,9 +931,23 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       async (
         first: string,
         second: string | undefined,
-        opts: RefreshOpts & { all?: boolean },
+        opts: RefreshOpts & { all?: boolean; soft?: boolean },
       ) => {
         const { url, sessionId } = resolveUrlAndSessionId(first, second);
+        if (opts.soft) {
+          await ensureConnected(url);
+          const profile =
+            opts.profile ?? (await getRemoteSession(url, sessionId)).session.profile;
+          const resolved = coerceCliProfileName(profile);
+          if (!resolved) throw new Error(`Unknown profile "${profile}"`);
+          if (opts.authRefresh !== false) {
+            const fresh = await ensureProfileAuthFresh(resolved);
+            if (fresh.checked)
+              process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
+          }
+          await softRefreshSession(sessionId, resolved);
+          return;
+        }
         if (opts.all) {
           await pushAllProfiles(url, sessionId, opts);
           return;
@@ -1683,13 +1702,31 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--no-auth-refresh",
       "skip local auth status preflight before bundling credentials",
     )
+    .option(
+      "--soft",
+      "push fresh creds INTO the running Pod + relaunch the CLI in place (no Pod recreate; keeps HOME + conversation; fixes the ~8h token logout)",
+    )
     .action(
       async (
         first: string,
         second: string | undefined,
-        opts: RefreshOpts,
+        opts: RefreshOpts & { soft?: boolean },
       ) => {
         const { url, sessionId } = resolveUrlAndSessionId(first, second);
+        if (opts.soft) {
+          await ensureConnected(url);
+          const profile =
+            opts.profile ?? (await getRemoteSession(url, sessionId)).session.profile;
+          const resolved = coerceCliProfileName(profile);
+          if (!resolved) throw new Error(`Unknown profile "${profile}"`);
+          if (opts.authRefresh !== false) {
+            const fresh = await ensureProfileAuthFresh(resolved);
+            if (fresh.checked)
+              process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
+          }
+          await softRefreshSession(sessionId, resolved);
+          return;
+        }
         await refreshProfileSession(url, sessionId, opts);
       },
     );
