@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { Command } from "commander";
@@ -34,6 +35,15 @@ import {
 } from "./auth-tools.js";
 import { transmittedSecrets, secretsSummary } from "./secrets.js";
 import { localConvStat, remoteConvStat, alignment } from "./convsync.js";
+import {
+  attachLocalSession,
+  attachPodTmux,
+  findLocalSession,
+  killLocalSession,
+  listLocalSessions,
+  startLocalSession,
+  tmuxAvailable,
+} from "./tmux.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -383,6 +393,21 @@ function projectName(s: {
     if (base) return base;
   }
   return s.id;
+}
+
+/** Local CLI binary for a profile (used by `remote run`). */
+const LOCAL_CLI: Readonly<Record<string, string>> = {
+  claude: "claude",
+  "claude-code": "claude",
+  codex: "codex",
+  agy: "agy",
+  antigravity: "agy",
+  opencode: "opencode",
+  shell: "/bin/bash",
+};
+
+function localCliCommand(profile: string): string {
+  return LOCAL_CLI[profile] ?? profile;
 }
 
 function resolveUrlAndSessionId(
@@ -1471,19 +1496,96 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     );
 
   program
+    .command("run <profile> [path]")
+    .description(
+      "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd). Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
+    )
+    .option("--attach", "attach immediately after starting (default: start detached)")
+    .action(
+      async (
+        profile: string,
+        path: string | undefined,
+        opts: { attach?: boolean },
+      ) => {
+        if (!tmuxAvailable()) {
+          process.stderr.write(
+            "[remote] tmux is not installed locally — `remote run` needs it (e.g. `sudo apt install tmux`).\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const cwd = path ? resolve(path) : process.cwd();
+        const command = localCliCommand(profile);
+        const { name, slug } = startLocalSession(profile, command, cwd);
+        process.stderr.write(
+          `[remote] local session ${slug} started (${profile} in ${cwd})\n`,
+        );
+        if (opts.attach) {
+          attachLocalSession(name);
+          return;
+        }
+        process.stderr.write(
+          `[remote] attach with: remote attach ${slug}\n`,
+        );
+      },
+    );
+
+  program
     .command("attach <urlOrSessionId> [sessionId]")
     .description(
-      "Attach to an existing session on a remote control-plane. URL is optional when a default remote is configured.",
+      "Attach to a session. Resolves a LOCAL tmux session (by slug) first, otherwise a remote session on the control-plane. URL is optional when a default remote is configured.",
     )
-    .action(async (first: string, second: string | undefined) => {
-      const { url, sessionId } = resolveUrlAndSessionId(first, second);
-      await ensureConnected(url);
-      process.stderr.write(
-        `[remote] attaching to ${url}/sessions/${sessionId}\n`,
-      );
-      const session = await attach({ baseUrl: url, sessionId });
-      await session.finished;
-    });
+    .option(
+      "--exec",
+      "attach to a remote session straight via kubectl exec into the Pod's tmux (native scrollback + copy; needs a tmux-backed session)",
+    )
+    .option("--local", "force local tmux lookup")
+    .action(
+      async (
+        first: string,
+        second: string | undefined,
+        opts: { exec?: boolean; local?: boolean },
+      ) => {
+        // Local tmux session? (unless an explicit URL/sessionId pair is given).
+        if (second === undefined && !looksLikeUrl(first)) {
+          const local = findLocalSession(first);
+          if (opts.local || local) {
+            if (!local) {
+              process.stderr.write(
+                `[remote] no local session "${first}" (see: remote ls)\n`,
+              );
+              process.exitCode = 1;
+              return;
+            }
+            attachLocalSession(local.name);
+            return;
+          }
+        }
+        const { url, sessionId } = resolveUrlAndSessionId(first, second);
+        if (opts.exec) {
+          const tunnel = getTunnel();
+          if (!tunnel) {
+            process.stderr.write(
+              "[remote] --exec needs a tunnel configured (remote config tunnel …)\n",
+            );
+            process.exitCode = 1;
+            return;
+          }
+          await ensureConnected(url);
+          process.stderr.write(
+            `[remote] exec-attaching into Pod tmux for ${sessionId} (Ctrl-b d to detach)\n`,
+          );
+          process.exitCode = attachPodTmux(tunnel, sessionId);
+          return;
+        }
+        await ensureConnected(url);
+        process.stderr.write(
+          `[remote] attaching to ${url}/sessions/${sessionId}\n`,
+        );
+        const session = await attach({ baseUrl: url, sessionId });
+        await session.finished;
+      },
+    );
 
   program
     .command("refresh <urlOrSessionId> [sessionId]")
@@ -1512,22 +1614,52 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   program
     .command("ls [url]")
-    .description("List sessions on a remote control-plane")
-    .action(async (url: string | undefined) => {
-      const remote = getConfiguredRemote(url);
+    .description("List sessions — LOCAL (tmux) and REMOTE (control-plane) — uniformly")
+    .option("--local", "list only local tmux sessions (no control-plane call)")
+    .action(async (url: string | undefined, opts: { local?: boolean }) => {
+      const w = (s: string, n: number) => s.padEnd(n);
+      const local = listLocalSessions();
+
+      if (local.length > 0) {
+        process.stdout.write("LOCAL (tmux)\n");
+        process.stdout.write(
+          `  ${w("PROJECT", 20)} ${w("PROFILE", 7)} ${w("STATE", 9)} PATH\n`,
+        );
+        for (const s of local) {
+          process.stdout.write(
+            `  ${w(s.slug, 20)} ${w(s.profile, 7)} ${w(s.attached ? "attached" : "detached", 9)} ${s.path}\n`,
+          );
+        }
+      }
+
+      if (opts.local) {
+        if (local.length === 0) process.stderr.write("[remote] no local sessions\n");
+        return;
+      }
+
+      const remote = url ?? getConfiguredRemoteOptional();
+      if (!remote) {
+        if (local.length === 0) {
+          process.stderr.write(
+            "[remote] no local sessions and no remote configured\n",
+          );
+        }
+        return;
+      }
       await ensureConnected(remote);
       const sessions = await listRemoteSessions(remote);
       if (sessions.length === 0) {
-        process.stderr.write("[remote] no sessions\n");
+        if (local.length === 0) process.stderr.write("[remote] no sessions\n");
         return;
       }
-      const w = (s: string, n: number) => s.padEnd(n);
+      if (local.length > 0) process.stdout.write("\n");
+      process.stdout.write("REMOTE (control-plane)\n");
       process.stdout.write(
-        `${w("PROJECT", 22)} ${w("WORKSPACE", 13)} ${w("PROFILE", 7)} ${w("SESSION", 15)} TARGET\n`,
+        `  ${w("PROJECT", 20)} ${w("WORKSPACE", 13)} ${w("PROFILE", 7)} ${w("SESSION", 15)} TARGET\n`,
       );
       for (const s of sessions) {
         process.stdout.write(
-          `${w(projectName(s), 22)} ${w(s.workspaceId ?? "-", 13)} ${w(s.profile, 7)} ${w(s.id, 15)} ${s.target}\n`,
+          `  ${w(projectName(s), 20)} ${w(s.workspaceId ?? "-", 13)} ${w(s.profile, 7)} ${w(s.id, 15)} ${s.target}\n`,
         );
       }
     });
@@ -1535,7 +1667,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   program
     .command("stop <urlOrSessionId> [sessionId]")
     .description(
-      "Stop a session on a remote control-plane. URL is optional when a default remote is configured.",
+      "Stop a session. Resolves a LOCAL tmux session (by slug) first (kills it), otherwise stops a remote session on the control-plane.",
     )
     .option("--reason <reason>", "reason recorded with the stop")
     .action(
@@ -1544,6 +1676,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         second: string | undefined,
         opts: { reason?: string },
       ) => {
+        // Local tmux session? (unless an explicit URL/sessionId pair is given).
+        if (second === undefined && !looksLikeUrl(first)) {
+          const local = findLocalSession(first);
+          if (local) {
+            const ok = killLocalSession(local.name);
+            process.stderr.write(
+              `[remote] local session ${local.slug} ${ok ? "killed" : "could not be killed"}\n`,
+            );
+            if (!ok) process.exitCode = 1;
+            return;
+          }
+        }
         const { url, sessionId } = resolveUrlAndSessionId(first, second);
         const result = await stopRemoteSession(url, sessionId, opts.reason);
         process.stderr.write(
