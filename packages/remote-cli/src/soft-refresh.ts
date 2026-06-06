@@ -13,6 +13,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -132,20 +133,38 @@ export async function softRefreshSession(
 
   // 2. patch the Secret so the fresh creds survive a Pod restart.
   const secretKeysPatched: string[] = [];
+  const runDir = join(
+    process.env.XDG_RUNTIME_DIR ??
+      join(homedir(), ".config", "sentropic", "remote-cli"),
+    "sentropic-remote-run",
+  );
+  mkdirSync(runDir, { recursive: true });
+  let patchN = 0;
   for (const rel of rels) {
     const key = credentialSecretKey(rel);
     const b64 = Buffer.from(bundle[rel]!, "utf8").toString("base64");
+    // Patch via a temp --patch-file so large creds (the full account file) don't
+    // blow the command-line length limit (inline -p) nor hit the spawn stdin
+    // /dev/stdin quirk.
+    const patchFile = join(runDir, `patch-${process.pid}-${patchN++}.json`);
     try {
-      // Patch via stdin (--patch-file) so large creds (the full account file)
-      // don't blow the command-line length limit.
-      kubectl(
-        tunnel,
-        ["patch", "secret", secret, "--type", "merge", "--patch-file", "/dev/stdin"],
-        JSON.stringify({ data: { [key]: b64 } }),
-      );
+      writeFileSync(patchFile, JSON.stringify({ data: { [key]: b64 } }), "utf8");
+      kubectl(tunnel, [
+        "patch",
+        "secret",
+        secret,
+        "--type",
+        "merge",
+        "--patch-file",
+        patchFile,
+      ]);
       secretKeysPatched.push(key);
     } catch (error) {
-      stderr.write(`[remote] warn: could not patch Secret key ${key}: ${String(error)}\n`);
+      stderr.write(
+        `[remote] warn: could not patch Secret key ${key}: ${String(error).slice(0, 120)}\n`,
+      );
+    } finally {
+      rmSync(patchFile, { force: true });
     }
   }
   stderr.write(`[remote] patched ${secretKeysPatched.length} Secret key(s) (durable across restart)\n`);
