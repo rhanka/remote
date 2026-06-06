@@ -410,6 +410,22 @@ function localCliCommand(profile: string): string {
   return LOCAL_CLI[profile] ?? profile;
 }
 
+/** CLI args to resume a specific conversation, per profile. */
+function localResumeArgs(profile: string, convId: string): string[] {
+  switch (profile) {
+    case "claude":
+    case "claude-code":
+      return ["--resume", convId];
+    case "codex":
+      return ["resume", convId];
+    case "agy":
+    case "antigravity":
+      return ["--resume", convId];
+    default:
+      return [];
+  }
+}
+
 function resolveUrlAndSessionId(
   first: string,
   second: string | undefined,
@@ -1501,11 +1517,16 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd). Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
     )
     .option("--attach", "attach immediately after starting (default: start detached)")
+    .option("-r, --resume <convId>", "resume a specific conversation in the CLI")
+    .option(
+      "--name <label>",
+      "tmux session slug + tab label (default: workdir basename); use to keep multiple sessions of one project distinct",
+    )
     .action(
       async (
         profile: string,
         path: string | undefined,
-        opts: { attach?: boolean },
+        opts: { attach?: boolean; resume?: string; name?: string },
       ) => {
         if (!tmuxAvailable()) {
           process.stderr.write(
@@ -1516,17 +1537,22 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         }
         const cwd = path ? resolve(path) : process.cwd();
         const command = localCliCommand(profile);
-        const { name, slug } = startLocalSession(profile, command, cwd);
+        const args = opts.resume ? localResumeArgs(profile, opts.resume) : [];
+        const { name, slug } = startLocalSession(
+          profile,
+          command,
+          cwd,
+          args,
+          opts.name,
+        );
         process.stderr.write(
-          `[remote] local session ${slug} started (${profile} in ${cwd})\n`,
+          `[remote] local session ${slug} started (${profile}${opts.resume ? ` --resume ${opts.resume}` : ""} in ${cwd})\n`,
         );
         if (opts.attach) {
           attachLocalSession(name);
           return;
         }
-        process.stderr.write(
-          `[remote] attach with: remote attach ${slug}\n`,
-        );
+        process.stderr.write(`[remote] attach with: remote attach ${slug}\n`);
       },
     );
 

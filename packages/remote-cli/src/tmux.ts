@@ -109,15 +109,18 @@ export type StartLocalResult = { name: string; slug: string };
 
 /**
  * Start a CLI in a detached local tmux session. Idempotent on name: if a
- * session with the same slug already exists it is reused (returns it).
+ * session with the same slug already exists it is reused (returns it). The slug
+ * defaults to the workdir basename; pass `label` to override it (e.g. to keep
+ * several sessions of the same project distinct: "sentropic#2").
  */
 export function startLocalSession(
   profile: string,
   command: string,
   cwd: string,
   args: ReadonlyArray<string> = [],
+  label?: string,
 ): StartLocalResult {
-  const slug = slugify(cwd);
+  const slug = slugify(label ?? cwd);
   const name = localSessionName(slug);
   if (findLocalSession(name)) return { name, slug };
 
