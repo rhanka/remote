@@ -180,6 +180,11 @@ export function attachPodTmux(
 ): number {
   const env = { ...process.env };
   if (tunnel.kubeconfig) env.KUBECONFIG = expandHome(tunnel.kubeconfig);
+  // The attach CLIENT must be UTF-8 or tmux transcodes accented output to "_"
+  // for it: the Pod's default locale is empty (ASCII), so we force it on the
+  // exec'd tmux client — `env LANG=C.UTF-8` (so tmux detects UTF-8) + `tmux -u`
+  // (force UTF-8 regardless of detection). (capture-pane never transcodes, which
+  // is why a capture test looked fine while the interactive attach showed "_".)
   const r = spawnSync(
     "kubectl",
     [
@@ -191,7 +196,11 @@ export function attachPodTmux(
       "-c",
       "session-agent",
       "--",
+      "env",
+      "LANG=C.UTF-8",
+      "LC_ALL=C.UTF-8",
       "tmux",
+      "-u",
       "new-session",
       "-A",
       "-s",
