@@ -1638,14 +1638,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option(
       "--exec",
-      "attach to a remote session straight via kubectl exec into the Pod's tmux (native scrollback + copy; needs a tmux-backed session)",
+      "force exec-into-Pod-tmux attach (this is the DEFAULT when a tunnel is configured: UTF-8, native scrollback + copy)",
+    )
+    .option(
+      "--ws",
+      "force the legacy WS/SSE attach (control-plane proxy) instead of exec",
     )
     .option("--local", "force local tmux lookup")
     .action(
       async (
         first: string,
         second: string | undefined,
-        opts: { exec?: boolean; local?: boolean },
+        opts: { exec?: boolean; ws?: boolean; local?: boolean },
       ) => {
         // Local tmux session? (unless an explicit URL/sessionId pair is given).
         if (second === undefined && !looksLikeUrl(first)) {
@@ -1663,8 +1667,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           }
         }
         const { url, sessionId } = resolveUrlAndSessionId(first, second);
-        if (opts.exec) {
-          const tunnel = getTunnel();
+        const tunnel = getTunnel();
+        // Default to exec-into-Pod-tmux (UTF-8, native scrollback + copy, direct,
+        // no deaf-zombie) when a tunnel is configured; the WS/SSE proxy is the
+        // fallback. Force either path with --exec / --ws.
+        if (!opts.ws && (opts.exec || tunnel)) {
           if (!tunnel) {
             process.stderr.write(
               "[remote] --exec needs a tunnel configured (remote config tunnel …)\n",
@@ -1681,7 +1688,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         }
         await ensureConnected(url);
         process.stderr.write(
-          `[remote] attaching to ${url}/sessions/${sessionId}\n`,
+          `[remote] attaching to ${url}/sessions/${sessionId} (WS)\n`,
         );
         const session = await attach({ baseUrl: url, sessionId });
         await session.finished;
