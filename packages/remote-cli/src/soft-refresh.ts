@@ -120,12 +120,13 @@ export async function softRefreshSession(
   // 1. materialize each cred file into the Pod's HOME.
   const filesPushed: string[] = [];
   for (const rel of rels) {
-    const b64 = Buffer.from(bundle[rel]!, "utf8").toString("base64");
+    // collectProfileAuth already returns base64 — decode it ONCE into the file
+    // (do NOT re-encode, or the file ends up containing base64 text).
     execPod(
       tunnel,
       pod,
       `mkdir -p "$(dirname "$HOME/${rel}")" && base64 -d > "$HOME/${rel}" && chmod 600 "$HOME/${rel}"`,
-      b64,
+      bundle[rel]!,
     );
     filesPushed.push(rel);
   }
@@ -142,13 +143,18 @@ export async function softRefreshSession(
   let patchN = 0;
   for (const rel of rels) {
     const key = credentialSecretKey(rel);
-    const b64 = Buffer.from(bundle[rel]!, "utf8").toString("base64");
+    // Secret data values ARE base64, and collectProfileAuth already returns
+    // base64 — use it as-is (do NOT re-encode).
     // Patch via a temp --patch-file so large creds (the full account file) don't
     // blow the command-line length limit (inline -p) nor hit the spawn stdin
     // /dev/stdin quirk.
     const patchFile = join(runDir, `patch-${process.pid}-${patchN++}.json`);
     try {
-      writeFileSync(patchFile, JSON.stringify({ data: { [key]: b64 } }), "utf8");
+      writeFileSync(
+        patchFile,
+        JSON.stringify({ data: { [key]: bundle[rel]! } }),
+        "utf8",
+      );
       kubectl(tunnel, [
         "patch",
         "secret",
