@@ -5,6 +5,26 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.4.3 — 2026-06-05
+
+Headline: **tmux-backed sessions**, local and remote, for simpler juggling and
+robust detach/reattach.
+
+- **Local sessions** (`remote run <profile> [path]`): start a CLI (claude/codex/…)
+  in a local tmux session and manage it like a remote one — `remote ls` lists
+  LOCAL (tmux) and REMOTE (control-plane) sessions uniformly, `remote attach
+  <slug>` / `remote stop <slug>` operate on local sessions by their workdir slug.
+- **In-Pod tmux** (`SESSION_TMUX=1`, default for interactive profiles): the
+  session-agent runs the wrapped CLI inside a durable tmux session and proxies a
+  tmux *client* over the WS. Detaching (Ctrl-b d, or an `--exec` client leaving)
+  no longer ends the session — a reattach loop keeps the proxy alive; the session
+  ends only when the tmux session itself ends.
+- **`remote attach <id> --exec`**: attach straight into the Pod's tmux via
+  `kubectl exec -it` — the local terminal owns scrollback and copy-to-clipboard
+  (OSC52), with no WS proxy in the middle. Fixes "I can't copy what the CLI
+  printed". The agent image ships `tmux` + `/etc/tmux.conf` (50k history,
+  `set-clipboard on`, `mouse on`).
+
 ## v0.4.2 — 2026-06-02
 
 Headline: the control-plane becomes **restart-durable**, and a control-plane
