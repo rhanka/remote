@@ -48,12 +48,22 @@ import {
   attachPodTmux,
   findLocalSession,
   killLocalSession,
-  listLocalSessions,
   startLocalSession,
   tmuxAvailable,
 } from "./tmux.js";
-import { restore as restoreLayout, type RestoreOptions } from "./restore.js";
+import {
+  readLastLayout,
+  restore as restoreLayout,
+  type RestoreOptions,
+} from "./restore.js";
 import { getLayoutConfig } from "./config.js";
+import { enrollFromRun, listLocalForLs } from "./registry.js";
+import {
+  handleClaudeHook,
+  installClaudeHooks,
+  manualEnroll,
+  readStdin,
+} from "./enroll.js";
 import { softRefreshSession } from "./soft-refresh.js";
 import {
   inspectProfileAuth,
@@ -1733,6 +1743,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           args,
           opts.name,
         );
+        // Auto-enroll in the live-session registry (feeds `remote ls`/`restore`).
+        enrollFromRun({
+          profile,
+          slug,
+          tmuxSession: name,
+          cwd,
+          ...(opts.resume !== undefined ? { convId: opts.resume } : {}),
+        });
         process.stderr.write(
           `[remote] local session ${slug} started (${profile}${opts.resume ? ` --resume ${opts.resume}` : ""} in ${cwd})\n`,
         );
@@ -1794,6 +1812,122 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(
           `[remote] ${total} onglet(s)${opts.dryRun ? " (dry-run, rien ouvert)" : " relancé(s)"}\n`,
         );
+      }
+    });
+
+  // ---------------------------------------------------------------------------
+  // enroll — live-session registry plumbing (called by Claude Code hooks)
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("enroll")
+    .description(
+      "Plumbing for the live-session registry (feeds `remote ls`/`remote restore`). " +
+        "Hook mode (--hook claude-start|claude-end) is wired by --install-hooks into " +
+        "~/.claude/settings.json (idempotent; backs up settings.json.bak.<epoch>) and " +
+        "always exits 0 so it can never break the host claude session. " +
+        "codex has no reliable session hook: codex sessions are enrolled by `remote run` " +
+        "and by the restore filesystem-scan fallback. Manual mode: --tool/--cwd/--conv/--pid/--label.",
+    )
+    .option(
+      "--hook <name>",
+      "hook mode: claude-start | claude-end (reads the Claude Code hook JSON on stdin)",
+    )
+    .option(
+      "--install-hooks",
+      "merge the SessionStart/SessionEnd enroll hooks into Claude Code's settings.json (idempotent)",
+    )
+    .option(
+      "--settings <path>",
+      "settings.json path for --install-hooks (default: ~/.claude/settings.json)",
+    )
+    .option("--tool <tool>", "manual mode: claude | codex | agy")
+    .option("--cwd <dir>", "manual mode: session working directory (default: cwd)")
+    .option("--conv <id>", "manual mode: conversation id (used by restore --resume)")
+    .option("--pid <pid>", "manual mode: process id used for liveness checks")
+    .option("--label <label>", "manual mode: display label")
+    .action(
+      async (opts: {
+        hook?: string;
+        installHooks?: boolean;
+        settings?: string;
+        tool?: string;
+        cwd?: string;
+        conv?: string;
+        pid?: string;
+        label?: string;
+      }) => {
+        if (opts.installHooks) {
+          const result = installClaudeHooks(opts.settings);
+          if (!result.changed) {
+            process.stderr.write(
+              `[remote] enroll hooks already installed in ${result.settingsPath}\n`,
+            );
+            return;
+          }
+          if (result.backupPath) {
+            process.stderr.write(`[remote] backup: ${result.backupPath}\n`);
+          }
+          process.stderr.write(
+            `[remote] installed ${result.installed.join(" + ")} enroll hooks in ${result.settingsPath}\n`,
+          );
+          return;
+        }
+        if (opts.hook) {
+          // MUST always exit 0: errors on stderr only, never break the hook host.
+          try {
+            const raw = await readStdin();
+            const result = handleClaudeHook(opts.hook, raw);
+            if (!result.ok) {
+              process.stderr.write(
+                `[remote] enroll hook ignored: ${result.error}\n`,
+              );
+            }
+          } catch (error) {
+            process.stderr.write(`[remote] enroll hook ignored: ${String(error)}\n`);
+          }
+          return;
+        }
+        if (opts.tool) {
+          const result = manualEnroll({
+            tool: opts.tool,
+            ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+            ...(opts.conv !== undefined ? { conv: opts.conv } : {}),
+            ...(opts.pid !== undefined ? { pid: opts.pid } : {}),
+            ...(opts.label !== undefined ? { label: opts.label } : {}),
+          });
+          if (!result.ok) throw new Error(result.error ?? "enroll failed");
+          process.stderr.write(`[remote] enrolled (${opts.tool})\n`);
+          return;
+        }
+        process.stderr.write(
+          "[remote] enroll: pass --hook <name>, --install-hooks, or --tool <tool> (see --help)\n",
+        );
+      },
+    );
+
+  const layoutCommand = program
+    .command("layout")
+    .description("Layout auto-enregistré par `remote restore` (layout-last.json)");
+
+  layoutCommand
+    .command("show")
+    .description("Affiche le dernier layout lancé (fenêtres, onglets, commandes)")
+    .action(() => {
+      const last = readLastLayout();
+      if (!last) {
+        process.stderr.write(
+          "[remote] aucun layout enregistré (lance `remote restore` d'abord)\n",
+        );
+        return;
+      }
+      process.stdout.write(`at: ${last.at}\n`);
+      if (last.group) process.stdout.write(`group: ${last.group}\n`);
+      for (const win of last.windows) {
+        process.stdout.write(`\n${win.title} (${win.tabs.length} onglet(s))\n`);
+        for (const t of win.tabs) {
+          process.stdout.write(`  - ${t.label}  ${t.cwd}\n      ${t.cmd}\n`);
+        }
       }
     });
 
@@ -1910,16 +2044,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .option("--local", "list only local tmux sessions (no control-plane call)")
     .action(async (url: string | undefined, opts: { local?: boolean }) => {
       const w = (s: string, n: number) => s.padEnd(n);
-      const local = listLocalSessions();
+      // Registry + tmux: enrolled sessions show [registry] (reliable cwd/conv),
+      // tmux-only ones show [guess]; dead registry entries are pruned.
+      const local = listLocalForLs();
 
       if (local.length > 0) {
-        process.stdout.write("LOCAL (tmux)\n");
+        process.stdout.write("LOCAL (tmux + registry)\n");
         process.stdout.write(
-          `  ${w("PROJECT", 20)} ${w("PROFILE", 7)} ${w("STATE", 9)} PATH\n`,
+          `  ${w("PROJECT", 20)} ${w("PROFILE", 7)} ${w("STATE", 9)} ${w("SOURCE", 10)} PATH\n`,
         );
         for (const s of local) {
           process.stdout.write(
-            `  ${w(s.slug, 20)} ${w(s.profile, 7)} ${w(s.attached ? "attached" : "detached", 9)} ${s.path}\n`,
+            `  ${w(s.slug, 20)} ${w(s.profile, 7)} ${w(s.state, 9)} ${w(`[${s.badge}]`, 10)} ${s.path}\n`,
           );
         }
       }

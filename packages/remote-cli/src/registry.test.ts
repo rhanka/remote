@@ -1,0 +1,193 @@
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import {
+  enroll,
+  listLive,
+  loadRegistry,
+  markEnded,
+  prune,
+  touchEntry,
+  type RegistryEntry,
+} from "./registry.js";
+
+// Scratch dir inside the package (never /tmp), like the other test suites.
+const SCRATCH_ROOT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  ".test-scratch",
+  "registry",
+);
+
+let scratch: string;
+let regPath: string;
+
+beforeEach(() => {
+  mkdirSync(SCRATCH_ROOT, { recursive: true });
+  scratch = mkdtempSync(join(SCRATCH_ROOT, "r-"));
+  regPath = join(scratch, "registry.json");
+});
+
+afterEach(() => {
+  rmSync(scratch, { recursive: true, force: true });
+});
+
+const baseInput = {
+  id: "sess-1",
+  tool: "claude" as const,
+  kind: "local-tmux" as const,
+  cwd: "/home/u/src/projA",
+  source: "run" as const,
+  tmuxSession: "remote-projA",
+};
+
+describe("registry", () => {
+  it("enroll creates the file atomically and loadRegistry round-trips", () => {
+    const entry = enroll(baseInput, regPath);
+    expect(entry.enrolledAt).toBeTruthy();
+    expect(entry.lastSeenAt).toBeTruthy();
+    expect(existsSync(regPath)).toBe(true);
+    // no leftover tmp file from the atomic write
+    expect(readdirSync(scratch)).toEqual(["registry.json"]);
+    const loaded = loadRegistry(regPath);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0]).toMatchObject({
+      id: "sess-1",
+      tool: "claude",
+      kind: "local-tmux",
+      cwd: "/home/u/src/projA",
+      tmuxSession: "remote-projA",
+      source: "run",
+    });
+  });
+
+  it("enroll upserts by id: keeps enrolledAt, merges fields, no duplicates", () => {
+    const first = enroll(baseInput, regPath);
+    const second = enroll(
+      { ...baseInput, convId: "conv-42", label: "projA" },
+      regPath,
+    );
+    expect(second.enrolledAt).toBe(first.enrolledAt);
+    expect(second.convId).toBe("conv-42");
+    expect(second.label).toBe("projA");
+    const loaded = loadRegistry(regPath);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0]!.convId).toBe("conv-42");
+    // fields not repeated on re-enroll are preserved
+    const third = enroll(baseInput, regPath);
+    expect(third.convId).toBe("conv-42");
+  });
+
+  it("re-enrolling an ended session revives it (endedAt dropped)", () => {
+    enroll(baseInput, regPath);
+    expect(markEnded("sess-1", regPath)).toBe(true);
+    expect(loadRegistry(regPath)[0]!.endedAt).toBeTruthy();
+    enroll(baseInput, regPath);
+    expect(loadRegistry(regPath)[0]!.endedAt).toBeUndefined();
+  });
+
+  it("touchEntry refreshes lastSeenAt and reports unknown ids", () => {
+    enroll(baseInput, regPath);
+    const before = loadRegistry(regPath)[0]!.lastSeenAt;
+    expect(touchEntry("sess-1", regPath)).toBe(true);
+    expect(Date.parse(loadRegistry(regPath)[0]!.lastSeenAt)).toBeGreaterThanOrEqual(
+      Date.parse(before),
+    );
+    expect(touchEntry("nope", regPath)).toBe(false);
+  });
+
+  it("markEnded sets endedAt and reports unknown ids", () => {
+    enroll(baseInput, regPath);
+    expect(markEnded("sess-1", regPath)).toBe(true);
+    expect(loadRegistry(regPath)[0]!.endedAt).toBeTruthy();
+    expect(markEnded("nope", regPath)).toBe(false);
+  });
+
+  it("loadRegistry tolerates a missing or corrupt file", () => {
+    expect(loadRegistry(regPath)).toEqual([]);
+    writeFileSync(regPath, "{not json", "utf8");
+    expect(loadRegistry(regPath)).toEqual([]);
+  });
+
+  describe("listLive", () => {
+    it("local-tmux liveness follows tmux has-session", () => {
+      enroll(baseInput, regPath);
+      enroll(
+        { ...baseInput, id: "sess-2", tmuxSession: "remote-gone" },
+        regPath,
+      );
+      const live = listLive({
+        path: regPath,
+        tmuxHasSession: (name) => name === "remote-projA",
+      });
+      expect(live.map((e) => e.id)).toEqual(["sess-1"]);
+    });
+
+    it("local liveness follows pid (kill(pid, 0)) and endedAt", () => {
+      enroll(
+        { id: "with-pid", tool: "codex", kind: "local", cwd: "/x", source: "run", pid: 1234 },
+        regPath,
+      );
+      enroll(
+        { id: "dead-pid", tool: "codex", kind: "local", cwd: "/x", source: "run", pid: 9999 },
+        regPath,
+      );
+      enroll(
+        { id: "no-pid", tool: "claude", kind: "local", cwd: "/x", source: "hook" },
+        regPath,
+      );
+      enroll(
+        { id: "ended", tool: "claude", kind: "local", cwd: "/x", source: "hook" },
+        regPath,
+      );
+      markEnded("ended", regPath);
+      const live = listLive({
+        path: regPath,
+        pidAlive: (pid) => pid === 1234,
+      });
+      // no-pid local entries are trusted until SessionEnd/prune
+      expect(live.map((e) => e.id).sort()).toEqual(["no-pid", "with-pid"]);
+    });
+
+    it("remote entries are always returned (caller reconciles)", () => {
+      enroll(
+        { id: "scw-1", tool: "claude", kind: "remote", cwd: "/w", source: "remote", remoteId: "scw-1" },
+        regPath,
+      );
+      expect(listLive({ path: regPath }).map((e) => e.id)).toEqual(["scw-1"]);
+    });
+  });
+
+  describe("prune", () => {
+    it("drops dead entries older than maxAgeHours, keeps live and recent ones", () => {
+      const old = new Date(Date.now() - 100 * 3600 * 1000).toISOString();
+      const entries: RegistryEntry[] = [
+        // dead (tmux gone) and old -> pruned
+        { id: "dead-old", tool: "claude", kind: "local-tmux", cwd: "/a", tmuxSession: "remote-a", enrolledAt: old, lastSeenAt: old, source: "run" },
+        // dead but recent -> kept (restore-after-reboot still wants it)
+        { id: "dead-recent", tool: "claude", kind: "local-tmux", cwd: "/b", tmuxSession: "remote-b", enrolledAt: old, lastSeenAt: new Date().toISOString(), source: "run" },
+        // live and old -> kept
+        { id: "live-old", tool: "codex", kind: "local-tmux", cwd: "/c", tmuxSession: "remote-c", enrolledAt: old, lastSeenAt: old, source: "run" },
+      ];
+      writeFileSync(regPath, JSON.stringify({ version: 1, entries }), "utf8");
+      const removed = prune(48, {
+        path: regPath,
+        tmuxHasSession: (name) => name === "remote-c",
+      });
+      expect(removed).toBe(1);
+      expect(loadRegistry(regPath).map((e) => e.id).sort()).toEqual([
+        "dead-recent",
+        "live-old",
+      ]);
+    });
+
+    it("is a no-op (no rewrite) when nothing is prunable", () => {
+      enroll(baseInput, regPath);
+      const before = readFileSync(regPath, "utf8");
+      expect(prune(48, { path: regPath, tmuxHasSession: () => true })).toBe(0);
+      expect(readFileSync(regPath, "utf8")).toBe(before);
+    });
+  });
+});

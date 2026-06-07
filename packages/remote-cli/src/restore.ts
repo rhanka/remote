@@ -13,20 +13,30 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { getLayoutConfig, type LayoutConfig } from "./config.js";
+import {
+  getLayoutConfig,
+  resolveConfigPath,
+  type LayoutConfig,
+} from "./config.js";
+import { listLive, type RegistryEntry } from "./registry.js";
 
 export type DiscoveredSession = {
   project: string;
   mtimeMs: number;
-  tool: "claude" | "codex";
+  tool: "claude" | "codex" | "agy";
   sid: string;
   cwd: string;
+  /** "registry" = enrolled live session (reliable); "scan" = mtime guess. */
+  origin?: "registry" | "scan";
+  /** Preferred tab label (registry entries carry a reliable one). */
+  label?: string;
 };
 
 export type LayoutTab = {
@@ -37,6 +47,8 @@ export type LayoutTab = {
   sid?: string;
   /** SCW session attached via `remote attach <id> --exec` */
   remoteId?: string;
+  /** discovery provenance, shown as [registry]/[guess] in --dry-run */
+  origin?: "registry" | "scan";
 };
 
 export type LayoutWindow = { title: string; tabs: LayoutTab[] };
@@ -115,6 +127,54 @@ export function discoverSessions(
   return out;
 }
 
+/**
+ * REGISTRY-FIRST discovery: live registry entries (local kinds) mapped to
+ * discovered sessions. label/cwd/convId come straight from enrolment, no
+ * mtime guessing. `entries` is injectable for tests (defaults to listLive()).
+ */
+export function registrySessions(
+  home: string = homedir(),
+  entries: RegistryEntry[] = listLive(),
+): DiscoveredSession[] {
+  const src = join(home, "src");
+  const out: DiscoveredSession[] = [];
+  for (const e of entries) {
+    if (e.kind === "remote") continue; // remote groups are filled from SCW
+    if (!e.cwd.startsWith(`${src}/`)) continue;
+    const project = e.cwd.slice(src.length + 1).split("/")[0];
+    if (!project) continue;
+    const seen = Date.parse(e.lastSeenAt);
+    const session: DiscoveredSession = {
+      project,
+      mtimeMs: Number.isFinite(seen) ? seen : Date.now(),
+      tool: e.tool,
+      sid: e.convId ?? "",
+      cwd: e.cwd,
+      origin: "registry",
+    };
+    if (e.label !== undefined) session.label = e.label;
+    out.push(session);
+  }
+  return out;
+}
+
+/**
+ * Merge discovery sources: registry entries win; the filesystem scan only
+ * completes projects that have NO registry entry (tagged origin "scan").
+ */
+export function mergeDiscovered(
+  registry: DiscoveredSession[],
+  scanned: DiscoveredSession[],
+): DiscoveredSession[] {
+  const covered = new Set(registry.map((s) => s.project));
+  return [
+    ...registry,
+    ...scanned
+      .filter((s) => !covered.has(s.project))
+      .map((s) => ({ ...s, origin: "scan" as const })),
+  ];
+}
+
 function safeStat(p: string): { mtimeMs: number } | undefined {
   try {
     return statSync(p);
@@ -170,12 +230,16 @@ export function groupSessions(
       .slice()
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
       .slice(0, cfg.multiSession[project] ?? 1);
-    return arr.map((s, i) => ({
-      cwd: s.cwd,
-      label: i === 0 ? s.project : `${s.project}#${i + 1}`,
-      tool: s.tool,
-      sid: s.sid,
-    }));
+    return arr.map((s, i) => {
+      const tab: LayoutTab = {
+        cwd: s.cwd,
+        label: s.label ?? (i === 0 ? s.project : `${s.project}#${i + 1}`),
+        tool: s.tool,
+        sid: s.sid,
+      };
+      if (s.origin !== undefined) tab.origin = s.origin;
+      return tab;
+    });
   };
 
   const grouped = new Set<string>();
@@ -235,7 +299,8 @@ function tabCommand(tab: LayoutTab): string {
   }
   return (
     `remote run ${q(tab.tool ?? "shell")} ${q(tab.cwd)} ` +
-    `--resume ${q(tab.sid ?? "")} --name ${q(tab.label)} --attach`
+    (tab.sid ? `--resume ${q(tab.sid)} ` : "") +
+    `--name ${q(tab.label)} --attach`
   );
 }
 
@@ -332,8 +397,10 @@ export function restore(
   const cfg = getLayoutConfig();
   const stderr = opts.stderr ?? process.stderr;
 
-  // Local windows (groups + shared).
-  const sessions = discoverSessions(cfg.maxAgeHours * 3600 * 1000);
+  // Local windows (groups + shared) — REGISTRY-FIRST: live enrolled sessions
+  // are the truth; the filesystem scan only completes uncovered projects.
+  const scanned = discoverSessions(cfg.maxAgeHours * 3600 * 1000);
+  const sessions = mergeDiscovered(registrySessions(), scanned);
   const { windows: localWindows, dropped } = groupSessions(sessions, cfg);
   const localByTitle = new Map(localWindows.map((w) => [w.title, w]));
 
@@ -364,13 +431,75 @@ export function restore(
   const total = windows.reduce((n, w) => n + w.tabs.length, 0);
   for (const w of windows) {
     stderr.write(`  ${w.title} (${w.tabs.length}):\n`);
-    for (const t of w.tabs)
-      stderr.write(
-        `    - ${t.label}  ${t.remoteId ? `SCW:${t.remoteId}` : `${t.tool} (local)`}  ${t.cwd}\n`,
-      );
+    for (const t of w.tabs) {
+      const what = t.remoteId
+        ? `SCW:${t.remoteId}`
+        : `${t.tool} (local) [${t.origin === "registry" ? "registry" : "guess"}]`;
+      stderr.write(`    - ${t.label}  ${what}  ${t.cwd}\n`);
+    }
   }
   if (dropped > 0 && !opts.group)
     stderr.write(`  (! ${dropped} session(s) ignorée(s), plafond atteint)\n`);
-  if (!opts.dryRun && total > 0) launchLayout(windows, stderr);
+  if (!opts.dryRun && total > 0) {
+    launchLayout(windows, stderr);
+    // Auto-record the launched layout (inspect with `remote layout show`).
+    try {
+      writeLastLayout(windows, opts.group);
+    } catch {
+      // best-effort: the windows are open regardless
+    }
+  }
   return { windows, total, dropped };
+}
+
+// ---------------------------------------------------------------------------
+// layout-last.json — auto-recorded snapshot of the last launched layout
+// ---------------------------------------------------------------------------
+
+export type LastLayout = {
+  at: string;
+  group?: string;
+  windows: Array<{
+    title: string;
+    tabs: Array<{ cwd: string; label: string; cmd: string }>;
+  }>;
+};
+
+export function lastLayoutPath(): string {
+  return join(dirname(resolveConfigPath()), "layout-last.json");
+}
+
+/** Persist the just-launched layout to <configDir>/layout-last.json (atomic). */
+export function writeLastLayout(
+  windows: LayoutWindow[],
+  group?: string,
+): void {
+  const data: LastLayout = {
+    at: new Date().toISOString(),
+    ...(group !== undefined ? { group } : {}),
+    windows: windows.map((w) => ({
+      title: w.title,
+      tabs: w.tabs.map((t) => ({
+        cwd: t.cwd,
+        label: t.label,
+        cmd: tabCommand(t),
+      })),
+    })),
+  };
+  const path = lastLayoutPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+  renameSync(tmp, path);
+}
+
+/** Read the recorded layout, or undefined when none was launched yet. */
+export function readLastLayout(): LastLayout | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(lastLayoutPath(), "utf8"));
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return parsed as LastLayout;
+  } catch {
+    return undefined;
+  }
 }

@@ -18,6 +18,7 @@ e2e-*-cp.log
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .state-test/
+.test-scratch/
 .playwright-mcp/
 remote-controle/
 remote-controle-scope-snapshot.md
