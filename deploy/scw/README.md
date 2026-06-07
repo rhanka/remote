@@ -9,6 +9,9 @@ This directory ships **only the tenant-owned manifests** for the
 - `20-control-plane.yaml` — Deployment + ClusterIP Service for the
   control-plane.
 - `30-ingress.yaml` — optional Traefik Ingress (apply with `SCW_INGRESS=1`).
+- `40-prepull.yaml` — DaemonSet that keeps the fat session-agent image warm
+  on every node of the session pool (cold pull is 6-9 min). Refresh after a
+  release with `make scw-prepull`.
 
 The **namespace, ResourceQuota, LimitRange and NetworkPolicy baseline** are
 owned by the cluster operator and live in

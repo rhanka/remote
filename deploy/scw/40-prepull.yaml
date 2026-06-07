@@ -1,0 +1,51 @@
+# Pre-pull of the session-agent image on every session node (WP8).
+#
+# Why: the session-agent image is fat (go/rust/node toolchains + agent CLIs)
+# and a cold pull on a fresh POP2-4C-16G node takes 6-9 minutes — that delay
+# lands directly on the first `remote run` hitting that node. This DaemonSet
+# keeps the :main image warm in the kubelet cache of every node in the
+# "burst-rwx" pool (same nodeSelector the control-plane sets on session pods
+# via SESSION_NODE_SELECTOR), so session pods start in seconds.
+#
+# Refresh mechanics: the tag is a moving :main (retagged by CI on every push
+# to main) and imagePullPolicy is Always, BUT a running `sleep infinity` pod
+# never re-pulls by itself. After a release, run `make scw-prepull`
+# (= kubectl rollout restart of this DaemonSet): each pod is recreated, the
+# Always policy forces a fresh pull, and only the changed layers transfer.
+# New nodes joining the pool get the image pulled as soon as the DaemonSet
+# schedules on them — before any session does.
+#
+# Cost: requests are minuscule (5m CPU / 16Mi, no limits) so the pods are
+# scheduling noise, not capacity consumers.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: session-agent-prepull
+  namespace: sentropic-remote
+  labels:
+    app.kubernetes.io/name: sentropic-remote
+    app.kubernetes.io/component: session-agent-prepull
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentropic-remote
+      app.kubernetes.io/component: session-agent-prepull
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sentropic-remote
+        app.kubernetes.io/component: session-agent-prepull
+    spec:
+      # Same node set as the sessions (SESSION_NODE_SELECTOR in
+      # 20-control-plane.yaml). Sessions carry no tolerations, so none here.
+      nodeSelector:
+        k8s.scaleway.com/pool-name: burst-rwx
+      containers:
+        - name: prepull
+          image: ghcr.io/rhanka/sentropic-remote-session-agent:main
+          imagePullPolicy: Always
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
