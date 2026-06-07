@@ -96,8 +96,23 @@ function resumeCommand(profile: string, convId: string): string {
 export const CREDS_HASH_FILE = ".remote-creds.sha256";
 
 /**
- * Deterministic sha256 of an auth bundle (profile + sorted rel -> base64 value).
- * Values stay opaque: the hash never leaks any secret material.
+ * Bundle rels that are CONFIG, not credentials. They ride along on a push but
+ * must NOT gate it: `.claude.json` is rewritten constantly by every running
+ * local claude session (statsig/lastUsed churn), so hashing it would make
+ * `--watch` respawn the Pod CLI on nearly every pass. Only the actual
+ * credential files decide "changed".
+ */
+const CONFIG_ONLY_RELS: ReadonlySet<string> = new Set([
+  ".claude.json",
+  ".claude/settings.json",
+  ".codex/config.toml",
+  ".gemini/antigravity-cli/settings.json",
+]);
+
+/**
+ * Deterministic sha256 of an auth bundle (profile + sorted rel -> base64 value),
+ * SKIPPING config-only rels (see CONFIG_ONLY_RELS). Values stay opaque: the
+ * hash never leaks any secret material.
  */
 export function hashAuthBundle(
   profile: string,
@@ -107,6 +122,7 @@ export function hashAuthBundle(
   h.update(profile);
   h.update("\0");
   for (const rel of Object.keys(bundle).sort()) {
+    if (CONFIG_ONLY_RELS.has(rel)) continue;
     h.update(rel);
     h.update("\0");
     h.update(bundle[rel]!);
