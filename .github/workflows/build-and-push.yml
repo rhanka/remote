@@ -44,9 +44,11 @@ jobs:
           REF="${GITHUB_REF##*/}"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "tags=${{ matrix.image }}:${REF},${{ matrix.image }}:latest" >> "$GITHUB_OUTPUT"
+            echo "slim_tags=${{ matrix.image }}:${REF}-slim,${{ matrix.image }}:latest-slim" >> "$GITHUB_OUTPUT"
           else
             SHORT="${GITHUB_SHA::7}"
             echo "tags=${{ matrix.image }}:main,${{ matrix.image }}:${SHORT}" >> "$GITHUB_OUTPUT"
+            echo "slim_tags=${{ matrix.image }}:main-slim,${{ matrix.image }}:${SHORT}-slim" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build and push
@@ -64,3 +66,24 @@ jobs:
           # manual action by the repo owner via
           # https://github.com/users/rhanka/packages/container/<name>/settings
           # → Change visibility → Public. Tracked in poc-k8s/requests/.
+
+      # Additive slim variant (session-agent only): same Dockerfile, stopped at
+      # the runtime-slim stage — CLIs + everyday tools, no Go/Rust/build-essential.
+      # Tagged :<ref>-slim alongside the fat tags; the fat image stays the default
+      # (the bare build above has no `target`, so it resolves to the last stage).
+      # Runs after the fat build in the same buildx builder: builder/runtime-base
+      # layers hit the local cache, and the main step's gha cache is read as a
+      # fallback; slim-only layers (the final COPYs) get their own cache scope.
+      - name: Build and push (slim)
+        if: matrix.name == 'session-agent'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: runtime-slim
+          push: true
+          tags: ${{ steps.tags.outputs.slim_tags }}
+          cache-from: |
+            type=gha,scope=${{ matrix.name }}
+            type=gha,scope=${{ matrix.name }}-slim
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-slim
