@@ -11,6 +11,7 @@ import {
   buildSessionAuthSecret,
   buildSessionPodSpec,
   buildSessionPvcSpec,
+  buildSharedWorkspacePvcSpec,
   buildWorkspacePvcSpec,
   resourceNames,
   workspacePvcName,
@@ -210,16 +211,22 @@ export class K8sSessionProvisioner implements SessionProvisioner {
   async provisionWorkspace(workspaceId: string, namespace?: string): Promise<void> {
     const ns = namespace ?? this.options.namespace;
     const opts = { ...this.options, namespace: ns };
-    await this.client
-      .create(buildWorkspacePvcSpec(workspaceId, opts))
-      .catch((error: unknown) => {
-        // tolerate "already exists" so workspace create is idempotent
-        const message = String(error);
-        if (!/already exists|AlreadyExists/i.test(message)) throw error;
-      });
+    // Shared mode: ensure the ONE per-user RWX PVC exists (workspaces are
+    // subdirectories inside it); legacy mode: one PVC per workspace.
+    const spec = this.options.sharedWorkspacePvc
+      ? buildSharedWorkspacePvcSpec(opts)
+      : buildWorkspacePvcSpec(workspaceId, opts);
+    await this.client.create(spec).catch((error: unknown) => {
+      // tolerate "already exists" so workspace create is idempotent
+      const message = String(error);
+      if (!/already exists|AlreadyExists/i.test(message)) throw error;
+    });
   }
 
   async destroyWorkspace(workspaceId: string, namespace?: string): Promise<void> {
+    // Never delete the SHARED volume on workspace rm — it holds every other
+    // workspace too. Subdirectory GC is an explicit operation, not a cascade.
+    if (this.options.sharedWorkspacePvc) return;
     const ns = namespace ?? this.options.namespace;
     await this.client
       .delete({

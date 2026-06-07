@@ -100,6 +100,16 @@ export type SpecBuilderOptions = {
   readonly storageAccessMode?: K8sPvcAccessMode;
   readonly nodeSelector?: Readonly<Record<string, string>>;
   readonly defaultWorkspaceSize: string;
+  /**
+   * Name of ONE shared RWX PVC holding ALL workspaces as subdirectories
+   * (`<pvc>/<workspaceId>/`). When set, workspace-bound sessions mount this
+   * claim with `subPath: <workspaceId>` instead of a per-workspace PVC — one
+   * 100G File Storage volume per user instead of one per workspace (Scaleway
+   * minimum is 100G/volume, and the filestorage CSI allows only ONE such
+   * volume attachment per node, so per-workspace PVCs also pinned 1 session
+   * per node).
+   */
+  readonly sharedWorkspacePvc?: string;
   readonly controlPlaneEndpoint: string;
   readonly home: string;
 };
@@ -188,6 +198,40 @@ export function buildWorkspacePvcSpec(
   };
 }
 
+/**
+ * The ONE shared RWX PVC holding every workspace as a `<workspaceId>/` subdir
+ * (see SpecBuilderOptions.sharedWorkspacePvc). Always RWX: many sessions across
+ * many nodes mount it concurrently.
+ */
+export function buildSharedWorkspacePvcSpec(
+  options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
+): K8sPvcSpec {
+  return {
+    apiVersion: "v1",
+    kind: "PersistentVolumeClaim",
+    metadata: {
+      name: options.sharedWorkspacePvc ?? "remote-workspaces",
+      namespace: options.namespace,
+      labels: {
+        "app.kubernetes.io/name": "sentropic-remote",
+        "app.kubernetes.io/component": "shared-workspaces",
+        "app.kubernetes.io/managed-by": "control-plane",
+      },
+    },
+    spec: {
+      accessModes: ["ReadWriteMany"],
+      resources: {
+        requests: {
+          storage: options.defaultWorkspaceSize,
+        },
+      },
+      ...(options.storageClassName !== undefined
+        ? { storageClassName: options.storageClassName }
+        : {}),
+    },
+  };
+}
+
 export function buildSessionPvcSpec(
   descriptor: SessionDescriptor,
   options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
@@ -263,11 +307,21 @@ export function buildSessionPodSpec(
     Object.assign(resourceRequests, { memory: limits.memory });
   }
 
-  const claimName = descriptor.workspaceId
-    ? workspacePvcName(descriptor.workspaceId)
-    : names.pvc;
+  // Workspace volume: ONE shared RWX PVC with a per-workspace subPath when
+  // configured; else the legacy per-workspace PVC; else the per-session PVC.
+  const shared = Boolean(descriptor.workspaceId && options.sharedWorkspacePvc);
+  const claimName = shared
+    ? options.sharedWorkspacePvc!
+    : descriptor.workspaceId
+      ? workspacePvcName(descriptor.workspaceId)
+      : names.pvc;
+  const wsSubPath = shared ? `${descriptor.workspaceId}` : undefined;
   const volumeMounts: K8sVolumeMount[] = [
-    { name: PVC_VOLUME, mountPath: descriptor.workspacePath },
+    {
+      name: PVC_VOLUME,
+      mountPath: descriptor.workspacePath,
+      ...(wsSubPath ? { subPath: wsSubPath } : {}),
+    },
   ];
   const volumes: K8sVolume[] = [
     {
@@ -285,10 +339,13 @@ export function buildSessionPodSpec(
   const convRelDir = CONVERSATION_DIRS[descriptor.profile];
   if (convRelDir) {
     const sessionHome = descriptor.home ?? options.home;
+    const convSubPath = `.remote/sessions/${descriptor.profile}/${convRelDir}`;
     volumeMounts.push({
       name: PVC_VOLUME,
       mountPath: `${sessionHome}/${convRelDir}`,
-      subPath: `.remote/sessions/${descriptor.profile}/${convRelDir}`,
+      // On the shared PVC the workspace lives under <workspaceId>/, so the
+      // conversation dir does too.
+      subPath: wsSubPath ? `${wsSubPath}/${convSubPath}` : convSubPath,
     });
   }
 

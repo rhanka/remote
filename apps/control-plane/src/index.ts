@@ -228,6 +228,7 @@ export function provisionerFromEnv(): SessionProvisioner {
     defaultWorkspaceSize?: string;
     nodeSelector?: Record<string, string>;
     controlPlaneEndpoint?: string;
+    sharedWorkspacePvc?: string;
   } = { namespace };
   if (process.env.SESSION_AGENT_IMAGE)
     overrides.image = process.env.SESSION_AGENT_IMAGE;
@@ -251,6 +252,10 @@ export function provisionerFromEnv(): SessionProvisioner {
     overrides.nodeSelector = parseNodeSelector(
       process.env.SESSION_NODE_SELECTOR,
     );
+  // ONE shared RWX PVC for ALL workspaces (subPath per workspace) instead of a
+  // 100G File Storage volume per workspace.
+  if (process.env.SESSION_SHARED_WORKSPACE_PVC)
+    overrides.sharedWorkspacePvc = process.env.SESSION_SHARED_WORKSPACE_PVC;
   if (process.env.CONTROL_PLANE_ENDPOINT)
     overrides.controlPlaneEndpoint = process.env.CONTROL_PLANE_ENDPOINT;
   return new K8sSessionProvisioner(

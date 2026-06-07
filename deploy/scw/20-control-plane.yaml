@@ -42,6 +42,12 @@ spec:
               value: "100G"
             - name: SESSION_NODE_SELECTOR
               value: "k8s.scaleway.com/pool-name=burst-rwx"
+            # ONE shared RWX volume for ALL workspaces (subPath per workspace):
+            # Scaleway File Storage is min 100G/volume and the filestorage CSI
+            # allows a single attachment per node — per-workspace PVCs both
+            # wasted ~100G each AND pinned one session per node.
+            - name: SESSION_SHARED_WORKSPACE_PVC
+              value: "remote-workspaces"
           ports:
             - name: http
               containerPort: 8080

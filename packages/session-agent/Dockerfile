@@ -38,16 +38,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# tmux config for deported sessions. mouse OFF on purpose: the wrapped CLIs run
-# in the terminal's NORMAL screen (not alt-screen), so leaving the wheel + text
-# selection to the host terminal (GNOME) gives natural scrollback through the
-# conversation and native copy. (mouse on made tmux capture the wheel into
-# copy-mode over its own redraws — "scrolls the last messages".) set-clipboard on
-# keeps OSC52 for apps that emit it; long history for in-tmux copy-mode.
+# tmux config for deported sessions. mouse ON: the wheel scrolls the pane's 50k
+# history (copy-mode) = the conversation. This works because `remote attach`
+# now exec's the tmux client straight into the Pod, so tmux's mouse-enable
+# escape reaches the user's terminal (the legacy WS proxy swallowed it at pod
+# start — wheel fell back to arrow keys cycling the CLI's input history, which
+# is what "scrolling scrolls the input history" was). mouse off is no better:
+# tmux holds the host terminal in alt-screen, so there is no host scrollback to
+# scroll. Copy: Shift+drag = native selection; set-clipboard keeps OSC52.
 RUN printf '%s\n' \
         'set -g history-limit 50000' \
         'set -g set-clipboard on' \
-        'set -g mouse off' \
+        'set -g mouse on' \
         "set -g status-right '#[fg=green]remote#[default]'" \
     > /etc/tmux.conf
 

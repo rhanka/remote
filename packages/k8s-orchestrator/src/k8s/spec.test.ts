@@ -84,6 +84,33 @@ describe("k8s spec builders", () => {
     expect(workspacePvc.spec.accessModes).toEqual(["ReadWriteMany"]);
   });
 
+  it("mounts the shared workspace PVC with per-workspace subPaths when configured", () => {
+    const pod = buildSessionPodSpec(
+      { ...baseDescriptor, workspaceId: "ws-abc1234", profile: "claude" },
+      {
+        ...DEFAULT_BUILDER_OPTIONS,
+        sharedWorkspacePvc: "remote-workspaces",
+        home: "/home/antoinefa",
+      },
+    );
+    const volume = pod.spec.volumes[0]!;
+    expect(
+      "persistentVolumeClaim" in volume && volume.persistentVolumeClaim.claimName,
+    ).toBe("remote-workspaces");
+    // workspace mount: shared claim + subPath <workspaceId>
+    const ws = pod.spec.containers[0]!.volumeMounts.find(
+      (m) => m.mountPath === baseDescriptor.workspacePath,
+    );
+    expect(ws?.subPath).toBe("ws-abc1234");
+    // conversation mount nests under the workspace subdir
+    const conv = pod.spec.containers[0]!.volumeMounts.find((m) =>
+      m.mountPath.endsWith(".claude/projects"),
+    );
+    expect(conv?.subPath).toBe(
+      "ws-abc1234/.remote/sessions/claude/.claude/projects",
+    );
+  });
+
   it("prefers co-locating sessions with existing remote pods (interstice packing)", () => {
     const pod = buildSessionPodSpec(baseDescriptor);
     const pref =
