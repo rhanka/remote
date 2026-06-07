@@ -90,6 +90,7 @@ import {
   type OnConflict,
 } from "./session-restore.js";
 import { run } from "./run.js";
+import { pluginAdd, pluginLs, pluginSync } from "./plugin.js";
 import { smokeRemoteProfile } from "./smoke.js";
 import { migrateForward, migrateBack } from "./migrate.js";
 import {
@@ -145,6 +146,17 @@ export type {
   MigrateBackOptions,
   MigrateBackResult,
 } from "./migrate.js";
+export {
+  pluginAdd,
+  pluginLs,
+  pluginSync,
+  parseMcpSpec,
+  parseMcpSpecs,
+  detectMcpBins,
+  upsertCodexMcpServer,
+  mergeClaudeMcpServers,
+  buildPodSyncScript,
+} from "./plugin.js";
 
 type ProfileOpts = {
   resume?: string | true;
@@ -1639,6 +1651,53 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         });
       },
     );
+
+  // ---------------------------------------------------------------------------
+  // plugin — npm packages providing a CLI + an MCP server, for all agent CLIs
+  // ---------------------------------------------------------------------------
+
+  const pluginCommand = program
+    .command("plugin")
+    .description(
+      "Install npm plugin packages (CLI + MCP server, e.g. @sentropic/track) for the agent CLIs — locally and in live remote session Pods",
+    );
+
+  pluginCommand
+    .command("add <npmPkg>")
+    .description(
+      "npm i -g <npmPkg>, then register its MCP server(s) with claude + codex (agy/gemini: TODO) and persist the plugin in the remote config. " +
+        "Without --mcp, every bin ending in -mcp is registered (track-mcp -> track). MCPs are registered as `node <realpath>` (never the bare bin: the npm-global symlink breaks some entrypoint guards).",
+    )
+    .option(
+      "--mcp <name=bin>",
+      "MCP server to register, as <name>=<bin> (repeatable; overrides the -mcp heuristic)",
+      (value: string, prev: string[]) => [...prev, value],
+      [] as string[],
+    )
+    .action((npmPkg: string, opts: { mcp: string[] }) => {
+      pluginAdd(npmPkg, opts.mcp);
+    });
+
+  pluginCommand
+    .command("ls")
+    .description(
+      "List configured plugins: pkg, version, MCP servers, and where they are installed (local ok / remote ?)",
+    )
+    .action(() => {
+      pluginLs();
+    });
+
+  pluginCommand
+    .command("sync")
+    .description(
+      "Install every configured plugin into each live REMOTE session Pod (kubectl exec -> npm i -g) and register its MCP servers for the Pod's profile (claude/codex; others: TODO). Needs the configured tunnel.",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(async (opts: { remote?: string }) => {
+      const url = getConfiguredRemote(opts.remote);
+      await ensureConnected(url);
+      await pluginSync(url);
+    });
 
   program
     .command("run <profile> [path]")
