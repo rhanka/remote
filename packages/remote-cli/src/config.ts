@@ -52,6 +52,33 @@ export const DEFAULT_LAYOUT: LayoutConfig = {
   groups: [],
 };
 
+/**
+ * One MCP server provided by an installed plugin package.
+ *
+ * `command` is always "node" and `args` the script's realpath: some packages
+ * (track@0.2.0) have an entrypoint guard that breaks when the script is run
+ * through the npm-global bin symlink, so the bare bin name must never be
+ * registered — see plugin.ts.
+ */
+export type PluginMcp = {
+  name: string;
+  command: string;
+  args: string[];
+  /**
+   * Bin script path relative to the package dir (e.g. "dist/mcp.js") — used by
+   * `remote plugin sync` to recompute the realpath inside remote Pods, where
+   * the npm global root differs from the local one.
+   */
+  scriptRel?: string;
+};
+
+/** An npm package installed as an agent plugin (CLI bin(s) + MCP server(s)). */
+export type PluginEntry = {
+  pkg: string;
+  version: string;
+  mcp: PluginMcp[];
+};
+
 export type RemoteCliConfig = {
   defaultRemote?: string;
   token?: string;
@@ -62,6 +89,8 @@ export type RemoteCliConfig = {
   defaultTools?: string[];
   /** `remote restore` layout (windows/tabs from recent local sessions). */
   layout?: Partial<LayoutConfig>;
+  /** Plugins installed via `remote plugin add` (synced to Pods via `remote plugin sync`). */
+  plugins?: PluginEntry[];
 };
 
 /** Default session target when none is configured/passed. */
@@ -86,6 +115,47 @@ function parseTunnel(raw: unknown): TunnelConfig | undefined {
   };
   if (typeof t.kubeconfig === "string") tunnel.kubeconfig = t.kubeconfig;
   return tunnel;
+}
+
+function parsePluginMcp(raw: unknown): PluginMcp | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const m = raw as Record<string, unknown>;
+  if (
+    typeof m.name !== "string" ||
+    typeof m.command !== "string" ||
+    !Array.isArray(m.args) ||
+    !m.args.every((a: unknown) => typeof a === "string")
+  ) {
+    return undefined;
+  }
+  const mcp: PluginMcp = {
+    name: m.name,
+    command: m.command,
+    args: m.args as string[],
+  };
+  if (typeof m.scriptRel === "string") mcp.scriptRel = m.scriptRel;
+  return mcp;
+}
+
+function parsePlugins(raw: unknown): PluginEntry[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const plugins: PluginEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const p = item as Record<string, unknown>;
+    if (
+      typeof p.pkg !== "string" ||
+      typeof p.version !== "string" ||
+      !Array.isArray(p.mcp)
+    ) {
+      continue;
+    }
+    const mcp = p.mcp
+      .map(parsePluginMcp)
+      .filter((m): m is PluginMcp => m !== undefined);
+    plugins.push({ pkg: p.pkg, version: p.version, mcp });
+  }
+  return plugins;
 }
 
 // Resolved lazily so tests can redirect the config home via
@@ -133,6 +203,8 @@ export function readRemoteConfig(): RemoteCliConfig {
       if (tunnel) config.tunnel = tunnel;
       if (parsed.layout && typeof parsed.layout === "object")
         config.layout = parsed.layout as Partial<LayoutConfig>;
+      const plugins = parsePlugins(parsed.plugins);
+      if (plugins) config.plugins = plugins;
       return config;
     }
     return {};
@@ -179,6 +251,15 @@ export function getDefaultTools(): string[] {
 
 export function setDefaultTools(tools: string[]): void {
   writeRemoteConfig({ ...readRemoteConfig(), defaultTools: tools });
+}
+
+/** Plugins installed via `remote plugin add` (mirrors getDefaultTools). */
+export function getPlugins(): PluginEntry[] {
+  return readRemoteConfig().plugins ?? [];
+}
+
+export function setPlugins(plugins: PluginEntry[]): void {
+  writeRemoteConfig({ ...readRemoteConfig(), plugins });
 }
 
 export function getTunnel(): TunnelConfig | undefined {
