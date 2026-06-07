@@ -78,7 +78,7 @@ import {
   assertRequiredAuthBundle,
   collectProfileAuth,
 } from "./auth-bundle.js";
-import { coerceCliProfileName, isCliProfile, resolveProfile } from "./profiles.js";
+import { coerceCliProfileName, isCliProfile, resolveProfile, resumeArgsFor } from "./profiles.js";
 import { getLoginCommand, runInteractiveLogin } from "./auth-login.js";
 import {
   buildWorkspaceArchive,
@@ -212,9 +212,7 @@ function describeAuthStatus(status: AuthDiagnosticsStatus): string {
 
 function resumeStartupArgs(profileName: string, resume: string | true): string[] {
   if (!isCliProfile(profileName)) return [];
-  const config = resolveProfile(profileName);
-  if (!config.resumeFlag) return [];
-  return resume === true ? [config.resumeFlag] : [config.resumeFlag, resume];
+  return resumeArgsFor(resolveProfile(profileName), resume);
 }
 
 async function runProfile(

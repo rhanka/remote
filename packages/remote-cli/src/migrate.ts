@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { attach, createRemoteSession, stopRemoteSession } from "./attach.js";
-import { coerceCliProfileName, resolveProfile } from "./profiles.js";
+import { coerceCliProfileName, resolveProfile, resumeArgsFor } from "./profiles.js";
 import { collectProfileAuth } from "./auth-bundle.js";
 import { collectToolAuth } from "./auth-tools.js";
 import {
@@ -203,8 +203,7 @@ function buildResumeStartupArgs(
   resume: string | true,
 ): string[] {
   const config = resolveProfile(profileName);
-  if (!config.resumeFlag) return [];
-  return resume === true ? [config.resumeFlag] : [config.resumeFlag, resume];
+  return resumeArgsFor(config, resume);
 }
 
 /**
@@ -730,13 +729,11 @@ export async function migrateBack(
   }
 
   const finalProfile = resumeProfile ?? "claude";
-  const profileConfig = resolveProfile(finalProfile);
-  const resumeFlag = profileConfig.resumeFlag;
+  // Advice string: the ACTUAL CLI command shape (remote run … -r <id>), not a
+  // raw profile flag — codex's resume is a subcommand, claude's differs by id.
   const resumeCommand = resumeConvId
-    ? `remote ${finalProfile} ${resumeFlag} ${resumeConvId}`
-    : resumeFlag
-      ? `remote ${finalProfile} ${resumeFlag}`
-      : `remote ${finalProfile}`;
+    ? `remote run ${finalProfile} -r ${resumeConvId}`
+    : `remote run ${finalProfile}`;
 
   stdout.write(`\n[remote] local state restored from workspace ${workspaceId}\n`);
   stdout.write(`[remote] resume your session with:\n\n  ${resumeCommand}\n\n`);

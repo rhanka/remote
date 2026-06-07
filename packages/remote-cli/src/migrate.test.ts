@@ -488,9 +488,8 @@ describe("migrateBack", () => {
       stdout,
     });
 
-    // The resume command should contain "claude" and the resume flag.
-    expect(result.resumeCommand).toMatch(/claude/);
-    expect(result.resumeCommand).toMatch(/--resume/);
+    // The resume command is the ACTUAL CLI shape: remote run <profile> [-r id].
+    expect(result.resumeCommand).toMatch(/^remote run claude/);
 
     // The printed output should also contain it.
     const printed = stdout.lines.join("");

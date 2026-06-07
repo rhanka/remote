@@ -19,10 +19,18 @@ describe("profiles", () => {
     expect(() => resolveProfile("not-a-profile")).toThrow(/Unknown profile/);
   });
 
-  it("withResume appends the profile-specific flag when a session id is given", () => {
+  it("withResume builds the profile-specific resume argv", () => {
+    // codex resumes via a SUBCOMMAND that must lead the argv.
     const codex = resolveProfile("codex");
-    expect(withResume(codex, "abc").args).toEqual(["--continue", "abc"]);
+    expect(withResume(codex, "abc").args).toEqual(["resume", "abc"]);
+    expect(withResume(codex, true).args).toEqual(["resume", "--last"]);
     expect(withResume(codex, undefined).args).toEqual([]);
+
+    // claude: explicit id → --resume <id>; most recent → --continue (bare
+    // --resume would open the interactive picker).
+    const claude = resolveProfile("claude");
+    expect(withResume(claude, "abc").args).toEqual(["--resume", "abc"]);
+    expect(withResume(claude, true).args).toEqual(["--continue"]);
 
     const shell = resolveProfile("shell");
     expect(withResume(shell, "abc").args).toEqual([]);

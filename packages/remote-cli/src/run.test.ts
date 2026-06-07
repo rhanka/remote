@@ -106,7 +106,7 @@ describe("run", () => {
     expect((stdout as { written: string[] }).written).toContain("hello\n");
   });
 
-  it("appends --continue when resuming a codex session", async () => {
+  it("leads the argv with the resume subcommand when resuming a codex session", async () => {
     let captured: { command: string; args: ReadonlyArray<string> } | null =
       null;
     const { pty } = stubSpawner();
@@ -127,7 +127,7 @@ describe("run", () => {
     await result.exit;
     expect(captured).toEqual({
       command: "codex",
-      args: ["--continue", "sess-abc"],
+      args: ["resume", "sess-abc"],
     });
   });
 
