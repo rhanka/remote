@@ -182,7 +182,14 @@ export function createControlPlane(
 
   app.route(
     "/workspaces",
-    createWorkspacesRouter({ ajv, provisioner, tenantProvisioner }),
+    // sessionStore: the GC keep-list protects every workspace referenced by
+    // ANY session this store knows (live or not), see POST /workspaces/gc.
+    createWorkspacesRouter({
+      ajv,
+      provisioner,
+      tenantProvisioner,
+      sessionStore: store,
+    }),
   );
 
   app.injectWebSocket = nodeWs.injectWebSocket;
