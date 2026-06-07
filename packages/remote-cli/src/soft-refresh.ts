@@ -10,9 +10,17 @@
  *  2. patch session-<id>-auth Secret keys (durability),
  *  3. respawn the Pod's tmux `main` pane: `<cli> --resume <newestConv>` with a
  *     UTF-8 locale, dropping to a shell on exit (never kills the session).
+ *
+ * Unchanged-creds gating (`skipIfUnchanged`, used by `refresh --all/--watch`):
+ * the respawn INTERRUPTS the Pod's CLI, so it must only happen when the pushed
+ * creds actually differ. We sha256 the bundle and compare it with the previous
+ * pass (`previousHash`, in-memory --watch state) and with the hash recorded in
+ * the Pod ($HOME/.remote-creds.sha256, written after every push). Identical
+ * creds = silent no-op: nothing pushed, no Secret patch, NO respawn.
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -84,11 +92,49 @@ function resumeCommand(profile: string, convId: string): string {
   }
 }
 
+/** HOME-relative file in the Pod recording the sha256 of the last pushed bundle. */
+export const CREDS_HASH_FILE = ".remote-creds.sha256";
+
+/**
+ * Deterministic sha256 of an auth bundle (profile + sorted rel -> base64 value).
+ * Values stay opaque: the hash never leaks any secret material.
+ */
+export function hashAuthBundle(
+  profile: string,
+  bundle: Readonly<Record<string, string>>,
+): string {
+  const h = createHash("sha256");
+  h.update(profile);
+  h.update("\0");
+  for (const rel of Object.keys(bundle).sort()) {
+    h.update(rel);
+    h.update("\0");
+    h.update(bundle[rel]!);
+    h.update("\0");
+  }
+  return h.digest("hex");
+}
+
 export type SoftRefreshResult = {
+  /** false = creds identical to the Pod's last push — nothing pushed, NO respawn. */
+  changed: boolean;
+  /** sha256 of the local bundle — feed back as `previousHash` on the next pass. */
+  hash: string;
   filesPushed: string[];
   secretKeysPatched: string[];
   convId: string | undefined;
   respawned: boolean;
+};
+
+export type SoftRefreshOptions = {
+  /**
+   * Compare the bundle hash with `previousHash` and/or the hash recorded in the
+   * Pod, and no-op (no push, no Secret patch, NO respawn) when identical.
+   */
+  skipIfUnchanged?: boolean;
+  /** Bundle hash from the previous pass (in-memory --watch state): when it matches, skip without even reading the Pod. */
+  previousHash?: string;
+  stderr?: NodeJS.WriteStream;
 };
 
 /**
@@ -98,8 +144,9 @@ export type SoftRefreshResult = {
 export async function softRefreshSession(
   sessionId: string,
   profile: string,
-  stderr: NodeJS.WriteStream = process.stderr,
+  options: SoftRefreshOptions = {},
 ): Promise<SoftRefreshResult> {
+  const stderr = options.stderr ?? process.stderr;
   const tunnel = getTunnel();
   if (!tunnel) {
     throw new Error(
@@ -117,6 +164,36 @@ export async function softRefreshSession(
     throw new Error(`no local credentials found for profile "${profile}"`);
   }
 
+  // 0. unchanged-creds gating: identical bundle = silent no-op WITHOUT respawn
+  // (the respawn interrupts the Pod's CLI session — only worth it for new creds).
+  const hash = hashAuthBundle(profile, bundle);
+  if (options.skipIfUnchanged) {
+    let podHash: string | undefined;
+    if (options.previousHash === hash) {
+      podHash = hash; // in-memory state matches: skip even the Pod read
+    } else {
+      try {
+        podHash = execPod(
+          tunnel,
+          pod,
+          `cat "$HOME/${CREDS_HASH_FILE}" 2>/dev/null || true`,
+        ).trim();
+      } catch {
+        // Pod state unreadable — fall through; the push will surface the real error.
+      }
+    }
+    if (podHash === hash) {
+      return {
+        changed: false,
+        hash,
+        filesPushed: [],
+        secretKeysPatched: [],
+        convId: undefined,
+        respawned: false,
+      };
+    }
+  }
+
   // 1. materialize each cred file into the Pod's HOME.
   const filesPushed: string[] = [];
   for (const rel of rels) {
@@ -131,6 +208,16 @@ export async function softRefreshSession(
     filesPushed.push(rel);
   }
   stderr.write(`[remote] pushed ${filesPushed.length} cred file(s) into ${pod}\n`);
+
+  // Record the pushed bundle's hash in the Pod so future --all/--watch passes
+  // can no-op (and NOT respawn) when the local creds haven't changed.
+  try {
+    execPod(tunnel, pod, `printf %s '${hash}' > "$HOME/${CREDS_HASH_FILE}"`);
+  } catch (error) {
+    stderr.write(
+      `[remote] warn: could not record creds hash in Pod: ${String(error).slice(0, 120)}\n`,
+    );
+  }
 
   // 2. patch the Secret so the fresh creds survive a Pod restart.
   const secretKeysPatched: string[] = [];
@@ -213,5 +300,5 @@ export async function softRefreshSession(
     stderr.write(`[remote] creds pushed; no conversation found to resume\n`);
   }
 
-  return { filesPushed, secretKeysPatched, convId, respawned };
+  return { changed: true, hash, filesPushed, secretKeysPatched, convId, respawned };
 }
