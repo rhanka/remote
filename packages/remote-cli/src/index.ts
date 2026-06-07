@@ -375,6 +375,187 @@ async function pushAllProfiles(
   );
 }
 
+/** Validate `--watch <minutes>`: a whole number of minutes >= 1. */
+export function parseWatchMinutes(raw: string): number {
+  const minutes = Number(raw);
+  if (!Number.isInteger(minutes) || minutes < 1) {
+    throw new Error(
+      `--watch needs a whole number of minutes >= 1 (got "${raw}")`,
+    );
+  }
+  return minutes;
+}
+
+type SoftRefreshAllOutcome = {
+  sessionId: string;
+  profile: string;
+  status: "ok" | "unchanged" | "failed";
+  detail?: string;
+};
+
+/**
+ * Soft-refresh EVERY live remote session (profile carried by each session).
+ * Per-session errors don't stop the pass; ends with a recap (ok / unchanged /
+ * failed) and returns the failure count. `hashes` carries the previous pass's
+ * bundle hashes (sessionId -> sha256) so unchanged creds are a no-op WITHOUT
+ * respawning the Pod CLI.
+ */
+export async function softRefreshAllSessions(
+  url: string,
+  opts: { authRefresh?: boolean },
+  hashes: Map<string, string>,
+): Promise<{ failed: number }> {
+  const sessions = await listRemoteSessions(url);
+  if (sessions.length === 0) {
+    process.stderr.write("[remote] no live remote sessions to refresh\n");
+    return { failed: 0 };
+  }
+  const preflighted = new Set<string>();
+  const outcomes: SoftRefreshAllOutcome[] = [];
+  for (const s of sessions) {
+    const profile = coerceCliProfileName(s.profile);
+    if (!profile) {
+      outcomes.push({
+        sessionId: s.id,
+        profile: s.profile,
+        status: "failed",
+        detail: `unknown profile "${s.profile}"`,
+      });
+      continue;
+    }
+    try {
+      if (opts.authRefresh !== false && !preflighted.has(profile)) {
+        const fresh = await ensureProfileAuthFresh(profile);
+        if (fresh.checked) {
+          process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
+        }
+        preflighted.add(profile);
+      }
+      const previous = hashes.get(s.id);
+      const result = await softRefreshSession(s.id, profile, {
+        skipIfUnchanged: true,
+        ...(previous !== undefined ? { previousHash: previous } : {}),
+      });
+      hashes.set(s.id, result.hash);
+      outcomes.push({
+        sessionId: s.id,
+        profile,
+        status: result.changed ? "ok" : "unchanged",
+      });
+    } catch (error) {
+      outcomes.push({
+        sessionId: s.id,
+        profile,
+        status: "failed",
+        detail: (error instanceof Error ? error.message : String(error)).slice(
+          0,
+          200,
+        ),
+      });
+    }
+  }
+  const failed = outcomes.filter((o) => o.status === "failed").length;
+  process.stderr.write(
+    `[remote] soft refresh recap — ${outcomes.length} session(s), ${failed} failed:\n`,
+  );
+  for (const o of outcomes) {
+    process.stderr.write(
+      `  ${o.sessionId} (${o.profile}) ${o.status}${o.detail ? ` — ${o.detail}` : ""}\n`,
+    );
+  }
+  return { failed };
+}
+
+/** One gated soft-refresh pass for a single session (used by --watch <id>). */
+async function softRefreshOneGated(
+  url: string,
+  sessionId: string,
+  opts: RefreshOpts,
+  hashes: Map<string, string>,
+): Promise<{ failed: number }> {
+  try {
+    const profileName =
+      opts.profile ?? (await getRemoteSession(url, sessionId)).session.profile;
+    const profile = coerceCliProfileName(profileName);
+    if (!profile) throw new Error(`Unknown profile "${profileName}"`);
+    if (opts.authRefresh !== false) {
+      const fresh = await ensureProfileAuthFresh(profile);
+      if (fresh.checked) {
+        process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
+      }
+    }
+    const previous = hashes.get(sessionId);
+    const result = await softRefreshSession(sessionId, profile, {
+      skipIfUnchanged: true,
+      ...(previous !== undefined ? { previousHash: previous } : {}),
+    });
+    hashes.set(sessionId, result.hash);
+    process.stderr.write(
+      `[remote] ${sessionId} (${profile}) ${result.changed ? "refreshed" : "unchanged"}\n`,
+    );
+    return { failed: 0 };
+  } catch (error) {
+    process.stderr.write(
+      `[remote] ${sessionId} refresh failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}\n`,
+    );
+    return { failed: 1 };
+  }
+}
+
+/**
+ * Foreground refresh loop for `--watch <minutes>`: pass, sleep, repeat. NO
+ * daemonization, no pid file — the user runs it in a dedicated tmux window.
+ * Each pass is timestamped on stderr; SIGINT (Ctrl-C) stops it cleanly with a
+ * message and exit 0. Pass failures are logged and the loop keeps going.
+ */
+export async function watchRefreshLoop(
+  minutes: number,
+  pass: () => Promise<{ failed: number }>,
+  // injectable so tests never emit a real SIGINT inside the test runner
+  signals: {
+    on(event: "SIGINT", listener: () => void): unknown;
+    removeListener(event: "SIGINT", listener: () => void): unknown;
+  } = process,
+): Promise<number> {
+  let stopped = false;
+  let wake: (() => void) | undefined;
+  const onSigint = () => {
+    stopped = true;
+    wake?.();
+  };
+  signals.on("SIGINT", onSigint);
+  try {
+    while (!stopped) {
+      process.stderr.write(
+        `[remote] refresh pass — ${new Date().toISOString()}\n`,
+      );
+      try {
+        await pass();
+      } catch (error) {
+        process.stderr.write(
+          `[remote] refresh pass failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}\n`,
+        );
+      }
+      if (stopped) break;
+      process.stderr.write(
+        `[remote] next pass in ${minutes} min (Ctrl-C to stop)\n`,
+      );
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, minutes * 60_000);
+        wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      wake = undefined;
+    }
+  } finally {
+    signals.removeListener("SIGINT", onSigint);
+  }
+  process.stderr.write("[remote] watch stopped (SIGINT)\n");
+  return 0;
+}
+
 function getConfiguredRemote(overrideUrl?: string): string {
   const remote = overrideUrl ?? getConfiguredRemoteOptional();
   if (!remote) {
@@ -2169,7 +2350,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     );
 
   program
-    .command("refresh <urlOrSessionId> [sessionId]")
+    .command("refresh [urlOrSessionId] [sessionId]")
     .description(
       "Re-bundle the local CLI credentials and push them to an existing remote session's Secret. The session's Pod is restarted by the control-plane so the new tokens take effect. Profile is auto-detected from the session.",
     )
@@ -2186,13 +2367,78 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--soft",
       "push fresh creds INTO the running Pod + relaunch the CLI in place (no Pod recreate; keeps HOME + conversation; fixes the ~8h token logout)",
     )
+    .option(
+      "--all",
+      "soft-refresh EVERY live remote session (implies --soft; profile per session); recap at the end, exit 1 if any failed",
+    )
+    .option(
+      "--watch <minutes>",
+      "repeat the (soft) refresh every N minutes in the FOREGROUND (implies --soft); Ctrl-C to stop. Respawns the Pod CLI only when creds actually changed",
+    )
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Examples:",
+        "  $ remote refresh sess-abc --soft     refresh one session's creds in place",
+        "  $ remote refresh --soft --all        refresh every live session once",
+        "  $ remote refresh --all --watch 30    foreground loop: every 30 min, all sessions;",
+        "                                       unchanged creds = no-op (no CLI respawn)",
+        "  Run the watch in a dedicated tmux window, e.g.:",
+        "    tmux new-window -n creds 'remote refresh --all --watch 30'",
+        "",
+      ].join("\n"),
+    )
     .action(
       async (
-        first: string,
+        first: string | undefined,
         second: string | undefined,
-        opts: RefreshOpts & { soft?: boolean },
+        opts: RefreshOpts & { soft?: boolean; all?: boolean; watch?: string },
       ) => {
+        const watchMinutes =
+          opts.watch === undefined ? undefined : parseWatchMinutes(opts.watch);
+
+        if (opts.all) {
+          // --all implies --soft: it iterates live sessions in place.
+          if (
+            (first !== undefined && !looksLikeUrl(first)) ||
+            second !== undefined
+          ) {
+            throw new Error(
+              "--all refreshes every live session — don't pass a session id (only an optional URL).",
+            );
+          }
+          const url = getConfiguredRemote(first);
+          await ensureConnected(url);
+          const hashes = new Map<string, string>();
+          if (watchMinutes !== undefined) {
+            process.exitCode = await watchRefreshLoop(watchMinutes, () =>
+              softRefreshAllSessions(url, opts, hashes),
+            );
+            return;
+          }
+          const { failed } = await softRefreshAllSessions(url, opts, hashes);
+          if (failed > 0) process.exitCode = 1;
+          return;
+        }
+
+        if (first === undefined) {
+          throw new Error(
+            "Missing session id. Usage: remote refresh [url] <sessionId> [--soft] (or --soft --all).",
+          );
+        }
         const { url, sessionId } = resolveUrlAndSessionId(first, second);
+
+        if (watchMinutes !== undefined) {
+          // --watch implies --soft (gated: unchanged creds never respawn).
+          await ensureConnected(url);
+          const hashes = new Map<string, string>();
+          process.exitCode = await watchRefreshLoop(watchMinutes, () =>
+            softRefreshOneGated(url, sessionId, opts, hashes),
+          );
+          return;
+        }
+
         if (opts.soft) {
           await ensureConnected(url);
           const profile =
