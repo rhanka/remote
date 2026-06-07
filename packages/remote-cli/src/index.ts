@@ -58,6 +58,7 @@ import {
 } from "./restore.js";
 import { getLayoutConfig } from "./config.js";
 import { enrollFromRun, listLocalForLs } from "./registry.js";
+import { guardConvWriters } from "./conv-guard.js";
 import {
   handleClaudeHook,
   installClaudeHooks,
@@ -1478,6 +1479,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--with <tools>",
       `comma-separated tool CLIs whose local auth to also bundle into the Pod (known: ${KNOWN_TOOLS.join(", ")}); defaults to 'remote config tools'`,
     )
+    .option(
+      "--force",
+      "migrate even if the conversation already has a live writer (risk: conversation .jsonl corruption)",
+    )
     .action(
       async (
         profile: string,
@@ -1488,10 +1493,26 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           attach?: boolean;
           reconnect?: boolean;
           with?: string;
+          force?: boolean;
         },
       ) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
         await ensureConnected(remoteUrl);
+        // Single-writer guard: the conversation must not stay open locally (or
+        // in another pod) while we deport it — stop the local session first
+        // (`remote stop <slug>`), or --force to take over anyway.
+        if (typeof opts.resume === "string") {
+          const ok = await guardConvWriters({
+            convId: opts.resume,
+            cwd: process.cwd(),
+            ...(opts.force ? { force: true } : {}),
+            fetchRemoteSessions: () => listRemoteSessions(remoteUrl),
+          });
+          if (!ok) {
+            process.exitCode = 1;
+            return;
+          }
+        }
         const tools = resolveTools(opts.with);
         await migrateForward({
           profile,
@@ -1717,6 +1738,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .option("--attach", "attach immediately after starting (default: start detached)")
     .option("-r, --resume <convId>", "resume a specific conversation in the CLI")
     .option(
+      "--force",
+      "start even if the conversation already has a live writer (risk: conversation .jsonl corruption)",
+    )
+    .option(
       "--name <label>",
       "tmux session slug + tab label (default: workdir basename); use to keep multiple sessions of one project distinct",
     )
@@ -1724,7 +1749,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       async (
         profile: string,
         path: string | undefined,
-        opts: { attach?: boolean; resume?: string; name?: string },
+        opts: { attach?: boolean; resume?: string; force?: boolean; name?: string },
       ) => {
         if (!tmuxAvailable()) {
           process.stderr.write(
@@ -1734,6 +1759,23 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
         const cwd = path ? resolve(path) : process.cwd();
+        // Single-writer guard: refuse to resume a conversation another live
+        // session (local registry / remote pod) is already writing.
+        if (opts.resume) {
+          const ok = await guardConvWriters({
+            convId: opts.resume,
+            cwd,
+            ...(opts.force ? { force: true } : {}),
+            fetchRemoteSessions: async () => {
+              const url = getConfiguredRemoteOptional();
+              return url ? await listRemoteSessions(url) : [];
+            },
+          });
+          if (!ok) {
+            process.exitCode = 1;
+            return;
+          }
+        }
         const command = localCliCommand(profile);
         const args = opts.resume ? localResumeArgs(profile, opts.resume) : [];
         const { name, slug } = startLocalSession(
