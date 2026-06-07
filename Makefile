@@ -10,7 +10,7 @@ PORT ?= 8080
 	images images-control-plane images-session-agent \
 	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
 	demo demo-down \
-	scw-deploy scw-undeploy scw-port-forward \
+	scw-deploy scw-undeploy scw-port-forward scw-prepull \
 	cli-build cli-link cli-unlink \
 	e2e-docker e2e-k3s e2e-isolation
 
@@ -34,7 +34,8 @@ help:
 	@echo "  undeploy / k3d-down  individual cleanup"
 	@echo ""
 	@echo "Scaleway Kapsule (tenant-only; cluster + namespace owned by ../poc-k8s):"
-	@echo "  scw-deploy           apply RBAC + Deployment + Service (add SCW_INGRESS=1 for the Ingress)"
+	@echo "  scw-deploy           apply RBAC + Deployment + Service + pre-pull DaemonSet (add SCW_INGRESS=1 for the Ingress)"
+	@echo "  scw-prepull          re-pull session-agent:main on all session nodes (run after a release)"
 	@echo "  scw-port-forward     expose the Kapsule control-plane locally on $(PORT)"
 	@echo "  scw-undeploy         remove the Kapsule workload (namespace + quota stay, owned by poc-k8s)"
 	@echo "  (cluster ops — pause/resume node, autoscaler, kubeconfig — live in ../poc-k8s/Makefile)"
@@ -128,9 +129,16 @@ scw-deploy:
 	kubectl apply -f deploy/scw/10-rbac.yaml
 	kubectl apply -f deploy/scw/20-control-plane.yaml
 	@if [ "$(SCW_INGRESS)" = "1" ]; then kubectl apply -f deploy/scw/30-ingress.yaml; fi
+	kubectl apply -f deploy/scw/40-prepull.yaml
 	kubectl -n $(NAMESPACE) rollout status deploy/control-plane --timeout=180s
 
+# session-agent:main moved (CI retags on every push to main) but the prepull
+# pods only pull at (re)creation — restart them to refresh the node caches.
+scw-prepull:
+	kubectl -n $(NAMESPACE) rollout restart daemonset/session-agent-prepull
+
 scw-undeploy:
+	-kubectl delete -f deploy/scw/40-prepull.yaml --ignore-not-found
 	-kubectl delete -f deploy/scw/30-ingress.yaml --ignore-not-found
 	-kubectl delete -f deploy/scw/20-control-plane.yaml --ignore-not-found
 	-kubectl delete -f deploy/scw/10-rbac.yaml --ignore-not-found
