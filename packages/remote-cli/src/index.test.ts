@@ -79,6 +79,11 @@ vi.mock("./smoke.js", () => ({
   smokeRemoteProfile: vi.fn(),
 }));
 
+const softRefreshSession = vi.fn();
+vi.mock("./soft-refresh.js", () => ({
+  softRefreshSession,
+}));
+
 const stderrWrite = vi
   .spyOn(process.stderr, "write")
   .mockImplementation(() => true);
@@ -87,7 +92,8 @@ const stdoutWrite = vi
   .spyOn(process.stdout, "write")
   .mockImplementation(() => true);
 
-const { main } = await import("./index.js");
+const { main, parseWatchMinutes, softRefreshAllSessions, watchRefreshLoop } =
+  await import("./index.js");
 
 describe("main", () => {
   beforeEach(() => {
@@ -114,6 +120,16 @@ describe("main", () => {
     createWorkspace.mockResolvedValue({ id: "ws-new", createdAt: "now" });
     listWorkspaces.mockResolvedValue([]);
     deleteWorkspace.mockResolvedValue(true);
+    softRefreshSession.mockReset();
+    softRefreshSession.mockResolvedValue({
+      changed: true,
+      hash: "hash-default",
+      filesPushed: [".codex/auth.json"],
+      secretKeysPatched: ["codex_auth.json"],
+      convId: "conv-1",
+      respawned: true,
+    });
+    process.exitCode = undefined;
     stderrWrite.mockClear();
     stdoutWrite.mockClear();
 
@@ -463,5 +479,154 @@ describe("main", () => {
       "http://localhost:8080",
       expect.not.objectContaining({ workspaceId: expect.anything() }),
     );
+  });
+
+  describe("refresh --soft --all", () => {
+    const sessions = [
+      { id: "s1", profile: "codex", target: "k3s", createdAt: "now" },
+      { id: "s2", profile: "claude", target: "k3s", createdAt: "now" },
+      { id: "s3", profile: "codex", target: "k3s", createdAt: "now" },
+    ];
+
+    it("soft-refreshes every live session (gated) and recaps ok/unchanged", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      listRemoteSessions.mockResolvedValue(sessions.slice(0, 2));
+      softRefreshSession
+        .mockResolvedValueOnce({
+          changed: true,
+          hash: "h1",
+          filesPushed: [],
+          secretKeysPatched: [],
+          convId: "c1",
+          respawned: true,
+        })
+        .mockResolvedValueOnce({
+          changed: false,
+          hash: "h2",
+          filesPushed: [],
+          secretKeysPatched: [],
+          convId: undefined,
+          respawned: false,
+        });
+
+      const exitCode = await main(["node", "remote", "refresh", "--soft", "--all"]);
+
+      expect(exitCode).toBe(0);
+      expect(listRemoteSessions).toHaveBeenCalledWith("http://localhost:8080");
+      expect(softRefreshSession).toHaveBeenCalledTimes(2);
+      expect(softRefreshSession).toHaveBeenNthCalledWith(1, "s1", "codex", {
+        skipIfUnchanged: true,
+      });
+      expect(softRefreshSession).toHaveBeenNthCalledWith(2, "s2", "claude", {
+        skipIfUnchanged: true,
+      });
+      const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("s1 (codex) ok");
+      expect(out).toContain("s2 (claude) unchanged");
+    });
+
+    it("continues past per-session failures and exits 1 when any failed", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      listRemoteSessions.mockResolvedValue(sessions);
+      softRefreshSession.mockImplementation(async (sessionId: string) => {
+        if (sessionId === "s2") throw new Error("pod gone");
+        return {
+          changed: true,
+          hash: `h-${sessionId}`,
+          filesPushed: [],
+          secretKeysPatched: [],
+          convId: undefined,
+          respawned: true,
+        };
+      });
+
+      const exitCode = await main(["node", "remote", "refresh", "--soft", "--all"]);
+
+      expect(exitCode).toBe(1);
+      expect(softRefreshSession).toHaveBeenCalledTimes(3); // s2 failure didn't stop s3
+      const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("s2 (claude) failed — pod gone");
+      expect(out).toContain("s3 (codex) ok");
+      expect(out).toContain("1 failed");
+    });
+
+    it("--all rejects an explicit session id", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      await expect(
+        main(["node", "remote", "refresh", "sess-1", "--all"]),
+      ).rejects.toThrow(/--all refreshes every live session/);
+      expect(softRefreshSession).not.toHaveBeenCalled();
+    });
+
+    it("feeds the previous pass hash back into the next pass (watch state)", async () => {
+      listRemoteSessions.mockResolvedValue(sessions.slice(0, 1));
+      softRefreshSession.mockResolvedValue({
+        changed: true,
+        hash: "h1",
+        filesPushed: [],
+        secretKeysPatched: [],
+        convId: undefined,
+        respawned: true,
+      });
+      const hashes = new Map<string, string>();
+
+      await softRefreshAllSessions("http://localhost:8080", {}, hashes);
+      expect(softRefreshSession).toHaveBeenLastCalledWith("s1", "codex", {
+        skipIfUnchanged: true,
+      });
+
+      await softRefreshAllSessions("http://localhost:8080", {}, hashes);
+      expect(softRefreshSession).toHaveBeenLastCalledWith("s1", "codex", {
+        skipIfUnchanged: true,
+        previousHash: "h1",
+      });
+    });
+  });
+
+  describe("refresh --watch", () => {
+    it("parseWatchMinutes accepts whole minutes >= 1 and rejects the rest", () => {
+      expect(parseWatchMinutes("1")).toBe(1);
+      expect(parseWatchMinutes("30")).toBe(30);
+      for (const bad of ["0", "-5", "1.5", "abc", ""]) {
+        expect(() => parseWatchMinutes(bad)).toThrow(/whole number of minutes/);
+      }
+    });
+
+    it("rejects an invalid --watch value before touching the control-plane", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      await expect(
+        main(["node", "remote", "refresh", "--all", "--watch", "0"]),
+      ).rejects.toThrow(/--watch needs a whole number of minutes >= 1/);
+      expect(listRemoteSessions).not.toHaveBeenCalled();
+      expect(softRefreshSession).not.toHaveBeenCalled();
+    });
+
+    it("watchRefreshLoop runs passes on the interval and stops cleanly on SIGINT (exit 0)", async () => {
+      vi.useFakeTimers();
+      try {
+        const { EventEmitter } = await import("node:events");
+        const signals = new EventEmitter();
+        const pass = vi
+          .fn<() => Promise<{ failed: number }>>()
+          .mockImplementationOnce(async () => ({ failed: 0 }))
+          .mockImplementationOnce(async () => {
+            signals.emit("SIGINT"); // Ctrl-C during the second pass
+            return { failed: 1 }; // pass failures never kill the loop
+          });
+
+        const loop = watchRefreshLoop(5, pass, signals);
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        const code = await loop;
+
+        expect(code).toBe(0);
+        expect(pass).toHaveBeenCalledTimes(2);
+        expect(signals.listenerCount("SIGINT")).toBe(0); // handler removed
+        const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+        expect(out).toMatch(/refresh pass — \d{4}-\d{2}-\d{2}T/); // timestamped
+        expect(out).toContain("watch stopped (SIGINT)");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
