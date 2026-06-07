@@ -208,3 +208,43 @@ export function lockHolderId(): string {
     process.env.HOSTNAME ?? process.env.HOST ?? "local";
   return `${user}@${host}`;
 }
+
+export type WorkspaceGcCandidate = {
+  readonly id: string;
+  readonly sizeH: string;
+  readonly lastModified: string;
+  readonly archivedTo?: string;
+};
+
+export type WorkspaceGcReport = {
+  readonly candidates: ReadonlyArray<WorkspaceGcCandidate>;
+  readonly applied: boolean;
+  readonly failed?: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
+};
+
+/**
+ * POST /workspaces/gc. Without `apply` this is a PURE dry-run on the server
+ * (the janitor only lists + sizes candidates); with `apply: true` candidates
+ * are archived to the volume's own .trash/ before being removed.
+ */
+export async function requestWorkspaceGc(
+  baseUrl: string,
+  body: { olderThanDays?: number; apply?: boolean },
+  fetchImpl: typeof fetch = fetch,
+): Promise<WorkspaceGcReport> {
+  const response = await fetchImpl(joinUrl(baseUrl, "/workspaces/gc"), {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const detail = await response
+      .json()
+      .then((json) => (json as { message?: string }).message ?? "")
+      .catch(() => "");
+    throw new Error(
+      `workspace gc: ${response.status} ${response.statusText}${detail ? ` — ${detail}` : ""}`,
+    );
+  }
+  return (await response.json()) as WorkspaceGcReport;
+}

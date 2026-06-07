@@ -5,7 +5,7 @@ import type {
 import type { SessionDescriptor } from "@sentropic/remote-protocol";
 import { describe, expect, it } from "vitest";
 
-import { K8sSessionProvisioner } from "./provisioner.js";
+import { K8sSessionProvisioner, parseWorkspaceGcLogs } from "./provisioner.js";
 import type { K8sClient, K8sResourceRef } from "./client.js";
 
 const descriptor: SessionDescriptor = {
@@ -393,5 +393,204 @@ describe("K8sSessionProvisioner", () => {
       items: [],
     };
     expect(list.items).toEqual([]);
+  });
+});
+
+describe("gcWorkspaces (janitor lifecycle, no cluster)", () => {
+  type JanitorClient = K8sClient & { created: KubernetesObject[]; deleted: string[] };
+
+  function janitorClient(args: {
+    phase: string;
+    logs: string;
+    withPodLogs?: boolean;
+  }): JanitorClient {
+    const created: KubernetesObject[] = [];
+    const deleted: string[] = [];
+    const client: JanitorClient = {
+      created,
+      deleted,
+      async create<T extends KubernetesObject>(spec: T): Promise<T> {
+        created.push(spec);
+        return spec;
+      },
+      async delete(ref: K8sResourceRef): Promise<void> {
+        deleted.push(`${ref.kind}/${ref.metadata.name}@${ref.metadata.namespace}`);
+      },
+      async read<T extends KubernetesObject>(): Promise<T | undefined> {
+        return { status: { phase: args.phase } } as unknown as T;
+      },
+      ...(args.withPodLogs === false
+        ? {}
+        : {
+            async podLogs(): Promise<string> {
+              return args.logs;
+            },
+          }),
+    };
+    return client;
+  }
+
+  const sharedOpts = {
+    namespace: "user-abc12345",
+    sharedWorkspacePvc: "remote-workspaces",
+  };
+
+  it("creates the janitor, parses its logs into the report, then ALWAYS deletes it", async () => {
+    const client = janitorClient({
+      phase: "Succeeded",
+      logs: [
+        "KEPT ws-keep1",
+        "RECENT ws-busy1",
+        "CANDIDATE ws-old1 1.2G 1736000000",
+        "CANDIDATE ws-old2 34M 1730000000",
+        "GC_DONE",
+      ].join("\n"),
+    });
+    const provisioner = new K8sSessionProvisioner(client, sharedOpts);
+    const report = await provisioner.gcWorkspaces({
+      olderThanDays: 30,
+      apply: false,
+      keep: ["ws-keep1"],
+      pollIntervalMs: 1,
+    });
+
+    expect(report.applied).toBe(false);
+    expect(report.failed).toEqual([]);
+    expect(report.candidates).toEqual([
+      {
+        id: "ws-old1",
+        sizeH: "1.2G",
+        lastModified: new Date(1736000000 * 1000).toISOString(),
+      },
+      {
+        id: "ws-old2",
+        sizeH: "34M",
+        lastModified: new Date(1730000000 * 1000).toISOString(),
+      },
+    ]);
+
+    const pod = client.created[0]!;
+    expect(pod.kind).toBe("Pod");
+    expect(pod.metadata?.name).toMatch(/^workspace-gc-/);
+    expect(pod.metadata?.namespace).toBe("user-abc12345");
+    expect(client.deleted).toEqual([
+      `Pod/${pod.metadata?.name}@user-abc12345`,
+    ]);
+  });
+
+  it("apply: ARCHIVED lines attach the on-volume trash path; FAILED dirs are reported untouched", async () => {
+    const client = janitorClient({
+      phase: "Succeeded",
+      logs: [
+        "CANDIDATE ws-old1 1.2G 1736000000",
+        "ARCHIVED ws-old1 .trash/ws-old1.1750000000.tar.gz",
+        "CANDIDATE ws-bad1 9G 1730000000",
+        "FAILED ws-bad1 archive-failed-directory-left-untouched",
+        "GC_DONE",
+      ].join("\n"),
+    });
+    const provisioner = new K8sSessionProvisioner(client, sharedOpts);
+    const report = await provisioner.gcWorkspaces({
+      olderThanDays: 30,
+      apply: true,
+      keep: [],
+      pollIntervalMs: 1,
+    });
+    expect(report.applied).toBe(true);
+    expect(report.candidates[0]).toMatchObject({
+      id: "ws-old1",
+      archivedTo: ".trash/ws-old1.1750000000.tar.gz",
+    });
+    expect(report.failed).toEqual([
+      { id: "ws-bad1", reason: "archive-failed-directory-left-untouched" },
+    ]);
+  });
+
+  it("throws on a Failed janitor but STILL deletes the pod", async () => {
+    const client = janitorClient({ phase: "Failed", logs: "boom" });
+    const provisioner = new K8sSessionProvisioner(client, sharedOpts);
+    await expect(
+      provisioner.gcWorkspaces({
+        olderThanDays: 30,
+        apply: false,
+        keep: [],
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toThrow(/janitor pod .* failed/);
+    expect(client.deleted).toHaveLength(1);
+  });
+
+  it("refuses to report from logs missing the GC_DONE sentinel (truncated run)", async () => {
+    const client = janitorClient({
+      phase: "Succeeded",
+      logs: "CANDIDATE ws-old1 1.2G 1736000000",
+    });
+    const provisioner = new K8sSessionProvisioner(client, sharedOpts);
+    await expect(
+      provisioner.gcWorkspaces({
+        olderThanDays: 30,
+        apply: false,
+        keep: [],
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toThrow(/GC_DONE/);
+    expect(client.deleted).toHaveLength(1);
+  });
+
+  it("times out cleanly when the janitor never terminates (pod reaped, error raised)", async () => {
+    const client = janitorClient({ phase: "Pending", logs: "" });
+    const provisioner = new K8sSessionProvisioner(client, sharedOpts);
+    await expect(
+      provisioner.gcWorkspaces({
+        olderThanDays: 30,
+        apply: false,
+        keep: [],
+        timeoutMs: 5,
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toThrow(/did not complete/);
+    expect(client.deleted).toHaveLength(1);
+  });
+
+  it("refuses to run without sharedWorkspacePvc (no janitor created)", async () => {
+    const client = janitorClient({ phase: "Succeeded", logs: "GC_DONE" });
+    const provisioner = new K8sSessionProvisioner(client, {
+      namespace: "demo-ns",
+    });
+    await expect(
+      provisioner.gcWorkspaces({ olderThanDays: 30, apply: false, keep: [] }),
+    ).rejects.toThrow(/sharedWorkspacePvc/);
+    expect(client.created).toHaveLength(0);
+  });
+
+  it("refuses to run on a client without podLogs (no janitor created)", async () => {
+    const client = janitorClient({
+      phase: "Succeeded",
+      logs: "GC_DONE",
+      withPodLogs: false,
+    });
+    const provisioner = new K8sSessionProvisioner(client, sharedOpts);
+    await expect(
+      provisioner.gcWorkspaces({ olderThanDays: 30, apply: false, keep: [] }),
+    ).rejects.toThrow(/podLogs/);
+    expect(client.created).toHaveLength(0);
+  });
+});
+
+describe("parseWorkspaceGcLogs", () => {
+  it("requires the GC_DONE sentinel", () => {
+    expect(() => parseWorkspaceGcLogs("CANDIDATE ws-a 1M 1", false)).toThrow(
+      /GC_DONE/,
+    );
+  });
+
+  it("tolerates noise lines and unknown epochs", () => {
+    const report = parseWorkspaceGcLogs(
+      ["something irrelevant", "CANDIDATE ws-a 1M 0", "GC_DONE"].join("\n"),
+      false,
+    );
+    expect(report.candidates).toEqual([
+      { id: "ws-a", sizeH: "1M", lastModified: "unknown" },
+    ]);
   });
 });

@@ -23,6 +23,13 @@ export type K8sVolume =
       };
     };
 
+export type K8sPodAffinityTerm = {
+  readonly labelSelector: {
+    readonly matchLabels: Readonly<Record<string, string>>;
+  };
+  readonly topologyKey: string;
+};
+
 export type K8sPodSpec = {
   readonly apiVersion: "v1";
   readonly kind: "Pod";
@@ -36,14 +43,10 @@ export type K8sPodSpec = {
     readonly nodeSelector?: Readonly<Record<string, string>>;
     readonly affinity?: {
       readonly podAffinity?: {
-        readonly preferredDuringSchedulingIgnoredDuringExecution: ReadonlyArray<{
+        readonly requiredDuringSchedulingIgnoredDuringExecution?: ReadonlyArray<K8sPodAffinityTerm>;
+        readonly preferredDuringSchedulingIgnoredDuringExecution?: ReadonlyArray<{
           readonly weight: number;
-          readonly podAffinityTerm: {
-            readonly labelSelector: {
-              readonly matchLabels: Readonly<Record<string, string>>;
-            };
-            readonly topologyKey: string;
-          };
+          readonly podAffinityTerm: K8sPodAffinityTerm;
         }>;
       };
     };
@@ -51,6 +54,7 @@ export type K8sPodSpec = {
       readonly name: string;
       readonly image: string;
       readonly imagePullPolicy: "Always" | "IfNotPresent" | "Never";
+      readonly command?: ReadonlyArray<string>;
       readonly env: ReadonlyArray<{
         readonly name: string;
         readonly value: string;
@@ -110,6 +114,9 @@ export type SpecBuilderOptions = {
    * per node).
    */
   readonly sharedWorkspacePvc?: string;
+  /** Image for the ephemeral workspace-GC janitor pod (busybox-compatible
+   * shell + find/stat/du/tar required). Defaults to JANITOR_IMAGE. */
+  readonly janitorImage?: string;
   readonly controlPlaneEndpoint: string;
   readonly home: string;
 };
@@ -128,6 +135,14 @@ const PVC_VOLUME = "workspace";
 const AUTH_VOLUME = "auth";
 const POD_CONTAINER = "session-agent";
 const AUTH_STAGING_DIR = "/run/auth-bundle";
+
+/** Default janitor image: tiny, has sh/find/stat/du/tar — everything the GC
+ * script needs. Pinned (never :latest). */
+export const JANITOR_IMAGE = "busybox:1.37.0";
+/** Where the janitor mounts the ROOT of the shared workspaces PVC. */
+export const JANITOR_WORKSPACES_MOUNT = "/workspaces";
+/** On-volume trash dir: GC'd workspaces are tar'd here BEFORE rm — recoverable. */
+export const JANITOR_TRASH_DIR = ".trash";
 
 export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
   namespace: "sentropic-remote",
@@ -494,6 +509,214 @@ export function buildSessionPodSpec(
         },
       ],
       volumes,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Workspace GC janitor (shared RWX PVC mode only)
+// ---------------------------------------------------------------------------
+//
+// Sessions only ever see their own `subPath: <workspaceId>` slice of the
+// shared PVC, so enumerating/collecting stale workspace directories requires
+// an ephemeral "janitor" pod that mounts the PVC at its ROOT (no subPath).
+//
+// DATA SAFETY (this volume holds claude/.jsonl conversations — a wild-delete
+// incident already happened once):
+//   1. Only first-level `ws-*` directories are ever considered. `.trash/`,
+//      `lost+found` and anything else are structurally out of scope.
+//   2. The keep-list (every workspace referenced by any known session + every
+//      registered workspace) is re-checked INSIDE the janitor script, so even
+//      an apply run launched from a stale dry-run skips newly-protected dirs.
+//   3. Age is re-evaluated in the pod at apply time (find -mmin): a directory
+//      touched between dry-run and apply is skipped (reported as RECENT).
+//   4. apply NEVER deletes directly: `tar -czf .trash/<dir>.<epoch>.tar.gz`
+//      on the SAME volume first, the `rm -rf` only runs if tar succeeded AND
+//      the archive is non-empty; otherwise the dir is left untouched and a
+//      FAILED line is reported.
+
+export type WorkspaceGcJanitorOptions = {
+  /** Janitor pod name (caller generates a unique one per run). */
+  readonly name: string;
+  /** Directories with NO entry modified in the last N days are candidates. */
+  readonly olderThanDays: number;
+  /** false = pure dry-run (list + du -sh); true = archive-to-trash then rm. */
+  readonly apply: boolean;
+  /** Workspace ids that must NEVER be collected (always skipped). */
+  readonly keep: ReadonlyArray<string>;
+  /**
+   * Scheduling mode for the CSI constraint (filestorage.csi.scaleway.com
+   * attaches at most ONE distinct File Storage volume per node, but any number
+   * of pods on that node may mount the SAME volume):
+   *
+   * - true (sessions are running in this namespace): REQUIRED podAffinity to
+   *   the session-agent pods (topologyKey kubernetes.io/hostname). Those nodes
+   *   already mount THIS volume, so co-locating is the only placement that is
+   *   guaranteed to succeed — any other node might already hold a different
+   *   File Storage volume (another tenant's) and would refuse the mount.
+   *
+   * - false (no session running): required affinity would be unsatisfiable and
+   *   the janitor would Pending forever, so we emit only a PREFERRED affinity
+   *   (a no-op without sessions) and let the scheduler pick any node. Since no
+   *   session of this tenant is running, this tenant's volume is attached
+   *   nowhere; the pod lands on an arbitrary node and succeeds whenever that
+   *   node has a free File Storage slot. If every node's slot is taken by
+   *   other volumes the mount times out and gcWorkspaces fails CLEANLY (error,
+   *   janitor deleted, no data touched).
+   */
+  readonly hasLiveSessions: boolean;
+};
+
+function janitorLabels(): Readonly<Record<string, string>> {
+  return {
+    "app.kubernetes.io/name": "sentropic-remote",
+    "app.kubernetes.io/component": "workspace-janitor",
+    "app.kubernetes.io/managed-by": "control-plane",
+  };
+}
+
+/** Workspace ids are `ws-<base36>`; anything else cannot be safely embedded in
+ * the janitor shell script, so reject it outright (defense in depth — these
+ * values normally come from our own stores, never from raw user input). */
+const SAFE_DIR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * POSIX/busybox sh script the janitor runs against the PVC root. Pure string
+ * builder so tests can assert the exact dry-run vs apply behavior. Output
+ * protocol (parsed from pod logs):
+ *
+ *   KEPT <dir>                      — in the keep-list, skipped
+ *   RECENT <dir>                    — has activity newer than the cutoff, skipped
+ *   CANDIDATE <dir> <sizeH> <epoch> — stale; would be (dry-run) / is about to
+ *                                     be (apply) collected
+ *   ARCHIVED <dir> <trashPath>      — apply only: tar'd to on-volume trash AND removed
+ *   FAILED <dir> <reason>           — apply only: archive failed, dir LEFT UNTOUCHED
+ *   GC_DONE                         — sentinel; without it the run is treated as failed
+ */
+export function buildWorkspaceGcScript(opts: {
+  readonly olderThanDays: number;
+  readonly apply: boolean;
+  readonly keep: ReadonlyArray<string>;
+}): string {
+  if (!Number.isInteger(opts.olderThanDays) || opts.olderThanDays < 1) {
+    throw new Error(
+      `workspace GC: olderThanDays must be an integer >= 1 (got ${opts.olderThanDays})`,
+    );
+  }
+  for (const id of opts.keep) {
+    if (!SAFE_DIR_ID.test(id)) {
+      throw new Error(
+        `workspace GC: refusing shell-unsafe keep id ${JSON.stringify(id)}`,
+      );
+    }
+  }
+  const cutoffMinutes = opts.olderThanDays * 24 * 60;
+  // Surrounding spaces make the `case " $d "` containment match exact ids.
+  const keepList = ` ${opts.keep.join(" ")} `;
+  const applyBlock = opts.apply
+    ? `
+    mkdir -p ${JANITOR_TRASH_DIR}
+    TRASH="${JANITOR_TRASH_DIR}/$d.$EPOCH.tar.gz"
+    if tar -czf "$TRASH" "$d" && [ -s "$TRASH" ]; then
+      rm -rf "$d"
+      echo "ARCHIVED $d $TRASH"
+    else
+      rm -f "$TRASH"
+      echo "FAILED $d archive-failed-directory-left-untouched"
+    fi`
+    : "";
+  return `set -eu
+cd ${JANITOR_WORKSPACES_MOUNT}
+KEEP="${keepList}"
+EPOCH=$(date +%s)
+for d in ws-*/; do
+  [ -d "$d" ] || continue
+  d="\${d%/}"
+  case "$KEEP" in *" $d "*) echo "KEPT $d"; continue;; esac
+  if [ -n "$(find "$d" -mmin -${cutoffMinutes} -print 2>/dev/null | head -n 1)" ]; then
+    echo "RECENT $d"
+    continue
+  fi
+  SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
+  [ -n "$SIZE" ] || SIZE=?
+  LAST=$(find "$d" -exec stat -c %Y {} \; 2>/dev/null | sort -n | tail -n 1)
+  [ -n "$LAST" ] || LAST=0
+  echo "CANDIDATE $d $SIZE $LAST"${applyBlock}
+done
+echo "GC_DONE"
+`;
+}
+
+/**
+ * Ephemeral janitor pod: mounts the shared workspaces PVC at its ROOT (no
+ * subPath — this is the whole point: sessions can only see their own slice),
+ * runs the GC script once and exits. Tiny requests; scheduling per
+ * WorkspaceGcJanitorOptions.hasLiveSessions (see the CSI rationale there).
+ */
+export function buildWorkspaceGcJanitorPodSpec(
+  gc: WorkspaceGcJanitorOptions,
+  options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
+): K8sPodSpec {
+  const claimName = options.sharedWorkspacePvc;
+  if (!claimName) {
+    throw new Error(
+      "workspace GC requires sharedWorkspacePvc (per-workspace PVC mode has no shared volume to garbage-collect)",
+    );
+  }
+  const sessionTerm: K8sPodAffinityTerm = {
+    labelSelector: {
+      matchLabels: {
+        "app.kubernetes.io/name": "sentropic-remote",
+        "app.kubernetes.io/component": "session-agent",
+      },
+    },
+    topologyKey: "kubernetes.io/hostname",
+  };
+  return {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: {
+      name: gc.name,
+      namespace: options.namespace,
+      labels: janitorLabels(),
+    },
+    spec: {
+      restartPolicy: "Never",
+      affinity: {
+        podAffinity: gc.hasLiveSessions
+          ? { requiredDuringSchedulingIgnoredDuringExecution: [sessionTerm] }
+          : {
+              preferredDuringSchedulingIgnoredDuringExecution: [
+                { weight: 100, podAffinityTerm: sessionTerm },
+              ],
+            },
+      },
+      containers: [
+        {
+          name: "janitor",
+          image: options.janitorImage ?? JANITOR_IMAGE,
+          imagePullPolicy: "IfNotPresent",
+          command: [
+            "sh",
+            "-c",
+            buildWorkspaceGcScript({
+              olderThanDays: gc.olderThanDays,
+              apply: gc.apply,
+              keep: gc.keep,
+            }),
+          ],
+          env: [],
+          volumeMounts: [
+            // ROOT mount — intentionally NO subPath, unlike session pods.
+            { name: PVC_VOLUME, mountPath: JANITOR_WORKSPACES_MOUNT },
+          ],
+          resources: {
+            requests: { cpu: "25m", memory: "32Mi" },
+            limits: { cpu: "500m", memory: "256Mi" },
+          },
+        },
+      ],
+      volumes: [{ name: PVC_VOLUME, persistentVolumeClaim: { claimName } }],
     },
   };
 }

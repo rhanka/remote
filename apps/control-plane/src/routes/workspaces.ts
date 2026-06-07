@@ -8,6 +8,7 @@ import {
   type WorkspaceDescriptor,
 } from "@sentropic/remote-protocol";
 import type { SessionProvisioner } from "@sentropic/remote-k8s-orchestrator";
+import type { SessionDescriptor } from "@sentropic/remote-protocol";
 import type { Ajv } from "ajv";
 import { Hono } from "hono";
 
@@ -33,6 +34,12 @@ export type WorkspacesRouterDeps = {
   readonly provisioner: SessionProvisioner;
   readonly store?: Map<string, WorkspaceDescriptor>;
   readonly tenantProvisioner?: TenantProvisioner;
+  /** Session registry (structural slice of SessionStore): the GC keep-list is
+   * derived from EVERY session it knows — live or not — plus every registered
+   * workspace. Without it, GC keep falls back to registered workspaces only. */
+  readonly sessionStore?: {
+    list(userId?: string): ReadonlyArray<SessionDescriptor>;
+  };
 };
 
 export function createWorkspacesRouter(
@@ -42,6 +49,7 @@ export function createWorkspacesRouter(
   const provisioner = deps.provisioner;
   const store = deps.store ?? new Map<string, WorkspaceDescriptor>();
   const tenantProvisioner = deps.tenantProvisioner ?? new StubTenantProvisioner();
+  const sessionStore = deps.sessionStore;
   const router = new Hono<{ Variables: ValidationVars }>();
 
   // Workspace ownership: the authenticated user who created it. A workspace
@@ -123,6 +131,102 @@ export function createWorkspacesRouter(
           : w;
       });
     return c.json({ workspaces } as unknown as ListWorkspacesResponse);
+  });
+
+  // EXPLICIT GC of stale subdirectories on the shared workspaces volume.
+  // Registered BEFORE the `/:id` routes so the static path wins unambiguously.
+  //
+  // Safety semantics (the volume holds claude .jsonl conversations):
+  // - keep = workspaceIds of EVERY session known to the session store (live or
+  //   not, any owner — a superset is always safer) UNION every workspace
+  //   currently registered here. The keep-list is re-checked inside the
+  //   janitor pod itself, so it holds even against a stale dry-run.
+  // - dry-run by default: apply must be EXPLICITLY true.
+  // - apply archives each candidate to on-volume .trash/ BEFORE deleting.
+  router.post("/gc", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      olderThanDays?: unknown;
+      apply?: unknown;
+    };
+    // Strict validation, no silent coercion: a malformed retention window must
+    // never widen the GC scope by accident.
+    let olderThanDays = 30;
+    if (body.olderThanDays !== undefined) {
+      if (
+        typeof body.olderThanDays !== "number" ||
+        !Number.isInteger(body.olderThanDays) ||
+        body.olderThanDays < 1
+      ) {
+        return c.json(
+          {
+            code: "workspace.gc_invalid_request",
+            message: "olderThanDays must be an integer >= 1",
+            retryable: false,
+          },
+          400,
+        );
+      }
+      olderThanDays = body.olderThanDays;
+    }
+    if (body.apply !== undefined && typeof body.apply !== "boolean") {
+      return c.json(
+        {
+          code: "workspace.gc_invalid_request",
+          message: "apply must be a boolean",
+          retryable: false,
+        },
+        400,
+      );
+    }
+    const apply = body.apply === true;
+
+    if (typeof provisioner.gcWorkspaces !== "function") {
+      return c.json(
+        {
+          code: "workspace.gc_unsupported",
+          message:
+            "This control-plane's provisioner does not support shared-volume workspace GC",
+          retryable: false,
+        },
+        501,
+      );
+    }
+
+    const { userId } = c.var.auth!;
+    const { namespace } = await tenantProvisioner.ensureTenant(userId);
+
+    const keep = new Set<string>(store.keys());
+    for (const session of sessionStore?.list() ?? []) {
+      if (session.workspaceId) keep.add(session.workspaceId);
+    }
+    // The janitor must co-locate with THIS tenant's session pods when any are
+    // running (their node is the only one guaranteed to mount this volume) —
+    // other tenants' pods live in other namespaces with other volumes.
+    const hasLiveSessions = (sessionStore?.list(userId) ?? []).length > 0;
+
+    try {
+      const report = await provisioner.gcWorkspaces({
+        olderThanDays,
+        apply,
+        keep: [...keep],
+        namespace,
+        hasLiveSessions,
+      });
+      return c.json({
+        candidates: report.candidates,
+        applied: report.applied,
+        ...(report.failed.length > 0 ? { failed: report.failed } : {}),
+      });
+    } catch (error) {
+      return c.json(
+        {
+          code: "workspace.gc_failed",
+          message: String((error as Error).message ?? error),
+          retryable: true,
+        },
+        502,
+      );
+    }
   });
 
   router.get("/:id", (c) => {

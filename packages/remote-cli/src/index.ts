@@ -850,6 +850,114 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       );
     });
 
+  workspaceCommand
+    .command("gc")
+    .description(
+      "Garbage-collect stale workspace directories on the shared remote volume (dry-run unless --apply)",
+    )
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--older-than <days>",
+      "only directories with no activity for at least <days> days (default 30)",
+    )
+    .option(
+      "--apply",
+      "archive each candidate to the volume's .trash/ then delete it (asks for confirmation)",
+    )
+    .option("--yes", "skip the interactive confirmation (only with --apply)")
+    .action(
+      async (opts: {
+        remote?: string;
+        olderThan?: string;
+        apply?: boolean;
+        yes?: boolean;
+      }) => {
+        // Self-contained block (dynamic imports) so this command stays ONE
+        // contiguous addition to index.ts — no shared import-list edits.
+        const { requestWorkspaceGc } = await import("./workspace.js");
+        const remote = getConfiguredRemote(opts.remote);
+        const olderThanDays =
+          opts.olderThan !== undefined ? Number(opts.olderThan) : 30;
+        if (!Number.isInteger(olderThanDays) || olderThanDays < 1) {
+          throw new Error("--older-than must be a whole number of days >= 1");
+        }
+
+        // ALWAYS show the dry-run first — even with --apply nothing is touched
+        // before the candidate list has been printed (and confirmed).
+        const dryRun = await requestWorkspaceGc(remote, { olderThanDays });
+        if (dryRun.candidates.length === 0) {
+          process.stderr.write(
+            `[remote] workspace gc: no candidates older than ${olderThanDays} day(s) — nothing to do\n`,
+          );
+          return;
+        }
+        process.stderr.write(
+          `[remote] workspace gc: ${dryRun.candidates.length} candidate(s) older than ${olderThanDays} day(s) (workspaces of known sessions are always kept):\n`,
+        );
+        process.stdout.write(
+          [
+            "ID\tSIZE\tLAST-MODIFIED",
+            ...dryRun.candidates.map(
+              (c) => `${c.id}\t${c.sizeH}\t${c.lastModified}`,
+            ),
+          ].join("\n") + "\n",
+        );
+        if (!opts.apply) {
+          process.stderr.write(
+            "[remote] dry-run only — nothing was deleted. Re-run with --apply to archive these to the volume's .trash/ and remove them.\n",
+          );
+          return;
+        }
+
+        if (!opts.yes) {
+          const { createInterface } = await import("node:readline/promises");
+          const rl = createInterface({
+            input: process.stdin,
+            output: process.stderr,
+          });
+          const answer = (
+            await rl.question(
+              `[remote] archive ${dryRun.candidates.length} director(y/ies) to on-volume .trash/ and DELETE them? [y/N] `,
+            )
+          )
+            .trim()
+            .toLowerCase();
+          rl.close();
+          if (answer !== "y" && answer !== "yes") {
+            process.stderr.write("[remote] aborted — nothing was deleted\n");
+            return;
+          }
+        }
+
+        const report = await requestWorkspaceGc(remote, {
+          olderThanDays,
+          apply: true,
+        });
+        // The janitor re-checks keep-list and age at apply time, so the applied
+        // set can legitimately be smaller than the dry-run shown above.
+        for (const c of report.candidates) {
+          process.stderr.write(
+            `[remote] archived ${c.id} (${c.sizeH}) -> ${c.archivedTo ?? ".trash/"} then removed\n`,
+          );
+        }
+        for (const f of report.failed ?? []) {
+          process.stderr.write(
+            `[remote] FAILED ${f.id}: ${f.reason} — directory left untouched\n`,
+          );
+        }
+        if ((report.failed ?? []).length > 0) process.exitCode = 1;
+        if (report.candidates.length === 0) {
+          process.stderr.write(
+            "[remote] nothing collected (candidates became active or protected since the dry-run)\n",
+          );
+        } else {
+          process.stderr.write(
+            `[remote] workspace gc done: ${report.candidates.length} archived+removed (recoverable from the volume's .trash/)\n`,
+          );
+        }
+      },
+    );
+
   const authCommand = program
     .command("auth")
     .description("Inspect and manage the local CLI credentials remote sends to sessions");

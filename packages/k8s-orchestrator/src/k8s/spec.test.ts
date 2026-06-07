@@ -3,8 +3,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_BUILDER_OPTIONS,
+  JANITOR_IMAGE,
+  JANITOR_TRASH_DIR,
+  JANITOR_WORKSPACES_MOUNT,
   buildSessionPodSpec,
   buildSessionPvcSpec,
+  buildWorkspaceGcJanitorPodSpec,
+  buildWorkspaceGcScript,
   buildWorkspacePvcSpec,
   resourceNames,
   sessionLabels,
@@ -269,5 +274,151 @@ describe("k8s spec builders", () => {
         resourceNames(baseDescriptor).authSecret,
       );
     }
+  });
+});
+
+describe("workspace GC janitor spec", () => {
+  const sharedOptions = {
+    ...DEFAULT_BUILDER_OPTIONS,
+    namespace: "user-abc12345",
+    sharedWorkspacePvc: "remote-workspaces",
+  };
+  const gcBase = {
+    name: "workspace-gc-test1",
+    olderThanDays: 30,
+    apply: false,
+    keep: ["ws-keep1", "ws-keep2"],
+    hasLiveSessions: false,
+  };
+
+  it("mounts the shared PVC at its ROOT — no subPath (sessions only see their slice)", () => {
+    const pod = buildWorkspaceGcJanitorPodSpec(gcBase, sharedOptions);
+    expect(pod.metadata.name).toBe("workspace-gc-test1");
+    expect(pod.metadata.namespace).toBe("user-abc12345");
+    expect(pod.metadata.labels["app.kubernetes.io/component"]).toBe(
+      "workspace-janitor",
+    );
+    const mount = pod.spec.containers[0]!.volumeMounts[0]!;
+    expect(mount.mountPath).toBe(JANITOR_WORKSPACES_MOUNT);
+    expect(mount.subPath).toBeUndefined();
+    expect(pod.spec.volumes[0]).toEqual({
+      name: "workspace",
+      persistentVolumeClaim: { claimName: "remote-workspaces" },
+    });
+  });
+
+  it("uses a tiny pinned busybox with small requests", () => {
+    const pod = buildWorkspaceGcJanitorPodSpec(gcBase, sharedOptions);
+    const container = pod.spec.containers[0]!;
+    expect(container.image).toBe(JANITOR_IMAGE);
+    expect(container.resources?.requests).toEqual({
+      cpu: "25m",
+      memory: "32Mi",
+    });
+  });
+
+  it("REQUIRES co-location with session pods when sessions are live (CSI: their node already mounts the volume)", () => {
+    const pod = buildWorkspaceGcJanitorPodSpec(
+      { ...gcBase, hasLiveSessions: true },
+      sharedOptions,
+    );
+    const affinity = pod.spec.affinity!.podAffinity!;
+    expect(affinity.requiredDuringSchedulingIgnoredDuringExecution).toEqual([
+      {
+        labelSelector: {
+          matchLabels: {
+            "app.kubernetes.io/name": "sentropic-remote",
+            "app.kubernetes.io/component": "session-agent",
+          },
+        },
+        topologyKey: "kubernetes.io/hostname",
+      },
+    ]);
+    expect(
+      affinity.preferredDuringSchedulingIgnoredDuringExecution,
+    ).toBeUndefined();
+  });
+
+  it("relaxes to PREFERRED affinity when no session is live (required would be unsatisfiable)", () => {
+    const pod = buildWorkspaceGcJanitorPodSpec(gcBase, sharedOptions);
+    const affinity = pod.spec.affinity!.podAffinity!;
+    expect(
+      affinity.requiredDuringSchedulingIgnoredDuringExecution,
+    ).toBeUndefined();
+    expect(
+      affinity.preferredDuringSchedulingIgnoredDuringExecution![0]!
+        .podAffinityTerm.topologyKey,
+    ).toBe("kubernetes.io/hostname");
+  });
+
+  it("refuses to build without the shared PVC (per-workspace mode has nothing to GC)", () => {
+    expect(() =>
+      buildWorkspaceGcJanitorPodSpec(gcBase, DEFAULT_BUILDER_OPTIONS),
+    ).toThrow(/sharedWorkspacePvc/);
+  });
+
+  it("dry-run script lists ws-* dirs with size + last mtime and NEVER deletes", () => {
+    const script = buildWorkspaceGcScript({
+      olderThanDays: 30,
+      apply: false,
+      keep: ["ws-keep1", "ws-keep2"],
+    });
+    expect(script).toContain(`cd ${JANITOR_WORKSPACES_MOUNT}`);
+    // only first-level ws-* dirs are in scope (never .trash, never lost+found)
+    expect(script).toContain("for d in ws-*/");
+    // keep-list containment match, space-delimited exact ids
+    expect(script).toContain('KEEP=" ws-keep1 ws-keep2 "');
+    // 30 days -> 43200 minutes recency probe
+    expect(script).toContain("-mmin -43200");
+    expect(script).toContain("du -sh");
+    expect(script).toContain("stat -c %Y");
+    expect(script).toContain('echo "CANDIDATE $d $SIZE $LAST"');
+    expect(script).toContain('echo "GC_DONE"');
+    // a dry-run must not contain ANY destructive or archive command
+    expect(script).not.toContain("rm -rf");
+    expect(script).not.toContain("tar ");
+    expect(script).not.toContain(".trash");
+  });
+
+  it("apply script archives to on-volume .trash BEFORE rm, and only rm's when the tar is non-empty", () => {
+    const script = buildWorkspaceGcScript({
+      olderThanDays: 7,
+      apply: true,
+      keep: [],
+    });
+    expect(script).toContain("-mmin -10080");
+    expect(script).toContain(`mkdir -p ${JANITOR_TRASH_DIR}`);
+    expect(script).toContain(
+      `TRASH="${JANITOR_TRASH_DIR}/$d.$EPOCH.tar.gz"`,
+    );
+    // archive-then-delete gate: rm -rf only inside the tar-success branch
+    expect(script).toContain(
+      'if tar -czf "$TRASH" "$d" && [ -s "$TRASH" ]; then',
+    );
+    const tarIdx = script.indexOf("tar -czf");
+    const rmIdx = script.indexOf('rm -rf "$d"');
+    expect(tarIdx).toBeGreaterThan(-1);
+    expect(rmIdx).toBeGreaterThan(tarIdx);
+    expect(script).toContain('echo "ARCHIVED $d $TRASH"');
+    // tar failure path: remove the bad archive, keep the directory
+    expect(script).toContain(
+      'echo "FAILED $d archive-failed-directory-left-untouched"',
+    );
+  });
+
+  it("rejects shell-unsafe keep ids and non-positive cutoffs", () => {
+    expect(() =>
+      buildWorkspaceGcScript({
+        olderThanDays: 30,
+        apply: false,
+        keep: ['ws-a"; rm -rf /; "'],
+      }),
+    ).toThrow(/shell-unsafe/);
+    expect(() =>
+      buildWorkspaceGcScript({ olderThanDays: 0, apply: false, keep: [] }),
+    ).toThrow(/olderThanDays/);
+    expect(() =>
+      buildWorkspaceGcScript({ olderThanDays: 1.5, apply: true, keep: [] }),
+    ).toThrow(/olderThanDays/);
   });
 });

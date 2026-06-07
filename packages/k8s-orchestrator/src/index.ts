@@ -23,6 +23,41 @@ export type ProvisionOptions = {
   readonly sessionToken?: string;
 };
 
+export type WorkspaceGcOptions = {
+  /** Only directories with NO entry modified in the last N days are candidates. */
+  readonly olderThanDays: number;
+  /** false = dry-run (report only); true = archive to on-volume .trash/ then delete. */
+  readonly apply: boolean;
+  /** Workspace ids that must NEVER be collected, re-checked inside the janitor. */
+  readonly keep: ReadonlyArray<string>;
+  readonly namespace?: string;
+  /** True when session pods are running in this namespace: the janitor then
+   * REQUIRES co-location with them (their node already mounts the shared
+   * volume — the only guaranteed-mountable placement under the one-File
+   * Storage-volume-per-node CSI constraint). False relaxes to preferred. */
+  readonly hasLiveSessions?: boolean;
+  /** Janitor end-to-end budget (default 20 min — tar of big workspaces is slow). */
+  readonly timeoutMs?: number;
+  readonly pollIntervalMs?: number;
+};
+
+export type WorkspaceGcCandidate = {
+  readonly id: string;
+  /** Human-readable size (du -sh). */
+  readonly sizeH: string;
+  /** ISO timestamp of the most recent mtime anywhere inside the directory. */
+  readonly lastModified: string;
+  /** apply only: on-volume trash archive the directory was saved to before rm. */
+  readonly archivedTo?: string;
+};
+
+export type WorkspaceGcReport = {
+  readonly candidates: ReadonlyArray<WorkspaceGcCandidate>;
+  readonly applied: boolean;
+  /** apply only: directories whose trash archive FAILED — left untouched. */
+  readonly failed: ReadonlyArray<{ readonly id: string; readonly reason: string }>;
+};
+
 export interface SessionProvisioner {
   provision(
     descriptor: SessionDescriptor,
@@ -44,6 +79,9 @@ export interface SessionProvisioner {
   provisionWorkspace?(workspaceId: string, namespace?: string): Promise<void>;
   /** Delete a Workspace's retained PVC. */
   destroyWorkspace?(workspaceId: string, namespace?: string): Promise<void>;
+  /** Explicit GC of stale workspace subdirectories on the shared RWX volume
+   * via an ephemeral janitor pod (never a cascade — see K8sSessionProvisioner). */
+  gcWorkspaces?(opts: WorkspaceGcOptions): Promise<WorkspaceGcReport>;
 }
 
 const LIFECYCLE_TRANSITIONS: ReadonlyArray<{ from: string; to: string }> = [
@@ -101,18 +139,24 @@ export class InMemoryProvisioner implements SessionProvisioner {
   }
 }
 
-export { K8sSessionProvisioner } from "./k8s/provisioner.js";
+export { K8sSessionProvisioner, parseWorkspaceGcLogs } from "./k8s/provisioner.js";
 export type { K8sProvisionerOptions } from "./k8s/provisioner.js";
 export { KubernetesObjectApiClient } from "./k8s/object-api-client.js";
 export type { K8sClient, K8sResourceRef } from "./k8s/client.js";
 export {
   DEFAULT_BUILDER_OPTIONS,
+  JANITOR_IMAGE,
+  JANITOR_TRASH_DIR,
+  JANITOR_WORKSPACES_MOUNT,
   buildSessionPodSpec,
   buildSessionPvcSpec,
   buildSessionAuthSecret,
+  buildWorkspaceGcJanitorPodSpec,
+  buildWorkspaceGcScript,
   credentialSecretKey,
   resourceNames,
   sessionLabels,
+  type K8sPodAffinityTerm,
   type K8sPodSpec,
   type K8sPvcAccessMode,
   type K8sPvcSpec,
@@ -121,6 +165,7 @@ export {
   type K8sVolumeMount,
   type ResourceQuantities,
   type SpecBuilderOptions,
+  type WorkspaceGcJanitorOptions,
 } from "./k8s/spec.js";
 
 export {

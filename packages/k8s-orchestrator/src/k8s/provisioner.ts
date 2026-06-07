@@ -4,6 +4,9 @@ import type {
   ProvisionerEmit,
   ProvisionOptions,
   SessionProvisioner,
+  WorkspaceGcCandidate,
+  WorkspaceGcOptions,
+  WorkspaceGcReport,
 } from "../index.js";
 import type { K8sClient } from "./client.js";
 import {
@@ -12,11 +15,67 @@ import {
   buildSessionPodSpec,
   buildSessionPvcSpec,
   buildSharedWorkspacePvcSpec,
+  buildWorkspaceGcJanitorPodSpec,
   buildWorkspacePvcSpec,
   resourceNames,
   workspacePvcName,
   type SpecBuilderOptions,
 } from "./spec.js";
+
+/**
+ * Parse the janitor's stdout (see buildWorkspaceGcScript for the line
+ * protocol) into a WorkspaceGcReport. PARANOID by design: the GC_DONE sentinel
+ * is mandatory — a truncated/interrupted janitor run throws instead of
+ * returning a partial (and possibly misleading) report.
+ */
+export function parseWorkspaceGcLogs(
+  logs: string,
+  applied: boolean,
+): WorkspaceGcReport {
+  const lines = logs.split("\n").map((line) => line.trim());
+  if (!lines.includes("GC_DONE")) {
+    throw new Error(
+      "workspace GC: janitor output is missing the GC_DONE sentinel — treating the run as failed (no report)",
+    );
+  }
+  const candidates: Array<{
+    id: string;
+    sizeH: string;
+    lastModified: string;
+    archivedTo?: string;
+  }> = [];
+  const failed: Array<{ id: string; reason: string }> = [];
+  for (const line of lines) {
+    const [tag, ...rest] = line.split(/\s+/);
+    if (tag === "CANDIDATE" && rest.length >= 3) {
+      const [id, sizeH, epoch] = rest as [string, string, string];
+      const seconds = Number(epoch);
+      const lastModified =
+        Number.isFinite(seconds) && seconds > 0
+          ? new Date(seconds * 1000).toISOString()
+          : "unknown";
+      candidates.push({ id, sizeH, lastModified });
+    } else if (tag === "ARCHIVED" && rest.length >= 2) {
+      const [id, trashPath] = rest as [string, string];
+      const candidate = candidates.find((c) => c.id === id);
+      if (candidate) candidate.archivedTo = trashPath;
+    } else if (tag === "FAILED" && rest.length >= 1) {
+      const [id, ...reason] = rest as [string, ...string[]];
+      failed.push({ id, reason: reason.join(" ") || "unknown" });
+    }
+  }
+  return {
+    candidates: candidates.map((c): WorkspaceGcCandidate => {
+      const { archivedTo, ...base } = c;
+      return archivedTo !== undefined ? { ...base, archivedTo } : base;
+    }),
+    applied,
+    failed,
+  };
+}
+
+const GC_DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
+const GC_DEFAULT_POLL_MS = 2000;
 
 export type K8sProvisionerOptions = Partial<SpecBuilderOptions>;
 
@@ -238,5 +297,97 @@ export class K8sSessionProvisioner implements SessionProvisioner {
         },
       })
       .catch(() => {});
+  }
+
+  /**
+   * EXPLICIT GC of stale `ws-*` subdirectories on the shared workspaces PVC.
+   * Runs an ephemeral janitor pod that mounts the PVC ROOT (sessions only see
+   * their own subPath slice), reports candidates from its logs, and — with
+   * apply — archives each one to on-volume `.trash/<dir>.<epoch>.tar.gz`
+   * BEFORE `rm -rf` (never a dry loss; recoverable from the same volume). The
+   * keep-list and the age cutoff are re-evaluated inside the pod at run time.
+   * The janitor pod is always deleted afterwards, success or failure.
+   */
+  async gcWorkspaces(opts: WorkspaceGcOptions): Promise<WorkspaceGcReport> {
+    if (!this.options.sharedWorkspacePvc) {
+      throw new Error(
+        "workspace GC requires sharedWorkspacePvc mode (per-workspace PVCs are deleted individually via destroyWorkspace)",
+      );
+    }
+    if (typeof this.client.podLogs !== "function") {
+      throw new Error(
+        "workspace GC requires a K8sClient with podLogs (the janitor reports through its pod logs)",
+      );
+    }
+    const ns = opts.namespace ?? this.options.namespace;
+    const specOpts = { ...this.options, namespace: ns };
+    const name = `workspace-gc-${Date.now().toString(36)}${Math.random()
+      .toString(36)
+      .slice(2, 6)}`;
+    const pod = buildWorkspaceGcJanitorPodSpec(
+      {
+        name,
+        olderThanDays: opts.olderThanDays,
+        apply: opts.apply,
+        keep: opts.keep,
+        hasLiveSessions: opts.hasLiveSessions ?? false,
+      },
+      specOpts,
+    );
+    await this.client.create(pod);
+    try {
+      const logs = await this.awaitJanitorLogs(
+        name,
+        ns,
+        opts.timeoutMs ?? GC_DEFAULT_TIMEOUT_MS,
+        opts.pollIntervalMs ?? GC_DEFAULT_POLL_MS,
+      );
+      return parseWorkspaceGcLogs(logs, opts.apply);
+    } finally {
+      // ALWAYS reap the janitor — success, failure or timeout.
+      await this.client
+        .delete({
+          apiVersion: "v1",
+          kind: "Pod",
+          metadata: { name, namespace: ns },
+        })
+        .catch(() => {});
+    }
+  }
+
+  /** Poll the janitor pod until it terminates, then return its logs. A Failed
+   * phase (or a timeout) throws — with the pod logs attached when available. */
+  private async awaitJanitorLogs(
+    name: string,
+    namespace: string,
+    timeoutMs: number,
+    pollMs: number,
+  ): Promise<string> {
+    const ref = {
+      apiVersion: "v1",
+      kind: "Pod",
+      metadata: { name, namespace },
+    } as const;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const pod = await this.client.read(ref);
+      const phase = (pod as { status?: { phase?: string } } | undefined)?.status
+        ?.phase;
+      if (phase === "Succeeded") {
+        return await this.client.podLogs!(ref);
+      }
+      if (phase === "Failed") {
+        const logs = await this.client.podLogs!(ref).catch(() => "");
+        throw new Error(
+          `workspace GC: janitor pod ${name} failed${logs ? `; logs:\n${logs}` : ""}`,
+        );
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `workspace GC: janitor pod ${name} did not complete within ${timeoutMs}ms (phase=${phase ?? "unknown"}); nothing is reported — note an apply run may have already archived some directories to on-volume .trash/ (nothing is ever removed without its archive)`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
   }
 }

@@ -270,6 +270,58 @@ export function buildOpenApiDocument(): Record<string, unknown> {
         },
       },
     },
+    "/workspaces/gc": {
+      post: {
+        summary:
+          "Garbage-collect stale workspace directories on the shared volume " +
+          "(dry-run unless apply=true; candidates are archived to on-volume " +
+          ".trash/ before deletion; workspaces referenced by any known " +
+          "session or registered workspace are always kept)",
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  olderThanDays: { type: "integer", minimum: 1, default: 30 },
+                  apply: { type: "boolean", default: false },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": jsonObjectResponse(
+            "GC report",
+            ["candidates", "applied"],
+            {
+              candidates: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["id", "sizeH", "lastModified"],
+                  properties: {
+                    id: { type: "string" },
+                    sizeH: { type: "string" },
+                    lastModified: { type: "string" },
+                    archivedTo: { type: "string" },
+                  },
+                },
+              },
+              applied: { type: "boolean" },
+            },
+          ),
+          "400": validationError,
+          "501": jsonResponse(
+            "Provisioner does not support shared-volume GC",
+            ref("RemoteError"),
+          ),
+          "502": jsonResponse("Janitor run failed", ref("RemoteError")),
+        },
+      },
+    },
     "/workspaces/{id}": {
       get: {
         summary: "Get a workspace (with its live soft-lock, if any)",
