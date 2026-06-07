@@ -20,6 +20,7 @@ import {
   getDefaultRemote,
   getDefaultTarget,
   getDefaultTools,
+  getH2aConfig,
   getTunnel,
   setDefaultRemote,
   setDefaultTarget,
@@ -48,6 +49,7 @@ import {
   attachPodTmux,
   findLocalSession,
   killLocalSession,
+  startH2aWindow,
   startLocalSession,
   tmuxAvailable,
 } from "./tmux.js";
@@ -1720,11 +1722,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--name <label>",
       "tmux session slug + tab label (default: workdir basename); use to keep multiple sessions of one project distinct",
     )
+    .option(
+      "--h2a",
+      "also start the h2a MCP server in a side tmux window \"h2a\" (launcher contract: agent reachable/wakeable via ~/h2a-workspace/.h2a); config key `h2a: {enabled, command}` makes it the default",
+    )
     .action(
       async (
         profile: string,
         path: string | undefined,
-        opts: { attach?: boolean; resume?: string; name?: string },
+        opts: { attach?: boolean; resume?: string; name?: string; h2a?: boolean },
       ) => {
         if (!tmuxAvailable()) {
           process.stderr.write(
@@ -1754,6 +1760,16 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(
           `[remote] local session ${slug} started (${profile}${opts.resume ? ` --resume ${opts.resume}` : ""} in ${cwd})\n`,
         );
+        // h2a launcher contract (opt-in): --h2a forces it for this run; the
+        // `h2a.enabled` config makes it the default. Never fails the run.
+        const h2a = getH2aConfig();
+        if (opts.h2a || h2a.enabled) {
+          if (startH2aWindow(name, cwd, h2a.command)) {
+            process.stderr.write(
+              `[remote] h2a window started in ${slug} (${h2a.command})\n`,
+            );
+          }
+        }
         if (opts.attach) {
           attachLocalSession(name);
           return;
