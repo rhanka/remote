@@ -92,6 +92,12 @@ function buildDescriptor(
  * descriptor is reconstructed (createdBy = control-plane, createdAt = now) from
  * the announce's public fields. `target`/`workspacePath` are required on the
  * descriptor but optional on the announce — fall back to safe defaults.
+ *
+ * `home` and `startupArgs` map back to the EXACT descriptor locations that
+ * `buildSessionPodSpec` reads (descriptor.home → HOME env;
+ * descriptor.metadata.startup.args → SESSION_STARTUP_ARGS env), so a
+ * post-restart `remote refresh` regenerates a Pod with the same HOME parity
+ * and the same --resume args instead of a fresh /root session.
  */
 function descriptorFromAnnounce(announce: SessionAnnounce): SessionDescriptor {
   const now = new Date().toISOString();
@@ -111,6 +117,9 @@ function descriptorFromAnnounce(announce: SessionAnnounce): SessionDescriptor {
     descriptor.workspaceId = announce.workspaceId;
   if (announce.cliSessionId !== undefined)
     descriptor.cliSessionId = announce.cliSessionId;
+  if (announce.home !== undefined) descriptor.home = announce.home;
+  if (announce.startupArgs !== undefined && announce.startupArgs.length > 0)
+    descriptor.metadata = { startup: { args: announce.startupArgs } };
   return descriptor;
 }
 

@@ -2,7 +2,7 @@ import { chmodSync, copyFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { SessionAnnounce } from "@sentropic/remote-protocol";
-import { SessionAgent } from "./agent.js";
+import { SessionAgent, parseStartupArgs } from "./agent.js";
 import { ptySpawner } from "./pty-spawner.js";
 import { childProcessSpawner } from "./spawner.js";
 import { connectWebSocketTransport } from "./websocket-transport.js";
@@ -53,7 +53,7 @@ export function materializeAuthBundle(
   return copied;
 }
 
-export { SessionAgent } from "./agent.js";
+export { SessionAgent, parseStartupArgs } from "./agent.js";
 export type {
   AgentTransport,
   IncomingEnvelope,
@@ -72,6 +72,41 @@ function requireEnv(name: string): string {
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value;
+}
+
+/**
+ * Build the session.announce base from environment variables.
+ * Secret-free: no credentials, tokens, or auth material.
+ *
+ * Carries `home` (HOME) and `startupArgs` (SESSION_STARTUP_ARGS) so a
+ * control-plane restarted from scratch can rebuild a descriptor whose
+ * refreshed Pod keeps the SAME HOME (environment parity) and the SAME startup
+ * args (e.g. ["--resume", "<convId>"]) — without them a post-restart
+ * `remote refresh` came back with HOME=/root and a fresh conversation.
+ *
+ * Constructed imperatively to satisfy exactOptionalPropertyTypes.
+ */
+export function buildAnnounce(input: {
+  readonly sessionId: string;
+  readonly profile: string;
+  readonly workspacePath: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): SessionAnnounce {
+  const a: SessionAnnounce = {
+    sessionId: input.sessionId,
+    profile: input.profile as SessionAnnounce["profile"],
+    workspacePath: input.workspacePath,
+    home: input.env.HOME ?? "/root",
+  };
+  const target = input.env.SESSION_TARGET as
+    | SessionAnnounce["target"]
+    | undefined;
+  if (target !== undefined) a.target = target;
+  const workspaceId = input.env.SESSION_WORKSPACE_ID;
+  if (workspaceId !== undefined) a.workspaceId = workspaceId;
+  const startupArgs = parseStartupArgs(input.env.SESSION_STARTUP_ARGS);
+  if (startupArgs.length > 0) a.startupArgs = startupArgs;
+  return a;
 }
 
 export async function main(): Promise<void> {
@@ -169,21 +204,14 @@ export async function main(): Promise<void> {
     .replace(/^http:/, "ws:")
     .replace(/^https:/, "wss:");
 
-  // Build the session.announce base from environment variables.
-  // Secret-free: no credentials, tokens, or auth material.
-  // We construct the object imperatively to satisfy exactOptionalPropertyTypes.
-  const announceBase: SessionAnnounce = (() => {
-    const a: SessionAnnounce = {
-      sessionId,
-      profile: profile as SessionAnnounce["profile"],
-      workspacePath,
-    };
-    const target = process.env.SESSION_TARGET as SessionAnnounce["target"] | undefined;
-    if (target !== undefined) a.target = target;
-    const workspaceId = process.env.SESSION_WORKSPACE_ID;
-    if (workspaceId !== undefined) a.workspaceId = workspaceId;
-    return a;
-  })();
+  // Build the session.announce base from environment variables (see
+  // buildAnnounce — carries home + startupArgs for restart durability).
+  const announceBase: SessionAnnounce = buildAnnounce({
+    sessionId,
+    profile,
+    workspacePath,
+    env: process.env,
+  });
 
   const transport = await connectWebSocketTransport(
     `${wsUrl}/sessions/${sessionId}/agent`,

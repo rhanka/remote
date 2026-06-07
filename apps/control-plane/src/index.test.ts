@@ -991,6 +991,50 @@ describe("control plane", () => {
     expect(single.session.id).toBe(id);
   });
 
+  it("preserves home + startupArgs across announce→reconcile so a refreshed pod keeps parity", async () => {
+    // Simulate a control-plane restart with a session that was migrated with
+    // HOME parity and a --resume conversation. The announce is the only record.
+    const app = createControlPlane();
+    const id = "sess-restored-parity";
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+    events.onMessage?.(
+      announceFrame({
+        sessionId: id,
+        profile: "claude",
+        target: "k3s",
+        workspacePath: "/home/user/src/proj",
+        workspaceId: "ws-42",
+        home: "/home/user",
+        startupArgs: ["--resume", "conv-123"],
+      }) as never,
+      ws as never,
+    );
+
+    // The reconstructed descriptor maps home + startup metadata to the exact
+    // locations buildSessionPodSpec reads.
+    const got = await app.request(`/sessions/${id}`);
+    expect(got.status).toBe(200);
+    const { session } = (await got.json()) as GetSessionResponse;
+    expect(session.home).toBe("/home/user");
+    expect(session.metadata).toEqual({
+      startup: { args: ["--resume", "conv-123"] },
+    });
+
+    // …so a post-restart `remote refresh` regenerates a Pod with the SAME
+    // HOME and SESSION_STARTUP_ARGS as the original (no fresh /root session).
+    const { buildSessionPodSpec } = await import(
+      "@sentropic/remote-k8s-orchestrator"
+    );
+    const pod = buildSessionPodSpec(session);
+    const env = pod.spec.containers[0]!.env;
+    expect(env.find((e) => e.name === "HOME")?.value).toBe("/home/user");
+    expect(env.find((e) => e.name === "SESSION_STARTUP_ARGS")?.value).toBe(
+      JSON.stringify(["--resume", "conv-123"]),
+    );
+  });
+
   it("makes a repopulated session stoppable", async () => {
     const app = createControlPlane();
     const id = "sess-restored-2";
