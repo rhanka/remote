@@ -1,4 +1,5 @@
 import {
+  CoreV1Api,
   KubeConfig,
   KubernetesObjectApi,
   type KubernetesObject,
@@ -12,10 +13,14 @@ export class KubernetesObjectApiClient implements K8sClient {
     config.loadFromDefault();
     return new KubernetesObjectApiClient(
       KubernetesObjectApi.makeApiClient(config),
+      config.makeApiClient(CoreV1Api),
     );
   }
 
-  constructor(private readonly api: KubernetesObjectApi) {}
+  constructor(
+    private readonly api: KubernetesObjectApi,
+    private readonly core?: CoreV1Api,
+  ) {}
 
   async create<T extends KubernetesObject>(spec: T): Promise<T> {
     return (await this.api.create(spec)) as T;
@@ -40,5 +45,17 @@ export class KubernetesObjectApiClient implements K8sClient {
       if (statusCode === 404) return undefined;
       throw error;
     }
+  }
+
+  async podLogs(ref: K8sResourceRef): Promise<string> {
+    if (!this.core) {
+      throw new Error(
+        "KubernetesObjectApiClient: CoreV1Api not wired (construct via fromDefault() to read pod logs)",
+      );
+    }
+    return await this.core.readNamespacedPodLog({
+      name: ref.metadata.name,
+      namespace: ref.metadata.namespace,
+    });
   }
 }
