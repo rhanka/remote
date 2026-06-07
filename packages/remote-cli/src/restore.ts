@@ -296,11 +296,17 @@ export function launchLayout(
     stderr.write(
       `[remote] fenêtre "${win.title}" (${win.tabs.length} onglet(s))\n`,
     );
-    spawn("gnome-terminal", args, {
-      stdio: "ignore",
+    // Surface gnome-terminal errors (e.g. "Failed to get screen…") instead of
+    // silently claiming the window opened.
+    const child = spawn("gnome-terminal", args, {
+      stdio: ["ignore", "ignore", "pipe"],
       detached: true,
       env: process.env,
-    }).unref();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr.write(`[remote] gnome-terminal: ${chunk.toString().trim()}\n`);
+    });
+    child.unref();
   }
 }
 
