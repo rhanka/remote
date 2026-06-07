@@ -42,6 +42,7 @@ import {
   localGitStat,
   remoteGitStat,
 } from "./gitdiff.js";
+import { syncConversation, type SyncDirection } from "./sync.js";
 import {
   attachLocalSession,
   attachPodTmux,
@@ -1339,6 +1340,78 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           const v = alignment(local, remote);
           process.stdout.write(
             `${(icon[v.state] ?? v.state).padEnd(14)} ${projectName(s).padEnd(18)} ${v.detail}\n`,
+          );
+        }
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // sync — copy the conversation log between local and the session Pod
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("sync <sessionId>")
+    .description(
+      "Copy the conversation log between local and the session Pod (base64 over kubectl exec — content never printed). Guarded: refuses to overwrite the side that is ahead without --force; the overwritten file is backed up as .bak-<epoch> first.",
+    )
+    .option(
+      "--session <direction>",
+      "conversation sync direction: pull (Pod → local) or push (local → Pod)",
+    )
+    .option("--files", "not automated — use git on both sides")
+    .option("--force", "override the ahead-guard (a backup is still taken)")
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(
+      async (
+        sessionId: string,
+        opts: { session?: string; files?: boolean; force?: boolean; remote?: string },
+      ) => {
+        if (opts.files) {
+          process.stderr.write(
+            "[remote] files: utilise git (commit/push des deux côtés) — non automatisé\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (opts.session !== "push" && opts.session !== "pull") {
+          process.stderr.write(
+            "[remote] usage: remote sync <sessionId> --session <push|pull>\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const direction: SyncDirection = opts.session;
+        const url = getConfiguredRemote(opts.remote);
+        await ensureConnected(url);
+        const session = (await listRemoteSessions(url)).find((s) => s.id === sessionId);
+        if (!session?.workspacePath) {
+          process.stderr.write(
+            `[remote] no session ${sessionId} with a workspace path\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const result = syncConversation({
+          sessionId,
+          workspacePath: session.workspacePath,
+          direction,
+          force: opts.force ?? false,
+        });
+        if (!result.ok) {
+          process.stderr.write(`[remote] refused: ${result.reason}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        if (result.backup) {
+          process.stderr.write(`[remote] backup: ${result.backup}\n`);
+        }
+        const lines = direction === "pull" ? result.lines.remote : result.lines.local;
+        process.stderr.write(
+          `[remote] ${direction === "pull" ? "pulled" : "pushed"} ${result.convId} (${lines} lines) → ${result.written}\n`,
+        );
+        if (direction === "push") {
+          process.stderr.write(
+            `[remote] not relaunching the Pod CLI — relance la session pour charger : remote refresh ${sessionId} --soft\n`,
           );
         }
       },

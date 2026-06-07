@@ -23,7 +23,7 @@ export type ConvStat = {
 };
 
 /** claude's cwd→project-dir encoding (slashes → dashes). */
-function encode(cwd: string): string {
+export function encodeCwd(cwd: string): string {
   return cwd.replace(/\//g, "-");
 }
 
@@ -36,7 +36,7 @@ export function localConvStat(
   workspacePath: string,
   home: string = homedir(),
 ): ConvStat | undefined {
-  const dir = join(home, CLAUDE_PROJECTS, encode(workspacePath));
+  const dir = join(home, CLAUDE_PROJECTS, encodeCwd(workspacePath));
   if (!existsSync(dir)) return undefined;
   let newest: { name: string; mtimeMs: number } | undefined;
   for (const e of readdirSync(dir)) {
@@ -65,7 +65,7 @@ export function remoteConvStat(
   if (!tunnel) return undefined;
   const env = { ...process.env };
   if (tunnel.kubeconfig) env.KUBECONFIG = expandHome(tunnel.kubeconfig);
-  const enc = encode(workspacePath);
+  const enc = encodeCwd(workspacePath);
   const script =
     `d="$HOME/${CLAUDE_PROJECTS}/${enc}"; ` +
     `f=$(ls -t "$d"/*.jsonl 2>/dev/null | head -1); ` +
