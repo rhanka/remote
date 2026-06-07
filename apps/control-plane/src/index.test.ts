@@ -418,6 +418,156 @@ describe("control plane", () => {
     ]);
   });
 
+  // --- Refresh resumes the FRESHEST conversation, not the creation-time one --
+
+  type RefreshSeen = {
+    cliSessionId?: string;
+    metadata?: Record<string, unknown>;
+  };
+  function capturingProvisioner(seen: RefreshSeen[]) {
+    return {
+      async provision() {},
+      async refresh(descriptor: RefreshSeen) {
+        seen.push(descriptor);
+      },
+      async destroy() {},
+      async inspect() {
+        return undefined;
+      },
+    };
+  }
+  async function createSessionWith(
+    app: ReturnType<typeof createControlPlane>,
+    body: Record<string, unknown>,
+  ): Promise<string> {
+    const response = await app.request("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as CreateSessionResponse;
+    return created.session.id;
+  }
+  async function reportCliSession(
+    app: ReturnType<typeof createControlPlane>,
+    id: string,
+    cliSessionId: string,
+  ): Promise<void> {
+    const response = await app.request(`/sessions/${id}/cli-session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cliSessionId }),
+    });
+    expect(response.status).toBe(200);
+  }
+  async function refreshCredentials(
+    app: ReturnType<typeof createControlPlane>,
+    id: string,
+  ): Promise<void> {
+    const response = await app.request(`/sessions/${id}/credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ".claude/.credentials.json": "Zm9v" }),
+    });
+    expect(response.status).toBe(200);
+  }
+
+  it("refresh substitutes the freshest cliSessionId into claude --resume args", async () => {
+    const seen: RefreshSeen[] = [];
+    const app = createControlPlane({ provisioner: capturingProvisioner(seen) });
+    const id = await createSessionWith(app, {
+      profile: "claude",
+      target: "k3s",
+      metadata: { startup: { args: ["--resume", "conv-old", "--model", "opus"] } },
+    });
+    // The agent later reports that the conversation advanced/forked in the Pod.
+    await reportCliSession(app, id, "conv-fork");
+
+    await refreshCredentials(app, id);
+
+    // The provisioner rebuilt the Pod from the REWRITTEN descriptor…
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.metadata).toEqual({
+      startup: { args: ["--resume", "conv-fork", "--model", "opus"] },
+    });
+    // …and the rewrite is persisted on the session record.
+    const got = await app.request(`/sessions/${id}`);
+    const { session } = (await got.json()) as GetSessionResponse;
+    expect(session.metadata).toEqual({
+      startup: { args: ["--resume", "conv-fork", "--model", "opus"] },
+    });
+  });
+
+  it("refresh substitutes the codex `resume <id>` subcommand form", async () => {
+    const seen: RefreshSeen[] = [];
+    const app = createControlPlane({ provisioner: capturingProvisioner(seen) });
+    const id = await createSessionWith(app, {
+      profile: "codex",
+      target: "k3s",
+      metadata: { startup: { args: ["resume", "conv-old"] } },
+    });
+    await reportCliSession(app, id, "conv-new");
+
+    await refreshCredentials(app, id);
+
+    expect(seen[0]!.metadata).toEqual({
+      startup: { args: ["resume", "conv-new"] },
+    });
+  });
+
+  it("refresh ADDS a resume couple when the original args had none", async () => {
+    const seen: RefreshSeen[] = [];
+    const app = createControlPlane({ provisioner: capturingProvisioner(seen) });
+    const id = await createSessionWith(app, { profile: "claude", target: "k3s" });
+    await reportCliSession(app, id, "conv-live");
+
+    await refreshCredentials(app, id);
+
+    // The whole point of the refresh is to come back to the conversation.
+    expect(seen[0]!.metadata).toEqual({
+      startup: { args: ["--resume", "conv-live"] },
+    });
+  });
+
+  it("refresh leaves args untouched when no cliSessionId was reported (old agent compat)", async () => {
+    const seen: RefreshSeen[] = [];
+    const app = createControlPlane({ provisioner: capturingProvisioner(seen) });
+    const id = await createSessionWith(app, {
+      profile: "claude",
+      target: "k3s",
+      metadata: { startup: { args: ["--resume", "conv-old"] } },
+    });
+
+    await refreshCredentials(app, id);
+
+    expect(seen[0]!.metadata).toEqual({
+      startup: { args: ["--resume", "conv-old"] },
+    });
+    const got = await app.request(`/sessions/${id}`);
+    const { session } = (await got.json()) as GetSessionResponse;
+    expect(session.metadata).toEqual({
+      startup: { args: ["--resume", "conv-old"] },
+    });
+  });
+
+  it("refresh leaves args untouched when the resume id is already the fresh one", async () => {
+    const seen: RefreshSeen[] = [];
+    const app = createControlPlane({ provisioner: capturingProvisioner(seen) });
+    const id = await createSessionWith(app, {
+      profile: "claude",
+      target: "k3s",
+      metadata: { startup: { args: ["--resume", "conv-same"] } },
+    });
+    await reportCliSession(app, id, "conv-same");
+
+    await refreshCredentials(app, id);
+
+    expect(seen[0]!.metadata).toEqual({
+      startup: { args: ["--resume", "conv-same"] },
+    });
+  });
+
   it("forwards terminal.input through the agent registry to the connected agent", async () => {
     const sent: RemoteEventEnvelope[] = [];
     const { AgentRegistry } = await import("./agents/registry.js");
@@ -1082,6 +1232,39 @@ describe("control plane", () => {
     expect(list.sessions).toHaveLength(1);
     // The original descriptor (its displayName) is preserved, not overwritten.
     expect(list.sessions[0]!.displayName).toBe("demo session");
+  });
+
+  it("adopts a fresher cliSessionId from a re-announce of a KNOWN session", async () => {
+    const app = createControlPlane();
+    const created = await createSession(app);
+    const id = created.session.id;
+
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+    // The agent re-detects its conversation id on every reconnect — e.g. the
+    // conversation forked inside the Pod since creation.
+    events.onMessage?.(
+      announceFrame({
+        sessionId: id,
+        profile: "codex",
+        target: "k3s",
+        workspacePath: "/workspace",
+        cliSessionId: "conv-forked",
+      }) as never,
+      ws as never,
+    );
+
+    const got = await app.request(`/sessions/${id}`);
+    const { session } = (await got.json()) as GetSessionResponse;
+    // Only cliSessionId is adopted; the rest of the record is untouched.
+    expect(session.cliSessionId).toBe("conv-forked");
+    expect(session.displayName).toBe("demo session");
+    // Ownership is preserved too: still listable by the same (default) owner.
+    const listed = await app.request("/sessions");
+    expect(
+      ((await listed.json()) as ListSessionsResponse).sessions,
+    ).toHaveLength(1);
   });
 
   it("ignores a malformed announce without crashing and closes cleanly", async () => {
