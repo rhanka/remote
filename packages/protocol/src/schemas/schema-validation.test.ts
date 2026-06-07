@@ -235,7 +235,24 @@ describe("session.announce schema", () => {
         workspacePath: "/workspace",
         workspaceId: "ws-001",
         cliSessionId: "cli_session_abc",
+        home: "/home/user",
+        startupArgs: ["--resume", "cli_session_abc"],
       }),
+    ).toBe(true);
+  });
+
+  it("rejects a relative home and non-string startupArgs items", () => {
+    const validate = ajv.compile(sessionAnnounceSchema);
+    expect(
+      validate({ sessionId: "s", profile: "shell", home: "home/user" }),
+    ).toBe(false);
+    expect(
+      validate({ sessionId: "s", profile: "shell", startupArgs: [1] }),
+    ).toBe(false);
+    // An empty-string arg stays valid (e.g. an empty -c payload) so a real
+    // announce is never rejected wholesale over it.
+    expect(
+      validate({ sessionId: "s", profile: "shell", startupArgs: ["-c", ""] }),
     ).toBe(true);
   });
 

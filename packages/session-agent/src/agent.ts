@@ -116,7 +116,13 @@ function defaultRandomId(prefix: string): string {
   return `${prefix}-${random}`;
 }
 
-function parseStartupArgs(raw: string | undefined): string[] {
+/**
+ * Parse SESSION_STARTUP_ARGS (a JSON string array) into the extra args appended
+ * to the wrapped CLI's command line. Malformed payloads degrade to []. Shared by
+ * the spawn path (agent.ts) and the announce path (index.ts), which re-reports
+ * the same args to the control-plane for restart durability.
+ */
+export function parseStartupArgs(raw: string | undefined): string[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);

@@ -271,7 +271,8 @@ export const sendInstructionResponseSchema = {
  * Secret-free by design: no credentials, tokens, or auth material are ever
  * included. Only public descriptor fields sourced from the agent's environment
  * variables (SESSION_ID, SESSION_PROFILE, SESSION_TARGET, WORKSPACE_PATH,
- * SESSION_WORKSPACE_ID) and the detected cliSessionId.
+ * SESSION_WORKSPACE_ID, HOME, SESSION_STARTUP_ARGS) and the detected
+ * cliSessionId.
  */
 export const sessionAnnounceSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/session-announce.schema.json`,
@@ -290,6 +291,23 @@ export const sessionAnnounceSchema = {
       minLength: 1,
       description:
         "The wrapped CLI's own conversation/session id, if already detected at announce time.",
+    },
+    home: {
+      type: "string",
+      minLength: 1,
+      pattern: "^/",
+      description:
+        "Absolute HOME inside the Pod (environment parity), sourced from the agent's HOME env var. Carried so a control-plane restarted from scratch rebuilds a descriptor whose refreshed Pod keeps the same HOME instead of falling back to /root.",
+    },
+    startupArgs: {
+      type: "array",
+      // No minLength on items: an empty-string arg (e.g. an empty -c payload)
+      // is legal for the wrapped CLI and must not invalidate the whole
+      // announce (which would leave the session unestablished after a
+      // control-plane restart).
+      items: { type: "string" },
+      description:
+        'Extra CLI args the Pod was started with (e.g. ["--resume", "<convId>"]), sourced from SESSION_STARTUP_ARGS. Carried so a post-restart refresh re-applies them and the resumed conversation is not lost.',
     },
   },
 } as const;

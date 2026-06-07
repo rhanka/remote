@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  buildAnnounce,
   materializeAuthBundle,
   materializeWorkspace,
   exportWorkspace,
@@ -76,6 +77,53 @@ describe("materializeAuthBundle", () => {
     );
 
     expect(copied).toEqual([".codex/auth.json"]);
+  });
+});
+
+describe("buildAnnounce", () => {
+  const base = {
+    sessionId: "sess-1",
+    profile: "claude",
+    workspacePath: "/home/user/src/proj",
+  };
+
+  it("carries home and startupArgs from the environment (restart durability)", () => {
+    const announce = buildAnnounce({
+      ...base,
+      env: {
+        HOME: "/home/user",
+        SESSION_TARGET: "k3s",
+        SESSION_WORKSPACE_ID: "ws-42",
+        SESSION_STARTUP_ARGS: JSON.stringify(["--resume", "conv-123"]),
+      },
+    });
+    expect(announce).toEqual({
+      sessionId: "sess-1",
+      profile: "claude",
+      workspacePath: "/home/user/src/proj",
+      home: "/home/user",
+      target: "k3s",
+      workspaceId: "ws-42",
+      startupArgs: ["--resume", "conv-123"],
+    });
+  });
+
+  it("defaults home to /root and omits startupArgs when unset", () => {
+    const announce = buildAnnounce({ ...base, env: {} });
+    expect(announce.home).toBe("/root");
+    expect(announce).not.toHaveProperty("startupArgs");
+    expect(announce).not.toHaveProperty("target");
+    expect(announce).not.toHaveProperty("workspaceId");
+  });
+
+  it("omits startupArgs on a malformed SESSION_STARTUP_ARGS payload", () => {
+    for (const raw of ["{not json", '"a string"', '[1, 2]', "[]"]) {
+      const announce = buildAnnounce({
+        ...base,
+        env: { SESSION_STARTUP_ARGS: raw },
+      });
+      expect(announce).not.toHaveProperty("startupArgs");
+    }
   });
 });
 

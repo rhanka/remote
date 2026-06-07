@@ -205,6 +205,21 @@ describe("k8s spec builders", () => {
     ).toBe("1");
   });
 
+  it("sets HOME from descriptor.home, falling back to the builder option", () => {
+    const withHome = buildSessionPodSpec({
+      ...baseDescriptor,
+      home: "/home/user",
+    });
+    expect(
+      withHome.spec.containers[0]!.env.find((e) => e.name === "HOME")?.value,
+    ).toBe("/home/user");
+
+    const withoutHome = buildSessionPodSpec(baseDescriptor);
+    expect(
+      withoutHome.spec.containers[0]!.env.find((e) => e.name === "HOME")?.value,
+    ).toBe(DEFAULT_BUILDER_OPTIONS.home);
+  });
+
   it("passes startup args metadata into SESSION_STARTUP_ARGS", () => {
     const descriptor: SessionDescriptor = {
       ...baseDescriptor,
