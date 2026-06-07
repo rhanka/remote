@@ -876,6 +876,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         // contiguous addition to index.ts — no shared import-list edits.
         const { requestWorkspaceGc } = await import("./workspace.js");
         const remote = getConfiguredRemote(opts.remote);
+        // The configured remote is usually behind the on-demand tunnel — bring
+        // it up like every other remote command does (ls/diff/sync/…).
+        await ensureConnected(remote);
         const olderThanDays =
           opts.olderThan !== undefined ? Number(opts.olderThan) : 30;
         if (!Number.isInteger(olderThanDays) || olderThanDays < 1) {
