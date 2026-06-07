@@ -79,6 +79,22 @@ export type PluginEntry = {
   mcp: PluginMcp[];
 };
 
+/**
+ * h2a launcher contract (opt-in): when a local session starts via `remote run`,
+ * also start `h2a mcp-serve` in a side tmux window so the agent is
+ * reachable/wakeable by the h2a file-based agent network (~/h2a-workspace/.h2a).
+ */
+export type H2aConfig = {
+  /** Start the h2a window on every `remote run` (default false; `--h2a` forces one run). */
+  enabled?: boolean;
+  /** Command line run in the dedicated "h2a" window (default: DEFAULT_H2A_COMMAND). */
+  command?: string;
+};
+
+/** Default h2a side-window command (a2a-cli launcher contract). */
+export const DEFAULT_H2A_COMMAND =
+  "h2a mcp-serve --auto-open --auto-upgrade --wake local-tmux";
+
 export type RemoteCliConfig = {
   defaultRemote?: string;
   token?: string;
@@ -91,6 +107,8 @@ export type RemoteCliConfig = {
   layout?: Partial<LayoutConfig>;
   /** Plugins installed via `remote plugin add` (synced to Pods via `remote plugin sync`). */
   plugins?: PluginEntry[];
+  /** h2a launcher contract for `remote run` (opt-in side window). */
+  h2a?: H2aConfig;
 };
 
 /** Default session target when none is configured/passed. */
@@ -115,6 +133,15 @@ function parseTunnel(raw: unknown): TunnelConfig | undefined {
   };
   if (typeof t.kubeconfig === "string") tunnel.kubeconfig = t.kubeconfig;
   return tunnel;
+}
+
+function parseH2a(raw: unknown): H2aConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const h = raw as Record<string, unknown>;
+  const h2a: H2aConfig = {};
+  if (typeof h.enabled === "boolean") h2a.enabled = h.enabled;
+  if (typeof h.command === "string") h2a.command = h.command;
+  return Object.keys(h2a).length > 0 ? h2a : undefined;
 }
 
 function parsePluginMcp(raw: unknown): PluginMcp | undefined {
@@ -205,6 +232,8 @@ export function readRemoteConfig(): RemoteCliConfig {
         config.layout = parsed.layout as Partial<LayoutConfig>;
       const plugins = parsePlugins(parsed.plugins);
       if (plugins) config.plugins = plugins;
+      const h2a = parseH2a(parsed.h2a);
+      if (h2a) config.h2a = h2a;
       return config;
     }
     return {};
@@ -260,6 +289,19 @@ export function getPlugins(): PluginEntry[] {
 
 export function setPlugins(plugins: PluginEntry[]): void {
   writeRemoteConfig({ ...readRemoteConfig(), plugins });
+}
+
+/** h2a config merged with defaults (enabled=false, default mcp-serve command). */
+export function getH2aConfig(): Required<H2aConfig> {
+  const raw = readRemoteConfig().h2a ?? {};
+  return {
+    enabled: raw.enabled ?? false,
+    command: raw.command ?? DEFAULT_H2A_COMMAND,
+  };
+}
+
+export function setH2aConfig(h2a: H2aConfig): void {
+  writeRemoteConfig({ ...readRemoteConfig(), h2a });
 }
 
 export function getTunnel(): TunnelConfig | undefined {

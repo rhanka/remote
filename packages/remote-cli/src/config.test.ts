@@ -8,6 +8,10 @@ import {
   getToken,
   getPlugins,
   setPlugins,
+  getH2aConfig,
+  setH2aConfig,
+  readRemoteConfig,
+  DEFAULT_H2A_COMMAND,
   type PluginEntry,
 } from "./config.js";
 
@@ -79,5 +83,42 @@ describe("plugins config", () => {
       { pkg: 42, version: "x" } as unknown as PluginEntry,
     ]);
     expect(getPlugins()).toEqual([{ pkg: "good", version: "1.0.0", mcp: [] }]);
+  });
+});
+
+describe("h2a config", () => {
+  it("defaults to disabled with the launcher-contract command", () => {
+    expect(getH2aConfig()).toEqual({
+      enabled: false,
+      command: DEFAULT_H2A_COMMAND,
+    });
+    expect(DEFAULT_H2A_COMMAND).toBe(
+      "h2a mcp-serve --auto-open --auto-upgrade --wake local-tmux",
+    );
+  });
+
+  it("round-trips enabled + custom command", () => {
+    setH2aConfig({ enabled: true, command: "h2a mcp-serve --wake local-tmux" });
+    expect(getH2aConfig()).toEqual({
+      enabled: true,
+      command: "h2a mcp-serve --wake local-tmux",
+    });
+  });
+
+  it("merges defaults for omitted keys (partial config)", () => {
+    setH2aConfig({ enabled: true });
+    expect(getH2aConfig()).toEqual({
+      enabled: true,
+      command: DEFAULT_H2A_COMMAND,
+    });
+  });
+
+  it("ignores a malformed h2a key on read", () => {
+    setH2aConfig({ enabled: "yes", command: 7 } as never);
+    expect(readRemoteConfig().h2a).toBeUndefined();
+    expect(getH2aConfig()).toEqual({
+      enabled: false,
+      command: DEFAULT_H2A_COMMAND,
+    });
   });
 });
