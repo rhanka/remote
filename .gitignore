@@ -28,3 +28,4 @@ remote-controle-scope-viewport.png
 
 # Local worktrees (per-project tmp/<slug>)
 tmp/
+.claude/worktrees/
