@@ -20,7 +20,10 @@ COPY packages/session-agent/ packages/session-agent/
 RUN npm run build -w @sentropic/remote-protocol \
  && npm run build -w @sentropic/remote-session-agent
 
-FROM node:22-bookworm-slim AS runtime
+# --- Shared runtime base: everything common to slim AND fat ------------------
+# Keep this stage's layer order stable: both final stages build on it, so each
+# instruction added/moved here invalidates the cache of BOTH variants.
+FROM node:22-bookworm-slim AS runtime-base
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -74,25 +77,10 @@ ARG ANTIGRAVITY_INSTALL_URL=https://antigravity.google/cli/install.sh
 RUN curl -fsSL "${ANTIGRAVITY_INSTALL_URL}" | bash -s -- --dir /usr/local/bin \
  && agy --help >/dev/null
 
-# --- Fat dev environment: build tools, language toolchains, cloud CLIs -------
-# A deported session is a real dev box: it must build/test the project and
-# authenticate to the clouds the user works with (gh/scw auth is bundled in).
+# Everyday session tools (small): present in slim and fat alike.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential pkg-config python3 python3-pip python3-venv \
         jq ripgrep unzip less vim-tiny \
     && rm -rf /var/lib/apt/lists/*
-
-# Go
-ARG GO_VERSION=1.23.4
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
-ENV PATH="/usr/local/go/bin:${PATH}"
-
-# Rust (system-wide via rustup) with rustfmt + clippy
-ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
-ENV PATH="/usr/local/cargo/bin:${PATH}"
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
- && rustup component add rustfmt clippy \
- && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
 # GitHub CLI (gh)
 ARG GH_VERSION=2.63.2
@@ -106,6 +94,48 @@ ARG SCW_VERSION=2.34.0
 RUN curl -fsSL "https://github.com/scaleway/scaleway-cli/releases/download/v${SCW_VERSION}/scaleway-cli_${SCW_VERSION}_linux_amd64" \
       -o /usr/local/bin/scw \
  && chmod +x /usr/local/bin/scw
+
+# --- Slim runtime: CLIs + everyday tools, NO language toolchains -------------
+# Built only via `--target runtime-slim` (tagged :*-slim in CI). Cuts the
+# cold-pull for session profiles that never compile anything: no Go, no Rust,
+# no build-essential/python. NOT the default — the fat stage stays last so a
+# bare `docker build` keeps producing the full dev box.
+FROM runtime-base AS runtime-slim
+
+# Copy the entire installed workspace (with hoisted node_modules) plus the
+# compiled dist outputs. node-pty's native binary built in the builder stage
+# is preserved this way without rerunning native compilation.
+COPY --from=builder /workspace/package.json /workspace/package-lock.json ./
+COPY --from=builder /workspace/node_modules ./node_modules
+COPY --from=builder /workspace/packages/protocol/package.json packages/protocol/
+COPY --from=builder /workspace/packages/protocol/dist packages/protocol/dist
+COPY --from=builder /workspace/packages/session-agent/package.json packages/session-agent/
+COPY --from=builder /workspace/packages/session-agent/dist packages/session-agent/dist
+
+CMD ["node", "packages/session-agent/dist/index.js"]
+
+# --- Fat dev environment: build tools, language toolchains -------------------
+# A deported session is a real dev box: it must build/test the project and
+# authenticate to the clouds the user works with (gh/scw come from the base).
+# KEEP THIS STAGE LAST: `docker build` without --target must yield the fat
+# image (default behavior unchanged for live sessions).
+FROM runtime-base AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go
+ARG GO_VERSION=1.23.4
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Rust (system-wide via rustup) with rustfmt + clippy
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+ && rustup component add rustfmt clippy \
+ && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
 # Put rust/go on the DEFAULT PATH: the session runs the CLI in a login shell
 # (`bash -lc`), which resets PATH to the system default and would otherwise drop
