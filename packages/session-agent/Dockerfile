@@ -50,7 +50,11 @@ RUN printf '%s\n' \
         'set -g history-limit 50000' \
         'set -g set-clipboard on' \
         'set -g mouse on' \
+        'set -g focus-events on' \
         "set -g status-right '#[fg=green]remote#[default]'" \
+        'bind -n WheelUpPane if -Ft= "#{pane_in_mode}" "send-keys -M" "copy-mode -e; send-keys -M"' \
+        'bind -n WheelDownPane send-keys -M' \
+        'bind -n PPage copy-mode -eu' \
     > /etc/tmux.conf
 
 # Install the agent CLIs available system-wide so any session profile maps to
