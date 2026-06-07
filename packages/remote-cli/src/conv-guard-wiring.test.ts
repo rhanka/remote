@@ -48,6 +48,8 @@ vi.mock("./config.js", () => ({
   setDefaultTools: () => {},
   getPlugins: () => [],
   setPlugins: () => {},
+  getH2aConfig: () => ({ enabled: false }),
+  setH2aConfig: () => {},
   DEFAULT_SESSION_TARGET: "scaleway-kapsule",
   authHeaders: () => ({}),
   resolveConfigPath: () => CONFIG_PATH,
