@@ -37,6 +37,12 @@ import {
 import { transmittedSecrets, secretsSummary } from "./secrets.js";
 import { localConvStat, remoteConvStat, alignment } from "./convsync.js";
 import {
+  gitAlignment,
+  localAncestry,
+  localGitStat,
+  remoteGitStat,
+} from "./gitdiff.js";
+import {
   attachLocalSession,
   attachPodTmux,
   findLocalSession,
@@ -1271,44 +1277,72 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     });
 
   // ---------------------------------------------------------------------------
-  // diff — is the remote session's conversation aligned with the local one?
+  // diff — is the remote session aligned with the local one?
   // ---------------------------------------------------------------------------
 
   program
     .command("diff [sessionId]")
     .description(
-      "Check whether each remote session's conversation log is in sync with the latest LOCAL conversation (metrics only — content never transferred)",
+      "Check whether each remote session is in sync with local — conversation log by default (--session), or git workspace state with --files (metrics/names only — content never transferred)",
+    )
+    .option("--session", "compare conversation logs (default)")
+    .option(
+      "--files",
+      "compare the git state of the workspace instead: HEAD, branch, modified file names (local cwd vs Pod $WORKSPACE_PATH)",
     )
     .option("--remote <url>", "control-plane URL (defaults to configured remote)")
-    .action(async (sessionId: string | undefined, opts: { remote?: string }) => {
-      const url = getConfiguredRemote(opts.remote);
-      await ensureConnected(url);
-      const all = await listRemoteSessions(url);
-      const sessions = sessionId ? all.filter((s) => s.id === sessionId) : all;
-      if (sessions.length === 0) {
-        process.stdout.write("[remote] no matching session\n");
-        return;
-      }
-      const icon: Record<string, string> = {
-        "in-sync": "✓ in-sync   ",
-        "local-ahead": "↑ local-ahead",
-        "remote-ahead": "↓ remote-ahead",
-        diverged: "⚠ diverged  ",
-        missing: "· n/a       ",
-      };
-      for (const s of sessions) {
-        if (!s.workspacePath) {
-          process.stdout.write(`  ${projectName(s)}: no workspace path\n`);
-          continue;
+    .action(
+      async (
+        sessionId: string | undefined,
+        opts: { session?: boolean; files?: boolean; remote?: string },
+      ) => {
+        if (opts.session && opts.files) {
+          process.stderr.write("[remote] --session and --files are mutually exclusive\n");
+          process.exitCode = 1;
+          return;
         }
-        const local = localConvStat(s.workspacePath);
-        const remote = remoteConvStat(s.id, s.workspacePath);
-        const v = alignment(local, remote);
-        process.stdout.write(
-          `${(icon[v.state] ?? v.state).padEnd(14)} ${projectName(s).padEnd(18)} ${v.detail}\n`,
-        );
-      }
-    });
+        const url = getConfiguredRemote(opts.remote);
+        await ensureConnected(url);
+        const all = await listRemoteSessions(url);
+        const sessions = sessionId ? all.filter((s) => s.id === sessionId) : all;
+        if (sessions.length === 0) {
+          process.stdout.write("[remote] no matching session\n");
+          return;
+        }
+        const icon: Record<string, string> = {
+          "in-sync": "✓ in-sync   ",
+          "local-ahead": "↑ local-ahead",
+          "remote-ahead": "↓ remote-ahead",
+          diverged: "⚠ diverged  ",
+          missing: "· n/a       ",
+        };
+        for (const s of sessions) {
+          if (!s.workspacePath) {
+            process.stdout.write(`  ${projectName(s)}: no workspace path\n`);
+            continue;
+          }
+          if (opts.files) {
+            const local = localGitStat(s.workspacePath);
+            const remote = remoteGitStat(s.id);
+            const ancestry =
+              local && remote && local.head !== remote.head
+                ? localAncestry(s.workspacePath, local.head, remote.head)
+                : "unknown";
+            const v = gitAlignment(local, remote, ancestry);
+            process.stdout.write(
+              `${(icon[v.state] ?? v.state).padEnd(14)} ${projectName(s).padEnd(18)} ${v.detail}\n`,
+            );
+            continue;
+          }
+          const local = localConvStat(s.workspacePath);
+          const remote = remoteConvStat(s.id, s.workspacePath);
+          const v = alignment(local, remote);
+          process.stdout.write(
+            `${(icon[v.state] ?? v.state).padEnd(14)} ${projectName(s).padEnd(18)} ${v.detail}\n`,
+          );
+        }
+      },
+    );
 
   // ---------------------------------------------------------------------------
   // migrate
