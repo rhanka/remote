@@ -35,6 +35,23 @@ const LOCAL_WRAPPER = `cli="$1"; shift
 printf '\\n[remote] %s exited (code %s) — shell on %s. Re-run it or Ctrl-D to end this session.\\n' "$cli" "$code" "$PWD"
 exec /bin/bash -l`;
 
+/**
+ * Same drop-to-shell contract for SIDE windows (h2a, …), but the command is a
+ * single configured shell line (quoting preserved via eval), not cli+args.
+ * `$0` is a label, `$1` is the command line.
+ */
+const WINDOW_WRAPPER = `cmd="$1"
+eval "$cmd"; code=$?
+printf '\\n[remote] %s exited (code %s) — shell on %s. Re-run it or Ctrl-D to end this window.\\n' "$cmd" "$code" "$PWD"
+exec /bin/bash -l`;
+
+/**
+ * Window name for the h2a MCP server side window — the a2a launcher contract:
+ * agents live in NAMED tmux windows, with `h2a mcp-serve` running next to them
+ * so the agent is reachable/wakeable through ~/h2a-workspace/.h2a.
+ */
+export const H2A_WINDOW_NAME = "h2a";
+
 export type LocalSession = {
   /** full tmux session name, e.g. `remote-surch` */
   name: string;
@@ -131,6 +148,11 @@ export function startLocalSession(
       "-d",
       "-s",
       name,
+      // Launcher contract (a2a): the agent's window is NAMED after the profile
+      // (claude/codex/…). One-shot name at creation only — we never touch the
+      // automatic-rename option, so live titles elsewhere keep working.
+      "-n",
+      profile,
       "-c",
       cwd,
       "/bin/bash",
@@ -150,6 +172,101 @@ export function startLocalSession(
     stdio: "ignore",
   });
   return { name, slug };
+}
+
+/**
+ * tmux args adding a detached NAMED window to an existing session, running
+ * `commandLine` (a shell line, quoting preserved) under the drop-to-shell
+ * wrapper. Pure — exported for tests.
+ */
+export function buildSessionWindowArgs(
+  session: string,
+  windowName: string,
+  cwd: string,
+  commandLine: string,
+): string[] {
+  return [
+    "new-window",
+    "-d",
+    "-t",
+    session,
+    "-n",
+    windowName,
+    "-c",
+    cwd,
+    "/bin/bash",
+    "-lc",
+    WINDOW_WRAPPER,
+    "remote-window",
+    commandLine,
+  ];
+}
+
+/** Window names of a session (best-effort; [] if tmux/session is gone). */
+export function sessionWindowNames(session: string): string[] {
+  const r = spawnSync(
+    TMUX,
+    ["list-windows", "-t", session, "-F", "#{window_name}"],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || !r.stdout) return [];
+  return r.stdout.split("\n").filter(Boolean);
+}
+
+/** Add a detached named window running `commandLine` to an existing session. */
+export function addSessionWindow(
+  session: string,
+  windowName: string,
+  cwd: string,
+  commandLine: string,
+): boolean {
+  const r = spawnSync(
+    TMUX,
+    buildSessionWindowArgs(session, windowName, cwd, commandLine),
+    { stdio: "ignore" },
+  );
+  return r.status === 0;
+}
+
+/** Is `cmd` resolvable in PATH (login shell, same as the tmux windows use)? */
+export function commandAvailable(cmd: string): boolean {
+  try {
+    return (
+      spawnSync("bash", ["-lc", `command -v -- ${cmd}`], { stdio: "ignore" })
+        .status === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Opt-in launcher contract: start `h2a mcp-serve …` in a side window named
+ * "h2a" of the agent's tmux session, so the agent is reachable/wakeable by the
+ * h2a file-based network. Never fails the run: a missing h2a binary (or tmux
+ * error) is a warning, and an already-present "h2a" window is reused as-is.
+ */
+export function startH2aWindow(
+  session: string,
+  cwd: string,
+  commandLine: string,
+  stderr: { write(chunk: string): unknown } = process.stderr,
+): boolean {
+  const bin = commandLine.trim().split(/\s+/)[0] ?? "";
+  if (!bin || !commandAvailable(bin)) {
+    stderr.write(
+      `[remote] h2a window skipped: \`${bin || commandLine}\` not found in PATH — install h2a (or fix the h2a.command config) and re-run with --h2a.\n`,
+    );
+    return false;
+  }
+  if (sessionWindowNames(session).includes(H2A_WINDOW_NAME)) return true;
+  if (!addSessionWindow(session, H2A_WINDOW_NAME, cwd, commandLine)) {
+    stderr.write(
+      `[remote] h2a window failed to start (tmux new-window error on ${session})\n`,
+    );
+    return false;
+  }
+  return true;
 }
 
 /**
