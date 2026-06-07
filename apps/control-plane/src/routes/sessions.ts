@@ -32,6 +32,7 @@ import { streamSSE } from "hono/streaming";
 
 import { AgentRegistry } from "../agents/registry.js";
 import { SessionEventBus } from "../sessions/events.js";
+import { descriptorWithFreshResume } from "../sessions/resume-args.js";
 import { SessionStore } from "../sessions/store.js";
 import {
   authEnabled,
@@ -198,7 +199,21 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     context,
   ) => {
     const existing = store.get(sessionId);
-    if (existing) return existing;
+    if (existing) {
+      // The agent re-detects its CLI's conversation id on every reconnect, so
+      // a re-announce may carry a FRESHER cliSessionId than the record (the
+      // conversation advanced or forked inside the Pod). Adopt it — the
+      // refresh path substitutes it into the --resume args — but leave every
+      // other field AND the owner untouched (put without userId preserves the
+      // existing owner: the agent WS auth may resolve to "default").
+      if (
+        announce.cliSessionId !== undefined &&
+        announce.cliSessionId !== existing.cliSessionId
+      ) {
+        return store.put({ ...existing, cliSessionId: announce.cliSessionId });
+      }
+      return existing;
+    }
     const descriptor = store.put(
       { ...descriptorFromAnnounce(announce), id: sessionId },
       context.userId,
@@ -454,8 +469,26 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
       const id = c.req.param("id");
       if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
       const userId = c.var.auth!.userId;
-      const descriptor = store.get(id, userId);
-      if (!descriptor) return notFound(c);
+      const stored = store.get(id, userId);
+      if (!stored) return notFound(c);
+      // A refresh regenerates the Pod from the descriptor, replaying its
+      // startup args. Those args were captured at CREATION time; the
+      // conversation may have advanced/forked since (the agent reports the
+      // current cliSessionId). Rewrite the resume couple to the freshest known
+      // id BEFORE the provisioner rebuilds the Pod, so the refreshed CLI
+      // resumes where the user actually is — not the stale creation-time file.
+      // Without a reported cliSessionId (old agent) this is a no-op.
+      const fresh = descriptorWithFreshResume(stored);
+      const descriptor = fresh.descriptor;
+      if (fresh.action !== "unchanged") {
+        console.log(
+          `[control-plane] refresh ${id}: resume arg ${fresh.action} → ${descriptor.cliSessionId}` +
+            (fresh.previous !== undefined ? ` (was ${fresh.previous})` : ""),
+        );
+        // Persist so the record matches the Pod actually running (and so a
+        // later announce/refresh starts from the rewritten args).
+        store.put(descriptor, userId);
+      }
       const body = validatedBody<RefreshSessionCredentialsRequest>(c);
       const refreshOptions: {
         credentials: RefreshSessionCredentialsRequest;
