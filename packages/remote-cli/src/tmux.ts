@@ -125,16 +125,40 @@ export function findLocalSession(target: string): LocalSession | undefined {
 export type StartLocalResult = { name: string; slug: string };
 
 /**
- * Make the LOCAL tmux server scroll the conversation on the wheel — same
- * settings the Pod image bakes into /etc/tmux.conf. Without `mouse on`, the
- * terminal falls back to alternateScroll (wheel → arrow keys → the CLI's input
- * history), which reads as "scrolling scrolls the input history". Global,
- * idempotent, applied at every run/attach so it works even without ~/.tmux.conf
- * (server options are live: existing sessions pick it up instantly).
- * Native selection stays available via Shift+drag; OSC52 via set-clipboard.
+ * First clipboard CLI found on PATH, or undefined. With `mouse on`, a mouse
+ * drag is captured by tmux (copy-mode) instead of the terminal's NATIVE
+ * selection, so Ctrl+Shift+C / right-click-Copy see nothing. tmux's own copy
+ * goes through OSC52 (set-clipboard) — but VTE/gnome-terminal silently DROP
+ * OSC52 clipboard writes, so the copy lands nowhere. Piping copy-mode to a real
+ * clipboard tool (copy-command, tmux ≥3.2) is the reliable local fix; Wayland
+ * first, then X11.
+ */
+function detectClipboardCommand(): string | undefined {
+  const candidates = process.env.WAYLAND_DISPLAY
+    ? ["wl-copy", "xclip -selection clipboard", "xsel -ib"]
+    : ["xclip -selection clipboard", "xsel -ib", "wl-copy"];
+  for (const c of candidates) {
+    const bin = c.split(" ")[0]!;
+    if (spawnSync("command", ["-v", bin], { shell: true, stdio: "ignore" }).status === 0) {
+      return c;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Make the LOCAL tmux server scroll the conversation on the wheel AND copy
+ * selections to the system clipboard — same scroll settings the Pod image bakes
+ * into /etc/tmux.conf. Without `mouse on`, the terminal falls back to
+ * alternateScroll (wheel → arrow keys → the CLI's input history), which reads as
+ * "scrolling scrolls the input history". With mouse on, a drag is tmux's
+ * selection: `copy-command` pipes it to wl-copy/xclip so Ctrl+Shift+V / paste
+ * works (VTE drops OSC52, so set-clipboard alone is not enough). Native
+ * selection (for Ctrl+Shift+C) stays available via Shift+drag. Global,
+ * idempotent, applied at every run/attach so it works even without ~/.tmux.conf.
  */
 export function ensureScrollConfig(): void {
-  const cmds: ReadonlyArray<ReadonlyArray<string>> = [
+  const cmds: Array<ReadonlyArray<string>> = [
     ["set", "-g", "mouse", "on"],
     ["set", "-g", "set-clipboard", "on"],
     ["set", "-g", "focus-events", "on"],
@@ -151,6 +175,11 @@ export function ensureScrollConfig(): void {
     ["bind", "-n", "WheelDownPane", "send-keys", "-M"],
     ["bind", "-n", "PPage", "copy-mode", "-eu"],
   ];
+  // copy-command makes every copy-pipe-and-cancel (mouse drag, double/triple
+  // click) land in the real system clipboard. tmux's defaults already use
+  // copy-pipe-and-cancel with no argument → they honour copy-command.
+  const clip = detectClipboardCommand();
+  if (clip) cmds.push(["set", "-g", "copy-command", clip]);
   for (const args of cmds) {
     // Best-effort: no server yet / old tmux must never fail the caller.
     spawnSync(TMUX, [...args], { stdio: "ignore" });
