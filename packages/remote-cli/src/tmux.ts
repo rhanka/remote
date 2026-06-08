@@ -30,10 +30,31 @@ export const POD_TMUX_SESSION = "main";
  * exits drop into a login shell on the workdir instead of ending the tmux
  * session. `$0` is a label, `$1` is the CLI, the rest are its args.
  */
-const LOCAL_WRAPPER = `cli="$1"; shift
+const LOCAL_WRAPPER = `relaunch="$1"; cli="$2"; shift 2
 "$cli" "$@"; code=$?
-printf '\\n[remote] %s exited (code %s) — shell on %s. Re-run it or Ctrl-D to end this session.\\n' "$cli" "$code" "$PWD"
+printf '\\n[remote] %s exited (code %s) — shell on %s.\\n' "$cli" "$code" "$PWD"
+printf '[remote] relaunch: %s   (or Ctrl-D to end this session)\\n' "$relaunch"
 exec /bin/bash -l`;
+
+/**
+ * The `remote run …` line that recreates this exact local session — shown when
+ * the CLI exits so the user can copy-paste it. Pure, exported for tests.
+ */
+export function localRelaunchCommand(
+  profile: string,
+  cwd: string,
+  label: string | undefined,
+  resumeArgs: ReadonlyArray<string> = [],
+): string {
+  // resumeArgs is the CLI-native resume argv (e.g. ["--resume", id] /
+  // ["resume", id]); the conversation id is its last token, surfaced as `-r`.
+  const convId =
+    resumeArgs.length > 0 ? resumeArgs[resumeArgs.length - 1] : undefined;
+  let cmd = `remote run ${profile} ${cwd}`;
+  if (label) cmd += ` --name ${label}`;
+  if (convId && convId !== resumeArgs[0]) cmd += ` -r ${convId}`;
+  return cmd;
+}
 
 /**
  * Same drop-to-shell contract for SIDE windows (h2a, …), but the command is a
@@ -221,7 +242,7 @@ export function startLocalSession(
       "/bin/bash",
       "-lc",
       LOCAL_WRAPPER,
-      "remote-session",
+      localRelaunchCommand(profile, cwd, label, args),
       command,
       ...args,
     ],
@@ -398,7 +419,14 @@ export function attachPodTmux(
     const startedAt = Date.now();
     const r = spawnSync("kubectl", args, { stdio: "inherit", env });
     const status = r.status ?? 0;
-    if (status === 0) return 0; // clean detach/exit
+    if (status === 0) {
+      // Clean detach (Ctrl-b d) or exit: the Pod session keeps running — tell
+      // the user how to get back in.
+      process.stderr.write(
+        `[remote] detached from ${sessionId} — re-attach: remote attach ${sessionId} --exec\n`,
+      );
+      return 0;
+    }
     const ranMs = Date.now() - startedAt;
     if (ranMs < 3000) {
       quickFailures += 1;

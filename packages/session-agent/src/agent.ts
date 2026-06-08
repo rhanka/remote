@@ -80,7 +80,7 @@ const PROFILE_COMMANDS: Readonly<
 const PERSISTENT_SHELL_WRAPPER = `cli="$1"; shift
 "$cli" "$@"; code=$?
 printf '\\n[remote] %s exited (code %s) — you are now in a shell on this workspace (%s).\\n' "$cli" "$code" "$PWD"
-printf '[remote] Re-run it (e.g. %s --resume) or type exit / Ctrl-D to stop this remote session.\\n' "$cli"
+printf '[remote] Re-run %s to resume your conversation, or type exit / Ctrl-D to stop this remote session.\\n' "$cli"
 exec /bin/bash -l`;
 
 /**

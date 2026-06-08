@@ -8,6 +8,7 @@ vi.mock("node:child_process", () => ({ spawnSync: spawnSyncMock }));
 import {
   H2A_WINDOW_NAME,
   buildSessionWindowArgs,
+  localRelaunchCommand,
   startH2aWindow,
 } from "./tmux.js";
 
@@ -138,5 +139,34 @@ describe("startH2aWindow", () => {
 
     expect(ok).toBe(false);
     expect(err.text()).toContain("h2a window failed");
+  });
+});
+
+describe("localRelaunchCommand", () => {
+  it("includes profile, cwd and --name", () => {
+    expect(localRelaunchCommand("claude", "/home/u/src/surch", "surch")).toBe(
+      "remote run claude /home/u/src/surch --name surch",
+    );
+  });
+
+  it("surfaces the conversation id as -r (claude resume argv)", () => {
+    expect(
+      localRelaunchCommand("claude", "/home/u/src/surch", "surch", [
+        "--resume",
+        "conv-123",
+      ]),
+    ).toBe("remote run claude /home/u/src/surch --name surch -r conv-123");
+  });
+
+  it("surfaces the conversation id as -r (codex resume subcommand argv)", () => {
+    expect(
+      localRelaunchCommand("codex", "/home/u/src/x", "x", ["resume", "abc"]),
+    ).toBe("remote run codex /home/u/src/x --name x -r abc");
+  });
+
+  it("omits -r when there is no resume arg, and --name when unlabelled", () => {
+    expect(localRelaunchCommand("codex", "/home/u/src/x", undefined)).toBe(
+      "remote run codex /home/u/src/x",
+    );
   });
 });
