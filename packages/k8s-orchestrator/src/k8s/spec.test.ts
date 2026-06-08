@@ -240,6 +240,36 @@ describe("k8s spec builders", () => {
     expect(startupEnv?.value).toBe(JSON.stringify(["config", "install"]));
   });
 
+  it("injects displayName/labels/resourceLimits as SESSION_* env for announce parity", () => {
+    const descriptor: SessionDescriptor = {
+      ...baseDescriptor,
+      displayName: "big-build",
+      labels: { team: "core" },
+      resourceLimits: { cpu: "4", memory: "8Gi" },
+    };
+    const env = buildSessionPodSpec(descriptor).spec.containers[0]!.env;
+    expect(env.find((e) => e.name === "SESSION_DISPLAY_NAME")?.value).toBe(
+      "big-build",
+    );
+    expect(env.find((e) => e.name === "SESSION_LABELS")?.value).toBe(
+      JSON.stringify({ team: "core" }),
+    );
+    expect(env.find((e) => e.name === "SESSION_RESOURCE_LIMITS")?.value).toBe(
+      JSON.stringify({ cpu: "4", memory: "8Gi" }),
+    );
+
+    // Absent on a plain descriptor — an old control-plane / default session
+    // emits no extra env.
+    const bare = buildSessionPodSpec(baseDescriptor).spec.containers[0]!.env;
+    for (const name of [
+      "SESSION_DISPLAY_NAME",
+      "SESSION_LABELS",
+      "SESSION_RESOURCE_LIMITS",
+    ]) {
+      expect(bare.find((e) => e.name === name)).toBeUndefined();
+    }
+  });
+
   it("stages the auth Secret under /run/auth-bundle and advertises the paths via env", () => {
     const pod = buildSessionPodSpec(baseDescriptor, DEFAULT_BUILDER_OPTIONS, [
       ".codex/auth.json",

@@ -237,7 +237,47 @@ describe("session.announce schema", () => {
         cliSessionId: "cli_session_abc",
         home: "/home/user",
         startupArgs: ["--resume", "cli_session_abc"],
+        displayName: "My migrated session",
+        labels: { team: "core", env: "dev" },
+        resourceLimits: { cpu: "2", memory: "4Gi" },
       }),
+    ).toBe(true);
+  });
+
+  it("rejects malformed displayName/labels/resourceLimits (announce parity fields)", () => {
+    const validate = ajv.compile(sessionAnnounceSchema);
+    // displayName must be a non-empty string.
+    expect(validate({ sessionId: "s", profile: "shell", displayName: "" })).toBe(
+      false,
+    );
+    // labels values must be strings.
+    expect(
+      validate({ sessionId: "s", profile: "shell", labels: { a: 1 } }),
+    ).toBe(false);
+    // resourceLimits keeps the descriptor's closed {cpu?, memory?} shape.
+    expect(
+      validate({
+        sessionId: "s",
+        profile: "shell",
+        resourceLimits: { gpu: "1" },
+      }),
+    ).toBe(false);
+    expect(
+      validate({
+        sessionId: "s",
+        profile: "shell",
+        resourceLimits: { cpu: "500m" },
+      }),
+    ).toBe(true);
+  });
+
+  it("still rejects unknown announce fields (additionalProperties:false)", () => {
+    const validate = ajv.compile(sessionAnnounceSchema);
+    expect(
+      validate({ sessionId: "s", profile: "shell", metadata: { a: 1 } }),
+    ).toBe(false);
+    expect(
+      validate.errors?.some((e) => e.keyword === "additionalProperties"),
     ).toBe(true);
   });
 

@@ -125,6 +125,49 @@ describe("buildAnnounce", () => {
       expect(announce).not.toHaveProperty("startupArgs");
     }
   });
+
+  it("carries displayName, labels and resourceLimits from the environment (announce parity)", () => {
+    const announce = buildAnnounce({
+      ...base,
+      env: {
+        HOME: "/home/user",
+        SESSION_DISPLAY_NAME: "My migrated session",
+        SESSION_LABELS: JSON.stringify({ team: "core", env: "dev" }),
+        SESSION_RESOURCE_LIMITS: JSON.stringify({ cpu: "2", memory: "4Gi" }),
+      },
+    });
+    expect(announce.displayName).toBe("My migrated session");
+    expect(announce.labels).toEqual({ team: "core", env: "dev" });
+    expect(announce.resourceLimits).toEqual({ cpu: "2", memory: "4Gi" });
+  });
+
+  it("omits displayName/labels/resourceLimits when their env vars are unset", () => {
+    const announce = buildAnnounce({ ...base, env: {} });
+    expect(announce).not.toHaveProperty("displayName");
+    expect(announce).not.toHaveProperty("labels");
+    expect(announce).not.toHaveProperty("resourceLimits");
+  });
+
+  it("omits labels/resourceLimits on malformed payloads instead of invalidating the announce", () => {
+    for (const raw of ["{not json", '"a string"', "[1,2]", "{}", '{"a":1}']) {
+      const announce = buildAnnounce({
+        ...base,
+        env: { SESSION_LABELS: raw, SESSION_RESOURCE_LIMITS: raw },
+      });
+      expect(announce).not.toHaveProperty("labels");
+      expect(announce).not.toHaveProperty("resourceLimits");
+    }
+    // resourceLimits keeps only the {cpu, memory} string keys it knows.
+    const announce = buildAnnounce({
+      ...base,
+      env: {
+        SESSION_LABELS: JSON.stringify({ ok: "yes", bad: 3 }),
+        SESSION_RESOURCE_LIMITS: JSON.stringify({ cpu: "1", gpu: "2" }),
+      },
+    });
+    expect(announce.labels).toEqual({ ok: "yes" });
+    expect(announce.resourceLimits).toEqual({ cpu: "1" });
+  });
 });
 
 describe("materializeWorkspace", () => {

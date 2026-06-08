@@ -271,8 +271,13 @@ export const sendInstructionResponseSchema = {
  * Secret-free by design: no credentials, tokens, or auth material are ever
  * included. Only public descriptor fields sourced from the agent's environment
  * variables (SESSION_ID, SESSION_PROFILE, SESSION_TARGET, WORKSPACE_PATH,
- * SESSION_WORKSPACE_ID, HOME, SESSION_STARTUP_ARGS) and the detected
- * cliSessionId.
+ * SESSION_WORKSPACE_ID, HOME, SESSION_STARTUP_ARGS, SESSION_DISPLAY_NAME,
+ * SESSION_LABELS, SESSION_RESOURCE_LIMITS) and the detected cliSessionId.
+ *
+ * Descriptor `metadata` is deliberately NOT announced: its only Pod-visible
+ * subset is `metadata.startup.args`, already carried as `startupArgs` (the
+ * control-plane maps it back to `metadata.startup.args`). The rest is
+ * arbitrary caller payload the Pod never receives.
  */
 export const sessionAnnounceSchema = {
   $id: `${REMOTE_SCHEMA_BASE_URL}/session-announce.schema.json`,
@@ -308,6 +313,22 @@ export const sessionAnnounceSchema = {
       items: { type: "string" },
       description:
         'Extra CLI args the Pod was started with (e.g. ["--resume", "<convId>"]), sourced from SESSION_STARTUP_ARGS. Carried so a post-restart refresh re-applies them and the resumed conversation is not lost.',
+    },
+    displayName: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Human-readable session name, sourced from SESSION_DISPLAY_NAME. Carried so a control-plane restarted from scratch keeps the name in `remote ls`.",
+    },
+    labels: {
+      ...labelsSchema,
+      description:
+        "User labels from the descriptor, sourced from SESSION_LABELS (JSON object of strings). Carried for post-restart store repopulation parity.",
+    },
+    resourceLimits: {
+      ...embeddedResourceLimitsSchema,
+      description:
+        "Custom Pod resource limits, sourced from SESSION_RESOURCE_LIMITS (JSON {cpu?, memory?}). Carried so a post-restart `remote refresh` regenerates the Pod with the SAME limits instead of the defaults.",
     },
   },
 } as const;

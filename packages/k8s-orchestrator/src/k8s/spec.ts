@@ -491,6 +491,35 @@ export function buildSessionPodSpec(
                   },
                 ]
               : []),
+            // Announce parity: the agent re-announces these on every
+            // (re)connect so a control-plane restarted from scratch rebuilds a
+            // descriptor that keeps the custom name/labels/limits — without
+            // them a post-restart `remote refresh` regenerated the Pod with
+            // default resources.
+            ...(descriptor.displayName
+              ? [
+                  {
+                    name: "SESSION_DISPLAY_NAME",
+                    value: descriptor.displayName,
+                  },
+                ]
+              : []),
+            ...(descriptor.labels && Object.keys(descriptor.labels).length > 0
+              ? [
+                  {
+                    name: "SESSION_LABELS",
+                    value: JSON.stringify(descriptor.labels),
+                  },
+                ]
+              : []),
+            ...(limits && Object.keys(limits).length > 0
+              ? [
+                  {
+                    name: "SESSION_RESOURCE_LIMITS",
+                    value: JSON.stringify(limits),
+                  },
+                ]
+              : []),
           ],
           volumeMounts,
           ...(Object.keys(resourceLimits).length > 0 ||

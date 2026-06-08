@@ -75,14 +75,67 @@ function requireEnv(name: string): string {
 }
 
 /**
+ * Tolerant SESSION_LABELS parser: a JSON object whose string-valued entries
+ * are kept. Malformed JSON / non-object / no string entries → undefined (the
+ * announce simply omits labels, it is never invalidated wholesale).
+ */
+export function parseLabelsEnv(
+  raw: string | undefined,
+): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return undefined;
+  const labels: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value === "string") labels[key] = value;
+  }
+  return Object.keys(labels).length > 0 ? labels : undefined;
+}
+
+/**
+ * Tolerant SESSION_RESOURCE_LIMITS parser: a JSON object with optional
+ * non-empty string `cpu` / `memory`. Anything else → undefined (omit).
+ */
+export function parseResourceLimitsEnv(
+  raw: string | undefined,
+): { cpu?: string; memory?: string } | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return undefined;
+  const { cpu, memory } = parsed as { cpu?: unknown; memory?: unknown };
+  const limits: { cpu?: string; memory?: string } = {};
+  if (typeof cpu === "string" && cpu.length > 0) limits.cpu = cpu;
+  if (typeof memory === "string" && memory.length > 0) limits.memory = memory;
+  return Object.keys(limits).length > 0 ? limits : undefined;
+}
+
+/**
  * Build the session.announce base from environment variables.
  * Secret-free: no credentials, tokens, or auth material.
  *
- * Carries `home` (HOME) and `startupArgs` (SESSION_STARTUP_ARGS) so a
- * control-plane restarted from scratch can rebuild a descriptor whose
- * refreshed Pod keeps the SAME HOME (environment parity) and the SAME startup
- * args (e.g. ["--resume", "<convId>"]) — without them a post-restart
- * `remote refresh` came back with HOME=/root and a fresh conversation.
+ * Carries `home` (HOME), `startupArgs` (SESSION_STARTUP_ARGS), `displayName`
+ * (SESSION_DISPLAY_NAME), `labels` (SESSION_LABELS) and `resourceLimits`
+ * (SESSION_RESOURCE_LIMITS) so a control-plane restarted from scratch can
+ * rebuild a descriptor whose refreshed Pod keeps the SAME HOME (environment
+ * parity), the SAME startup args (e.g. ["--resume", "<convId>"]) and the SAME
+ * custom name/labels/limits — without them a post-restart `remote refresh`
+ * came back with HOME=/root, a fresh conversation and default resources.
+ *
+ * Descriptor `metadata` is NOT announced: its only Pod-visible subset is
+ * `metadata.startup.args` (already carried as startupArgs); the rest never
+ * reaches the Pod environment, so the agent cannot — and must not invent it.
  *
  * Constructed imperatively to satisfy exactOptionalPropertyTypes.
  */
@@ -106,6 +159,15 @@ export function buildAnnounce(input: {
   if (workspaceId !== undefined) a.workspaceId = workspaceId;
   const startupArgs = parseStartupArgs(input.env.SESSION_STARTUP_ARGS);
   if (startupArgs.length > 0) a.startupArgs = startupArgs;
+  const displayName = input.env.SESSION_DISPLAY_NAME;
+  if (displayName !== undefined && displayName.length > 0)
+    a.displayName = displayName;
+  const labels = parseLabelsEnv(input.env.SESSION_LABELS);
+  if (labels !== undefined) a.labels = labels;
+  const resourceLimits = parseResourceLimitsEnv(
+    input.env.SESSION_RESOURCE_LIMITS,
+  );
+  if (resourceLimits !== undefined) a.resourceLimits = resourceLimits;
   return a;
 }
 

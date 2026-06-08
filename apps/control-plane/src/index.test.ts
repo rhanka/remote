@@ -1185,6 +1185,139 @@ describe("control plane", () => {
     );
   });
 
+  it("preserves displayName/labels/resourceLimits across announce→refresh (restart parity)", async () => {
+    // Control-plane restarted from scratch: the announce is the ONLY record of
+    // the session's custom name/labels/limits. A refresh must regenerate the
+    // Pod from a descriptor that still carries them — before this, a
+    // post-restart refresh silently fell back to default resources.
+    const refreshed: Array<{
+      displayName?: string;
+      labels?: Record<string, string>;
+      resourceLimits?: { cpu?: string; memory?: string };
+    }> = [];
+    const provisioner = {
+      async provision() {},
+      async refresh(d: {
+        displayName?: string;
+        labels?: Record<string, string>;
+        resourceLimits?: { cpu?: string; memory?: string };
+      }) {
+        refreshed.push(d);
+      },
+      async destroy() {},
+      async inspect() {
+        return undefined;
+      },
+    };
+    const app = createControlPlane({ provisioner });
+    const id = "sess-restored-limits";
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+    events.onMessage?.(
+      announceFrame({
+        sessionId: id,
+        profile: "claude",
+        target: "k3s",
+        workspacePath: "/home/user/src/proj",
+        home: "/home/user",
+        displayName: "big-build",
+        labels: { team: "core" },
+        resourceLimits: { cpu: "4", memory: "8Gi" },
+      }) as never,
+      ws as never,
+    );
+
+    // The reconstructed descriptor carries the parity fields…
+    const got = await app.request(`/sessions/${id}`);
+    expect(got.status).toBe(200);
+    const { session } = (await got.json()) as GetSessionResponse;
+    expect(session.displayName).toBe("big-build");
+    expect(session.labels).toEqual({ team: "core" });
+    expect(session.resourceLimits).toEqual({ cpu: "4", memory: "8Gi" });
+
+    // …a refresh hands the provisioner that SAME descriptor…
+    const refresh = await app.request(`/sessions/${id}/credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ".claude/.credentials.json": "eA==" }),
+    });
+    expect(refresh.status).toBe(200);
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0]!.displayName).toBe("big-build");
+    expect(refreshed[0]!.labels).toEqual({ team: "core" });
+    expect(refreshed[0]!.resourceLimits).toEqual({ cpu: "4", memory: "8Gi" });
+
+    // …and the regenerated Pod applies the custom limits + re-injects the
+    // announce-parity env vars for the NEXT restart cycle.
+    const { buildSessionPodSpec } = await import(
+      "@sentropic/remote-k8s-orchestrator"
+    );
+    const pod = buildSessionPodSpec(session);
+    const container = pod.spec.containers[0]! as {
+      env: ReadonlyArray<{ name: string; value: string }>;
+      resources?: { limits?: Record<string, string> };
+    };
+    expect(container.resources?.limits).toEqual({ cpu: "4", memory: "8Gi" });
+    const env = container.env;
+    expect(env.find((e) => e.name === "SESSION_DISPLAY_NAME")?.value).toBe(
+      "big-build",
+    );
+    expect(env.find((e) => e.name === "SESSION_LABELS")?.value).toBe(
+      JSON.stringify({ team: "core" }),
+    );
+    expect(env.find((e) => e.name === "SESSION_RESOURCE_LIMITS")?.value).toBe(
+      JSON.stringify({ cpu: "4", memory: "8Gi" }),
+    );
+  });
+
+  it("re-announce fills missing parity fields but never overwrites a richer record", async () => {
+    const app = createControlPlane();
+    const id = "sess-merge-conservative";
+    const events = app.buildAgentSocketEvents(id);
+    const ws = fakeWs();
+    events.onOpen?.(new Event("open"), ws as never);
+    // First announce: an OLD agent without the parity fields establishes the
+    // session (post-restart), so the record lacks displayName/limits.
+    events.onMessage?.(
+      announceFrame({ sessionId: id, profile: "claude", target: "k3s" }) as never,
+      ws as never,
+    );
+    // Re-announce (upgraded agent image after refresh): fills the gaps.
+    events.onMessage?.(
+      announceFrame({
+        sessionId: id,
+        profile: "claude",
+        target: "k3s",
+        displayName: "filled-in",
+        resourceLimits: { memory: "2Gi" },
+      }) as never,
+      ws as never,
+    );
+    let { session } = (await (
+      await app.request(`/sessions/${id}`)
+    ).json()) as GetSessionResponse;
+    expect(session.displayName).toBe("filled-in");
+    expect(session.resourceLimits).toEqual({ memory: "2Gi" });
+
+    // A later announce with DIFFERENT values does not clobber the record.
+    events.onMessage?.(
+      announceFrame({
+        sessionId: id,
+        profile: "claude",
+        target: "k3s",
+        displayName: "stale-name",
+        resourceLimits: { memory: "1Gi" },
+      }) as never,
+      ws as never,
+    );
+    ({ session } = (await (
+      await app.request(`/sessions/${id}`)
+    ).json()) as GetSessionResponse);
+    expect(session.displayName).toBe("filled-in");
+    expect(session.resourceLimits).toEqual({ memory: "2Gi" });
+  });
+
   it("makes a repopulated session stoppable", async () => {
     const app = createControlPlane();
     const id = "sess-restored-2";
