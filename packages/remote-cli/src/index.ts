@@ -2167,6 +2167,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const url = getConfiguredRemote();
       await ensureConnected(url);
       const pass = async (): Promise<{ failed: number }> => {
+        // Re-ensure the tunnel each pass (idempotent): a --watch loop must
+        // survive a control-plane redeploy that kills the port-forward.
+        await ensureConnected(url);
         const sessions = sessionId
           ? [
               {
@@ -2506,9 +2509,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           await ensureConnected(url);
           const hashes = new Map<string, string>();
           if (watchMinutes !== undefined) {
-            process.exitCode = await watchRefreshLoop(watchMinutes, () =>
-              softRefreshAllSessions(url, opts, hashes),
-            );
+            // Re-ensure the tunnel EACH pass: after a control-plane redeploy
+            // (or laptop sleep) the port-forward dies and every pass would
+            // otherwise fail with "fetch failed". ensureConnected is idempotent
+            // and rebuilds a stale-but-alive tunnel.
+            process.exitCode = await watchRefreshLoop(watchMinutes, async () => {
+              await ensureConnected(url);
+              return softRefreshAllSessions(url, opts, hashes);
+            });
             return;
           }
           const { failed } = await softRefreshAllSessions(url, opts, hashes);
