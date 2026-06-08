@@ -1988,7 +1988,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   pluginCommand
     .command("add <npmPkg>")
     .description(
-      "npm i -g <npmPkg>, then register its MCP server(s) with claude + codex (agy/gemini: TODO) and persist the plugin in the remote config. " +
+      "npm i -g <npmPkg>, then register its MCP server(s) with claude + codex + agy (Antigravity: merged into ~/.gemini/config/mcp_config.json) and persist the plugin in the remote config. " +
         "Without --mcp, every bin ending in -mcp is registered (track-mcp -> track). MCPs are registered as `node <realpath>` (never the bare bin: the npm-global symlink breaks some entrypoint guards).",
     )
     .option(

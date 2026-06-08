@@ -6,10 +6,13 @@ import {
   codexMcpServerBlock,
   detectMcpBins,
   mcpTargetForProfile,
+  mergeAgyMcpServers,
   mergeClaudeMcpServers,
   normalizeBins,
   parseMcpSpec,
   parseMcpSpecs,
+  planAgyMcpConfigUpdate,
+  POD_AGY_MERGE_JS,
   splitNpmSpec,
   upsertCodexMcpServer,
 } from "./plugin.js";
@@ -189,13 +192,96 @@ describe("claude.json mcpServers merge", () => {
   });
 });
 
+describe("agy mcp_config.json mcpServers merge", () => {
+  const SCRIPT = "/usr/lib/node_modules/@sentropic/track/dist/mcp.js";
+
+  it("starts a fresh object from empty input (the real file ships 0 bytes)", () => {
+    const out = JSON.parse(mergeAgyMcpServers("", "track", "node", [SCRIPT]));
+    expect(out).toEqual({
+      mcpServers: { track: { command: "node", args: [SCRIPT] } },
+    });
+  });
+
+  it("preserves sibling keys and other servers", () => {
+    const existing = JSON.stringify({
+      someAgySetting: true,
+      mcpServers: { other: { serverUrl: "https://mcp.example/sse" } },
+    });
+    const out = JSON.parse(
+      mergeAgyMcpServers(existing, "track", "node", [SCRIPT]),
+    );
+    expect(out.someAgySetting).toBe(true);
+    expect(out.mcpServers.other).toEqual({ serverUrl: "https://mcp.example/sse" });
+    expect(out.mcpServers.track).toEqual({ command: "node", args: [SCRIPT] });
+  });
+
+  it("is idempotent (re-merging the same server changes nothing)", () => {
+    const once = mergeAgyMcpServers("", "track", "node", [SCRIPT]);
+    const twice = mergeAgyMcpServers(once, "track", "node", [SCRIPT]);
+    expect(twice).toBe(once);
+  });
+
+  it("throws on corrupt JSON instead of clobbering it", () => {
+    expect(() => mergeAgyMcpServers("{nope", "track", "node", [SCRIPT])).toThrow();
+  });
+
+  it("rejects unsafe server names", () => {
+    expect(() => mergeAgyMcpServers("", "a b", "node", [SCRIPT])).toThrow(
+      /invalid MCP server name/,
+    );
+  });
+});
+
+describe("planAgyMcpConfigUpdate (backup policy)", () => {
+  const SCRIPT = "/usr/lib/node_modules/@sentropic/track/dist/mcp.js";
+
+  it("empty/absent file: write, no backup (nothing worth saving)", () => {
+    const plan = planAgyMcpConfigUpdate("", "track", "node", [SCRIPT]);
+    expect(plan.changed).toBe(true);
+    expect(plan.needsBackup).toBe(false);
+    expect(JSON.parse(plan.next).mcpServers.track).toEqual({
+      command: "node",
+      args: [SCRIPT],
+    });
+  });
+
+  it("non-empty file being modified: write WITH backup", () => {
+    const before = JSON.stringify({ mcpServers: { other: { command: "x" } } });
+    const plan = planAgyMcpConfigUpdate(before, "track", "node", [SCRIPT]);
+    expect(plan.changed).toBe(true);
+    expect(plan.needsBackup).toBe(true);
+  });
+
+  it("already-registered server: no write, no backup (idempotent re-run)", () => {
+    const before = planAgyMcpConfigUpdate("", "track", "node", [SCRIPT]).next;
+    const plan = planAgyMcpConfigUpdate(before, "track", "node", [SCRIPT]);
+    expect(plan.changed).toBe(false);
+    expect(plan.needsBackup).toBe(false);
+    expect(plan.next).toBe(before);
+  });
+});
+
+describe("POD_AGY_MERGE_JS", () => {
+  it("targets ~/.gemini/config/mcp_config.json and creates the dir", () => {
+    expect(POD_AGY_MERGE_JS).toContain('"/.gemini/config"');
+    expect(POD_AGY_MERGE_JS).toContain('"/mcp_config.json"');
+    expect(POD_AGY_MERGE_JS).toContain("mkdirSync");
+  });
+
+  it("uses double quotes only (it is single-quoted inside the bash script)", () => {
+    expect(POD_AGY_MERGE_JS).not.toContain("'");
+  });
+});
+
 describe("mcpTargetForProfile", () => {
   it("maps profiles", () => {
     expect(mcpTargetForProfile("claude")).toBe("claude");
     expect(mcpTargetForProfile("claude-code")).toBe("claude");
     expect(mcpTargetForProfile("codex")).toBe("codex");
-    expect(mcpTargetForProfile("agy")).toBe("todo");
+    expect(mcpTargetForProfile("agy")).toBe("agy");
+    expect(mcpTargetForProfile("antigravity")).toBe("agy");
     expect(mcpTargetForProfile("shell")).toBe("todo");
+    expect(mcpTargetForProfile("opencode")).toBe("todo");
   });
 });
 
@@ -238,8 +324,25 @@ describe("buildPodSyncScript", () => {
     expect(script).not.toContain(".claude.json");
   });
 
-  it("only installs (TODO note) for unwired profiles", () => {
+  it("merges agy mcp_config.json for agy pods (Pod-side realpath)", () => {
     const script = buildPodSyncScript(PLUGIN, "agy");
+    expect(script).toContain("npm install -g '@sentropic/track@0.2.0'");
+    expect(script).toContain(POD_AGY_MERGE_JS);
+    expect(script).toContain("'track' \"$REAL\"");
+    expect(script).toContain("mcp_config.json");
+    expect(script).not.toContain(".claude.json");
+    expect(script).not.toContain("config.toml");
+    expect(script).not.toContain("TODO non câblé");
+  });
+
+  it("antigravity alias gets the same agy wiring", () => {
+    expect(buildPodSyncScript(PLUGIN, "antigravity")).toBe(
+      buildPodSyncScript(PLUGIN, "agy"),
+    );
+  });
+
+  it("only installs (TODO note) for unwired profiles", () => {
+    const script = buildPodSyncScript(PLUGIN, "shell");
     expect(script).toContain("npm install -g '@sentropic/track@0.2.0'");
     expect(script).toContain("TODO non câblé");
     expect(script).not.toContain("$REAL");

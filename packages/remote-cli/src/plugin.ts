@@ -1,9 +1,16 @@
 /**
  * `remote plugin` — install npm "plugin" packages (a CLI + an MCP server, e.g.
  * @sentropic/track shipping bins `track` and `track-mcp`) for every agent CLI
- * (claude, codex; agy/gemini = TODO), both LOCALLY (npm i -g + MCP
- * registration) and inside live REMOTE session Pods (`remote plugin sync`:
- * kubectl exec → npm i -g + per-profile MCP registration).
+ * (claude, codex, agy), both LOCALLY (npm i -g + MCP registration) and inside
+ * live REMOTE session Pods (`remote plugin sync`: kubectl exec → npm i -g +
+ * per-profile MCP registration).
+ *
+ * agy (Antigravity CLI) has NO `agy mcp` subcommand: MCP servers are declared
+ * in ~/.gemini/config/mcp_config.json, a Claude-style `{"mcpServers": {…}}`
+ * JSON file (the agy changelog 1.0.3 calls this the "migrated" path; the old
+ * ~/.gemini/antigravity/mcp_config.json is legacy). We merge idempotently and
+ * keep a one-shot `.bak.<epoch>` backup the first time we touch a non-empty
+ * file.
  *
  * KNOWN PITFALL — broken entrypoint guard through the npm-global symlink:
  * some packages (track@0.2.0) guard their entry script with a
@@ -178,22 +185,24 @@ export function upsertCodexMcpServer(
 }
 
 /**
- * Idempotently merge `mcpServers.<name>` into a ~/.claude.json body. Empty
- * input starts a fresh object; invalid JSON throws (never clobber the user's
- * claude state). All sibling keys are preserved.
+ * Idempotently merge `mcpServers.<name>` into a JSON config body (the shape
+ * shared by ~/.claude.json and agy's mcp_config.json). Empty input starts a
+ * fresh object; invalid JSON throws (never clobber the user's state). All
+ * sibling keys are preserved.
  */
-export function mergeClaudeMcpServers(
+function mergeMcpServersJson(
   json: string,
   name: string,
   command: string,
   args: readonly string[],
+  label: string,
 ): string {
   assertSafeName(name);
   let root: Record<string, unknown> = {};
   if (json.trim()) {
     const parsed: unknown = JSON.parse(json); // throws on corrupt input — on purpose
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("claude.json root is not an object — not touching it");
+      throw new Error(`${label} root is not an object — not touching it`);
     }
     root = parsed as Record<string, unknown>;
   }
@@ -205,6 +214,47 @@ export function mergeClaudeMcpServers(
   servers[name] = { command, args: [...args] };
   root.mcpServers = servers;
   return JSON.stringify(root, null, 2) + "\n";
+}
+
+/** Idempotent `mcpServers.<name>` merge for a ~/.claude.json body. */
+export function mergeClaudeMcpServers(
+  json: string,
+  name: string,
+  command: string,
+  args: readonly string[],
+): string {
+  return mergeMcpServersJson(json, name, command, args, "claude.json");
+}
+
+/**
+ * Idempotent `mcpServers.<name>` merge for agy's
+ * ~/.gemini/config/mcp_config.json (same Claude-style shape — the agy binary
+ * schema accepts command/args/env/url per server; we only emit command+args).
+ */
+export function mergeAgyMcpServers(
+  json: string,
+  name: string,
+  command: string,
+  args: readonly string[],
+): string {
+  return mergeMcpServersJson(json, name, command, args, "mcp_config.json");
+}
+
+/**
+ * Pure write plan for agy's mcp_config.json: the merged body, whether it
+ * differs from `before`, and whether a `.bak.<epoch>` backup is owed (only on
+ * the FIRST real modification of a non-empty file — an empty/absent file has
+ * nothing worth backing up, and an unchanged file is never rewritten).
+ */
+export function planAgyMcpConfigUpdate(
+  before: string,
+  name: string,
+  command: string,
+  args: readonly string[],
+): { next: string; changed: boolean; needsBackup: boolean } {
+  const next = mergeAgyMcpServers(before, name, command, args);
+  const changed = next !== before;
+  return { next, changed, needsBackup: changed && before.trim().length > 0 };
 }
 
 /**
@@ -220,10 +270,30 @@ export const POD_CLAUDE_MERGE_JS =
   's[process.argv[1]]={command:"node",args:[process.argv[2]]};j.mcpServers=s;' +
   'fs.writeFileSync(p,JSON.stringify(j,null,2)+"\\n");';
 
-/** claude / claude-code → claude; codex → codex; everything else = TODO. */
-export function mcpTargetForProfile(profile: string): "claude" | "codex" | "todo" {
+/**
+ * In-Pod ~/.gemini/config/mcp_config.json merge, run as
+ * `node -e '<this>' <name> <scriptPath>`. Double quotes only — the snippet is
+ * single-quoted inside the bash script. Same shape as the claude merge; the
+ * config dir may not exist yet in a fresh Pod, hence mkdirSync.
+ */
+export const POD_AGY_MERGE_JS =
+  'const fs=require("fs");const d=process.env.HOME+"/.gemini/config";' +
+  "fs.mkdirSync(d,{recursive:true});" +
+  'const p=d+"/mcp_config.json";' +
+  'let j={};try{const t=fs.readFileSync(p,"utf8");if(t.trim())j=JSON.parse(t)}' +
+  'catch(e){if(e.code!=="ENOENT")throw e}' +
+  'if(typeof j!=="object"||j===null||Array.isArray(j))j={};' +
+  'const s=j.mcpServers&&typeof j.mcpServers==="object"&&!Array.isArray(j.mcpServers)?j.mcpServers:{};' +
+  's[process.argv[1]]={command:"node",args:[process.argv[2]]};j.mcpServers=s;' +
+  'fs.writeFileSync(p,JSON.stringify(j,null,2)+"\\n");';
+
+/** claude / claude-code → claude; codex → codex; agy / antigravity → agy. */
+export function mcpTargetForProfile(
+  profile: string,
+): "claude" | "codex" | "agy" | "todo" {
   if (profile === "claude" || profile === "claude-code") return "claude";
   if (profile === "codex") return "codex";
+  if (profile === "agy" || profile === "antigravity") return "agy";
   return "todo";
 }
 
@@ -268,6 +338,11 @@ export function buildPodSyncScript(plugin: PluginEntry, profile: string): string
       lines.push(
         `node -e '${POD_CLAUDE_MERGE_JS}' '${mcp.name}' "$REAL"`,
         `echo "mcp ${mcp.name} -> claude.json (node $REAL)"`,
+      );
+    } else if (target === "agy") {
+      lines.push(
+        `node -e '${POD_AGY_MERGE_JS}' '${mcp.name}' "$REAL"`,
+        `echo "mcp ${mcp.name} -> agy mcp_config.json (node $REAL)"`,
       );
     } else {
       lines.push(
@@ -367,6 +442,42 @@ function registerClaudeLocal(
   );
 }
 
+/**
+ * Idempotent `mcpServers.<name>` merge into ~/.gemini/config/mcp_config.json
+ * (agy has no `mcp add` CLI command — file merge is the only mechanism). The
+ * first time a non-empty file is actually modified we keep a `.bak.<epoch>`
+ * sibling; an unchanged file is never rewritten.
+ */
+function registerAgyLocal(
+  name: string,
+  scriptPath: string,
+  stderr: NodeJS.WriteStream,
+): void {
+  const dir = join(homedir(), ".gemini", "config");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "mcp_config.json");
+  const before = readFileIfExists(path);
+  const { next, changed, needsBackup } = planAgyMcpConfigUpdate(
+    before,
+    name,
+    "node",
+    [scriptPath],
+  );
+  if (!changed) {
+    stderr.write(`[remote] agy: MCP ${name} already in ${path} (unchanged)\n`);
+    return;
+  }
+  if (needsBackup) {
+    const backup = `${path}.bak.${Date.now()}`;
+    writeFileSync(backup, before, "utf8");
+    stderr.write(`[remote] agy: backed up ${path} -> ${backup}\n`);
+  }
+  writeFileSync(path, next, "utf8");
+  stderr.write(
+    `[remote] agy: MCP ${name} -> node ${scriptPath} in ~/.gemini/config/mcp_config.json\n`,
+  );
+}
+
 /** Idempotent `[mcp_servers.<name>]` upsert in ~/.codex/config.toml. */
 function registerCodexLocal(
   name: string,
@@ -432,7 +543,7 @@ function execPod(tunnel: TunnelConfig, pod: string, script: string): string {
 
 /**
  * `remote plugin add <npmPkg> [--mcp name=bin]...` — npm i -g, register the
- * MCP server(s) with claude + codex (agy/gemini TODO), persist in the config.
+ * MCP server(s) with claude + codex + agy, persist in the config.
  */
 export function pluginAdd(
   npmSpec: string,
@@ -476,7 +587,7 @@ export function pluginAdd(
     const scriptRel = rel.replace(/^\.\//, "");
     registerClaudeLocal(name, scriptPath, stderr);
     registerCodexLocal(name, scriptPath, stderr);
-    stderr.write(`[remote] agy/gemini: MCP ${name} TODO non câblé (skipped)\n`);
+    registerAgyLocal(name, scriptPath, stderr);
     mcp.push({ name, command: "node", args: [scriptPath], scriptRel });
   }
 
