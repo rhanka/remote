@@ -5,6 +5,68 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.0 — 2026-06-07
+
+Headline: **the launcher grows up** — real live-session registry instead of
+guessing, ONE shared RWX volume for all workspaces, self-healing fleet auth,
+and plugins/h2a wired across local *and* deported sessions.
+
+- **Shared RWX workspace volume** (`SESSION_SHARED_WORKSPACE_PVC`): all
+  workspaces live as subPaths of ONE File Storage volume (Scaleway minimum is
+  100G *per volume*, and the CSI mounts at most one File Storage volume per
+  node) — sessions pack onto one node instead of spreading, and storage stops
+  multiplying. `workspace rm` never deletes the shared volume.
+- **Explicit GC** (`remote workspace gc [--older-than N] [--apply --yes]`):
+  ephemeral janitor pod mounts the volume root (affinity to session nodes —
+  the only placement the 1-volume/node CSI guarantees), keep-list = every
+  workspace known to the store re-checked *inside* the pod, candidates are
+  tar'd to on-volume `.trash/` before any `rm`. Dry-run by default.
+- **Live-session registry + autoenrollment** (`remote enroll`): claude
+  SessionStart/End hooks (installed once via `--install-hooks`, with backup)
+  enroll every session into `registry.json`; `remote run` enrolls its tmux
+  sessions; `remote ls` shows `[registry]` vs `[guess]`; `remote restore` is
+  registry-first (filesystem scan only fills the gaps) and auto-records the
+  launched layout (`remote layout show`).
+- **Fleet auth that heals itself**: the agent announce now carries
+  `home`/`startupArgs`/`cliSessionId`, so a control-plane restart loses
+  nothing and a refresh resumes the *freshest* conversation (not the one the
+  pod was created with). `remote refresh --soft --all [--watch <min>]`
+  re-pushes local credentials to every live session — respawn gated on a
+  sha256 of the credential files only (volatile `.claude.json` churn doesn't
+  thrash pods), and a dead pod CLI is revived even when creds are unchanged.
+- **Single-writer guard** (`conv-guard`): `remote run -r <conv>` and
+  `remote migrate forward -r <conv>` refuse to resume a conversation that
+  already has a live writer (local registry + remote `cliSessionId`), with a
+  loud `--force` override. Conversation `.jsonl` files are the asset; two
+  writers corrupt them.
+- **`remote sync <id> --session push|pull` and `remote diff --files`**:
+  guarded conversation copy (line-count guard + `.bak-<epoch>` backups, base64
+  encoded exactly once) and git-state comparison local vs Pod (names/HEAD
+  only, content never transferred).
+- **`remote plugin add/ls/sync`**: install an npm plugin package (CLI + MCP
+  server, e.g. `@sentropic/track`) locally and into every live session Pod,
+  registering its MCP server(s) with **claude + codex + agy** (Antigravity's
+  `~/.gemini/config/mcp_config.json` discovered and supported). MCPs are
+  registered as `node <realpath>` — the npm-global symlink breaks some
+  entrypoint guards.
+- **h2a wiring**: `remote run --h2a` starts the h2a MCP server in a side tmux
+  window (launcher contract), and `remote h2a bridge [--watch]` transports
+  envelopes pod↔local (pull emitted, push addressed, idempotent by file name,
+  never deletes — acks belong to h2a).
+- **Wheel scrolls the conversation, everywhere**: the Pod image's tmux conf
+  and the local server (`ensureScrollConfig` at every run/attach) both bind
+  WheelUp → copy-mode; `mouse on` so the wheel stops cycling the CLI's input
+  history. Native selection: Shift+drag; OSC52 preserved.
+- **Images**: `runtime-slim` variant (1.26GB vs 2.47GB fat — no Go/Rust/
+  build-essential) published as `:vX-slim`/`:main-slim`; pre-pull DaemonSet
+  (`deploy/scw/40-prepull.yaml`, `make scw-prepull`) keeps the fat image warm
+  on the session pool so cold starts stop costing 6-9 min.
+- **Fixes**: per-profile resume argv (`codex resume <id>` subcommand — the
+  old `--continue <id>` was invalid; bare claude `--resume` opened an
+  interactive picker), hono 4.12.23 (4 moderate advisories), restore surfaces
+  gnome-terminal spawn errors, `refresh` survives create-while-terminating
+  (409 retry), conversation mounts under the shared volume subPath.
+
 ## v0.4.3 — 2026-06-05
 
 Headline: **tmux-backed sessions**, local and remote, for simpler juggling and
