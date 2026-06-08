@@ -144,6 +144,20 @@ export class DockerSessionProvisioner implements SessionProvisioner {
       env.push("-e", `REMOTE_TOKEN=${options.sessionToken}`);
     if (startupArgs.length > 0)
       env.push("-e", `SESSION_STARTUP_ARGS=${JSON.stringify(startupArgs)}`);
+    // Announce parity (same contract as the k8s pod spec): the agent
+    // re-announces name/labels/limits so a restarted control-plane keeps them.
+    if (descriptor.displayName)
+      env.push("-e", `SESSION_DISPLAY_NAME=${descriptor.displayName}`);
+    if (descriptor.labels && Object.keys(descriptor.labels).length > 0)
+      env.push("-e", `SESSION_LABELS=${JSON.stringify(descriptor.labels)}`);
+    if (
+      descriptor.resourceLimits &&
+      Object.keys(descriptor.resourceLimits).length > 0
+    )
+      env.push(
+        "-e",
+        `SESSION_RESOURCE_LIMITS=${JSON.stringify(descriptor.resourceLimits)}`,
+      );
 
     const auth = this.stageAuth(descriptor.id, options.credentials ?? {});
     const authMount = auth

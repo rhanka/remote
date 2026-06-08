@@ -94,11 +94,14 @@ function buildDescriptor(
  * the announce's public fields. `target`/`workspacePath` are required on the
  * descriptor but optional on the announce — fall back to safe defaults.
  *
- * `home` and `startupArgs` map back to the EXACT descriptor locations that
- * `buildSessionPodSpec` reads (descriptor.home → HOME env;
- * descriptor.metadata.startup.args → SESSION_STARTUP_ARGS env), so a
- * post-restart `remote refresh` regenerates a Pod with the same HOME parity
- * and the same --resume args instead of a fresh /root session.
+ * `home`, `startupArgs`, `displayName`, `labels` and `resourceLimits` map back
+ * to the EXACT descriptor locations that `buildSessionPodSpec` reads
+ * (descriptor.home → HOME env; descriptor.metadata.startup.args →
+ * SESSION_STARTUP_ARGS env; descriptor.resourceLimits → container
+ * resources/limits; descriptor.displayName/labels → SESSION_DISPLAY_NAME /
+ * SESSION_LABELS env), so a post-restart `remote refresh` regenerates a Pod
+ * with the same HOME parity, the same --resume args AND the same custom
+ * limits instead of a fresh /root session on default resources.
  */
 function descriptorFromAnnounce(announce: SessionAnnounce): SessionDescriptor {
   const now = new Date().toISOString();
@@ -121,6 +124,11 @@ function descriptorFromAnnounce(announce: SessionAnnounce): SessionDescriptor {
   if (announce.home !== undefined) descriptor.home = announce.home;
   if (announce.startupArgs !== undefined && announce.startupArgs.length > 0)
     descriptor.metadata = { startup: { args: announce.startupArgs } };
+  if (announce.displayName !== undefined)
+    descriptor.displayName = announce.displayName;
+  if (announce.labels !== undefined) descriptor.labels = announce.labels;
+  if (announce.resourceLimits !== undefined)
+    descriptor.resourceLimits = announce.resourceLimits;
   return descriptor;
 }
 
@@ -200,19 +208,35 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   ) => {
     const existing = store.get(sessionId);
     if (existing) {
+      const patch: Partial<SessionDescriptor> = {};
       // The agent re-detects its CLI's conversation id on every reconnect, so
       // a re-announce may carry a FRESHER cliSessionId than the record (the
       // conversation advanced or forked inside the Pod). Adopt it — the
-      // refresh path substitutes it into the --resume args — but leave every
-      // other field AND the owner untouched (put without userId preserves the
-      // existing owner: the agent WS auth may resolve to "default").
+      // refresh path substitutes it into the --resume args.
       if (
         announce.cliSessionId !== undefined &&
         announce.cliSessionId !== existing.cliSessionId
       ) {
-        return store.put({ ...existing, cliSessionId: announce.cliSessionId });
+        patch.cliSessionId = announce.cliSessionId;
       }
-      return existing;
+      // Conservative parity merge: the announce carries the Pod's
+      // CREATION-time displayName/labels/resourceLimits, so it only FILLS
+      // fields the record lacks — it never overwrites a richer existing
+      // descriptor, and an announce that omits a field (old agent) never
+      // erases one. Everything else AND the owner stay untouched (put without
+      // userId preserves the existing owner: the agent WS auth may resolve to
+      // "default").
+      if (announce.displayName !== undefined && existing.displayName === undefined)
+        patch.displayName = announce.displayName;
+      if (announce.labels !== undefined && existing.labels === undefined)
+        patch.labels = announce.labels;
+      if (
+        announce.resourceLimits !== undefined &&
+        existing.resourceLimits === undefined
+      )
+        patch.resourceLimits = announce.resourceLimits;
+      if (Object.keys(patch).length === 0) return existing;
+      return store.put({ ...existing, ...patch });
     }
     const descriptor = store.put(
       { ...descriptorFromAnnounce(announce), id: sessionId },
