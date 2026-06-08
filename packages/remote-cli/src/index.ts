@@ -2116,6 +2116,88 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       },
     );
 
+  // ---------------------------------------------------------------------------
+  // h2a — bridge the local agent network (~/h2a-workspace/.h2a) with session Pods
+  // ---------------------------------------------------------------------------
+
+  const h2aCommand = program
+    .command("h2a")
+    .description(
+      "h2a agent-network helpers (local file store: ~/h2a-workspace/.h2a)",
+    );
+  h2aCommand
+    .command("bridge [sessionId]")
+    .description(
+      "Bridge h2a envelopes with session Pod(s) over kubectl exec: PULL envelopes the Pod's agent emitted (Pod inbox/* minus the Pod's own instances) into the local inboxes, PUSH local envelopes addressed to the Pod's instances (<tool>:remote:<sessionId> + the Pod's registry) into the Pod. Idempotent by file name (existing files are skipped, never overwritten), NEVER deletes (acks/cleanup belong to h2a). A Pod without ~/h2a-workspace/.h2a gets the skeleton + README. Without sessionId: every live session.",
+    )
+    .option(
+      "--watch <minutes>",
+      "repeat the bridge every N minutes in the FOREGROUND; Ctrl-C to stop",
+    )
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Examples:",
+        "  $ remote h2a bridge sess-abc         one pass for one session",
+        "  $ remote h2a bridge                  one pass for every live session",
+        "  $ remote h2a bridge --watch 5        foreground loop, every 5 min",
+        "  Run the watch in a dedicated tmux window, e.g.:",
+        "    tmux new-window -n h2a-bridge 'remote h2a bridge --watch 5'",
+        "",
+      ].join("\n"),
+    )
+    .action(async (sessionId: string | undefined, opts: { watch?: string }) => {
+      const watchMinutes =
+        opts.watch === undefined ? undefined : parseWatchMinutes(opts.watch);
+      // Dynamic import: keeps the h2a bridge out of every other command's path.
+      const { bridgeSession } = await import("./h2a-bridge.js");
+      const url = getConfiguredRemote();
+      await ensureConnected(url);
+      const pass = async (): Promise<{ failed: number }> => {
+        const sessions = sessionId
+          ? [
+              {
+                id: sessionId,
+                profile: (await getRemoteSession(url, sessionId)).session
+                  .profile,
+              },
+            ]
+          : (await listRemoteSessions(url)).map((s) => ({
+              id: s.id,
+              profile: s.profile,
+            }));
+        if (sessions.length === 0) {
+          process.stderr.write("[remote] no live remote sessions to bridge\n");
+          return { failed: 0 };
+        }
+        let failed = 0;
+        for (const s of sessions) {
+          try {
+            const r = await bridgeSession(s.id, { profile: s.profile });
+            if (r.failed > 0) failed += 1;
+            process.stderr.write(
+              `[remote] h2a bridge ${s.id} (${s.profile}) pulled=${r.pulled} pushed=${r.pushed} skipped=${r.skipped}` +
+                `${r.failed > 0 ? ` failed=${r.failed}` : ""}` +
+                `${r.scaffolded ? " (pod .h2a scaffolded)" : ""}\n`,
+            );
+          } catch (error) {
+            failed += 1;
+            process.stderr.write(
+              `[remote] h2a bridge ${s.id} failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}\n`,
+            );
+          }
+        }
+        return { failed };
+      };
+      if (watchMinutes !== undefined) {
+        process.exitCode = await watchRefreshLoop(watchMinutes, pass);
+        return;
+      }
+      const { failed } = await pass();
+      if (failed > 0) process.exitCode = 1;
+    });
+
   program
     .command("restore [group]")
     .description(

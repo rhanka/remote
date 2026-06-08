@@ -84,6 +84,11 @@ vi.mock("./soft-refresh.js", () => ({
   softRefreshSession,
 }));
 
+const bridgeSession = vi.fn();
+vi.mock("./h2a-bridge.js", () => ({
+  bridgeSession,
+}));
+
 const stderrWrite = vi
   .spyOn(process.stderr, "write")
   .mockImplementation(() => true);
@@ -627,6 +632,99 @@ describe("main", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe("h2a bridge", () => {
+    const bridged = (over: Partial<Record<string, unknown>> = {}) => ({
+      sessionId: "sess-1",
+      pulled: 0,
+      pushed: 0,
+      skipped: 0,
+      failed: 0,
+      scaffolded: false,
+      podInstanceDirs: ["claude__remote__sess-1"],
+      ...over,
+    });
+
+    beforeEach(() => {
+      bridgeSession.mockReset();
+      bridgeSession.mockResolvedValue(bridged());
+    });
+
+    it("with a sessionId bridges that session with its control-plane profile", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      getRemoteSession.mockResolvedValue({ session: { profile: "claude" } });
+      bridgeSession.mockResolvedValue(
+        bridged({ pulled: 2, pushed: 1, skipped: 3 }),
+      );
+
+      const exitCode = await main(["node", "remote", "h2a", "bridge", "sess-1"]);
+
+      expect(exitCode).toBe(0);
+      expect(bridgeSession).toHaveBeenCalledTimes(1);
+      expect(bridgeSession).toHaveBeenCalledWith("sess-1", { profile: "claude" });
+      expect(listRemoteSessions).not.toHaveBeenCalled();
+      const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("pulled=2 pushed=1 skipped=3");
+    });
+
+    it("without a sessionId bridges EVERY live session; one failure = exit 1 but the pass continues", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      listRemoteSessions.mockResolvedValue([
+        { id: "sess-a", profile: "claude" },
+        { id: "sess-b", profile: "codex" },
+      ]);
+      bridgeSession
+        .mockRejectedValueOnce(new Error("pod gone"))
+        .mockResolvedValueOnce(bridged({ sessionId: "sess-b", pushed: 1 }));
+
+      const exitCode = await main(["node", "remote", "h2a", "bridge"]);
+
+      expect(exitCode).toBe(1);
+      expect(bridgeSession).toHaveBeenCalledTimes(2);
+      expect(bridgeSession).toHaveBeenNthCalledWith(1, "sess-a", {
+        profile: "claude",
+      });
+      expect(bridgeSession).toHaveBeenNthCalledWith(2, "sess-b", {
+        profile: "codex",
+      });
+      const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("h2a bridge sess-a failed: pod gone");
+      expect(out).toContain("h2a bridge sess-b (codex) pulled=0 pushed=1");
+    });
+
+    it("no live sessions = clean no-op (exit 0)", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      listRemoteSessions.mockResolvedValue([]);
+
+      const exitCode = await main(["node", "remote", "h2a", "bridge"]);
+
+      expect(exitCode).toBe(0);
+      expect(bridgeSession).not.toHaveBeenCalled();
+      const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("no live remote sessions to bridge");
+    });
+
+    it("rejects an invalid --watch value before touching anything", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      await expect(
+        main(["node", "remote", "h2a", "bridge", "--watch", "0.5"]),
+      ).rejects.toThrow(/--watch needs a whole number of minutes >= 1/);
+      expect(listRemoteSessions).not.toHaveBeenCalled();
+      expect(bridgeSession).not.toHaveBeenCalled();
+    });
+
+    it("per-file failures inside an otherwise-ok bridge set exit 1", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      getRemoteSession.mockResolvedValue({ session: { profile: "codex" } });
+      bridgeSession.mockResolvedValue(bridged({ pulled: 1, failed: 2 }));
+
+      const exitCode = await main(["node", "remote", "h2a", "bridge", "sess-1"]);
+
+      expect(exitCode).toBe(1);
+      const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("failed=2");
     });
   });
 });
