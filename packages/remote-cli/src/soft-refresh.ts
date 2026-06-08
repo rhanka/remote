@@ -199,13 +199,63 @@ export async function softRefreshSession(
       }
     }
     if (podHash === hash) {
+      // Creds unchanged — but if the Pod's CLI DIED (pane dropped to the
+      // wrapper shell, e.g. it exited on a 401 before fresh creds landed),
+      // "unchanged" must still bring the session back: respawn with the creds
+      // already in place. Probe ONLY when we already read the Pod this pass
+      // (previousHash mismatch): the in-memory watch match stays zero-I/O.
+      let paneDead = false;
+      let paneCmd = "";
+      if (options.previousHash !== hash) {
+        try {
+          // The relaunch wrapper keeps the CLI as a CHILD of a bash script, so
+          // pane_current_command alone reads "bash" even when claude is alive.
+          // Dead = pane at bash/sh AND no child process (idle drop-to-shell).
+          // /proc PPid scan because the runtime image has no ps/pgrep.
+          const probe = execPod(
+            tunnel,
+            pod,
+            `pp=$(tmux display -p -t main "#{pane_pid}" 2>/dev/null); ` +
+              `cmd=$(tmux display -p -t main "#{pane_current_command}" 2>/dev/null); ` +
+              `kids=$(awk -v p="$pp" '$1=="PPid:" && $2==p {c++} END{print c+0}' /proc/[0-9]*/status 2>/dev/null); ` +
+              `echo "$cmd $kids"`,
+          )
+            .trim()
+            .split(/\s+/);
+          paneCmd = probe[0] ?? "";
+          const kids = Number(probe[1] ?? "1") || 0;
+          paneDead = (paneCmd === "bash" || paneCmd === "sh") && kids === 0;
+        } catch {
+          // tmux unreadable — treat as alive; the next changed-creds pass heals it.
+        }
+      }
+      if (!paneDead) {
+        return {
+          changed: false,
+          hash,
+          filesPushed: [],
+          secretKeysPatched: [],
+          convId: undefined,
+          respawned: false,
+        };
+      }
+      stderr.write(
+        `[remote] ${pod}: creds unchanged but the CLI is down (pane at ${paneCmd || "?"}) — respawning\n`,
+      );
+      const convId = detectNewestConversation(tunnel, pod);
+      const respawned = convId
+        ? respawnPane(tunnel, pod, profile, convId, stderr)
+        : false;
+      if (!convId) {
+        stderr.write(`[remote] no conversation found to resume in ${pod}\n`);
+      }
       return {
         changed: false,
         hash,
         filesPushed: [],
         secretKeysPatched: [],
-        convId: undefined,
-        respawned: false,
+        convId,
+        respawned,
       };
     }
   }
@@ -279,7 +329,24 @@ export async function softRefreshSession(
   stderr.write(`[remote] patched ${secretKeysPatched.length} Secret key(s) (durable across restart)\n`);
 
   // 3. detect the newest conversation in the Pod and respawn the CLI in tmux.
-  const convId = execPod(
+  const convId = detectNewestConversation(tunnel, pod);
+
+  let respawned = false;
+  if (convId) {
+    respawned = respawnPane(tunnel, pod, profile, convId, stderr);
+  } else {
+    stderr.write(`[remote] creds pushed; no conversation found to resume\n`);
+  }
+
+  return { changed: true, hash, filesPushed, secretKeysPatched, convId, respawned };
+}
+
+/** Newest conversation id present in the Pod (claude projects / codex rollouts). */
+function detectNewestConversation(
+  tunnel: TunnelConfig,
+  pod: string,
+): string | undefined {
+  return execPod(
     tunnel,
     pod,
     `ls -t "$HOME"/.claude/projects/*/*.jsonl "$HOME"/.codex/sessions/**/*.jsonl 2>/dev/null | head -1 | xargs -r basename | sed 's/\\.jsonl$//; s/^rollout-//'`,
@@ -287,34 +354,38 @@ export async function softRefreshSession(
     .trim()
     .split("\n")
     .filter(Boolean)[0];
+}
 
-  let respawned = false;
-  if (convId) {
-    const resume = resumeCommand(profile, convId);
-    // Write a relaunch script + respawn the durable tmux pane (drop-to-shell on
-    // exit so the session is never killed). Single-quoted heredoc keeps it intact.
-    const script = [
-      `cat > "$HOME/.remote-relaunch.sh" <<'RL'`,
-      `#!/bin/bash`,
-      `export LANG=C.UTF-8 LC_ALL=C.UTF-8`,
-      `cd "$WORKSPACE_PATH" 2>/dev/null || true`,
-      resume,
-      `printf '\\n[remote] %s exited — shell.\\n' "$0"`,
-      `exec bash -l`,
-      `RL`,
-      `chmod +x "$HOME/.remote-relaunch.sh"`,
-      `tmux respawn-pane -t main -k "$HOME/.remote-relaunch.sh" 2>/dev/null && echo respawned || echo no-tmux`,
-    ].join("\n");
-    const out = execPod(tunnel, pod, script).trim();
-    respawned = out.endsWith("respawned");
-    stderr.write(
-      respawned
-        ? `[remote] relaunched ${profile} (--resume ${convId}) in the Pod's tmux\n`
-        : `[remote] creds pushed but no tmux 'main' to respawn — restart the CLI in the Pod manually\n`,
-    );
-  } else {
-    stderr.write(`[remote] creds pushed; no conversation found to resume\n`);
-  }
-
-  return { changed: true, hash, filesPushed, secretKeysPatched, convId, respawned };
+/**
+ * Write a relaunch script + respawn the durable tmux pane (drop-to-shell on
+ * exit so the session is never killed). Single-quoted heredoc keeps it intact.
+ */
+function respawnPane(
+  tunnel: TunnelConfig,
+  pod: string,
+  profile: string,
+  convId: string,
+  stderr: NodeJS.WriteStream,
+): boolean {
+  const resume = resumeCommand(profile, convId);
+  const script = [
+    `cat > "$HOME/.remote-relaunch.sh" <<'RL'`,
+    `#!/bin/bash`,
+    `export LANG=C.UTF-8 LC_ALL=C.UTF-8`,
+    `cd "$WORKSPACE_PATH" 2>/dev/null || true`,
+    resume,
+    `printf '\\n[remote] %s exited — shell.\\n' "$0"`,
+    `exec bash -l`,
+    `RL`,
+    `chmod +x "$HOME/.remote-relaunch.sh"`,
+    `tmux respawn-pane -t main -k "$HOME/.remote-relaunch.sh" 2>/dev/null && echo respawned || echo no-tmux`,
+  ].join("\n");
+  const out = execPod(tunnel, pod, script).trim();
+  const respawned = out.endsWith("respawned");
+  stderr.write(
+    respawned
+      ? `[remote] relaunched ${profile} (--resume ${convId}) in the Pod's tmux\n`
+      : `[remote] creds pushed but no tmux 'main' to respawn — restart the CLI in the Pod manually\n`,
+  );
+  return respawned;
 }

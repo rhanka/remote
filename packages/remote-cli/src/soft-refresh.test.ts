@@ -31,11 +31,18 @@ const BUNDLE = { ".codex/auth.json": "QkFTRTY0LXZhbHVl" } as const;
 
 const ok = (stdout: string) => ({ status: 0, stdout, stderr: "" });
 
-/** Dispatch kubectl exec scripts; `podHash` is what the Pod's hash file holds. */
-function mockPod(podHash: string): void {
+/**
+ * Dispatch kubectl exec scripts; `podHash` is what the Pod's hash file holds,
+ * `paneCmd` what the tmux pane is running ("bash" = the CLI died).
+ */
+function mockPod(podHash: string, paneProbe = "bash 1"): void {
+  // paneProbe = "<pane_current_command> <child-count>" — "bash 1" is a HEALTHY
+  // relaunched pane (the wrapper script keeps the CLI as its child);
+  // "bash 0" is a dead pane idling at the drop-to-shell.
   spawnSyncMock.mockImplementation((_cmd: string, args: string[]) => {
     const sh = String(args[args.length - 1] ?? "");
     if (sh.startsWith(`cat "$HOME/${CREDS_HASH_FILE}"`)) return ok(podHash);
+    if (sh.includes("pane_current_command")) return ok(`${paneProbe}\n`);
     if (sh.includes("ls -t")) return ok("conv-123\n");
     if (sh.includes("respawn-pane")) return ok("respawned\n");
     return ok("");
@@ -88,11 +95,30 @@ describe("softRefreshSession unchanged-creds gating", () => {
     expect(result.hash).toBe(hash);
     expect(result.filesPushed).toEqual([]);
     expect(result.secretKeysPatched).toEqual([]);
-    // only ONE kubectl call: the Pod hash read — no push, no patch, no respawn
-    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+    // exactly TWO kubectl calls: Pod hash read + liveness probe of the pane —
+    // no push, no patch, no respawn
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
     expect(execScripts().join("\n")).not.toContain("respawn-pane");
     // silent no-op
     expect(stderr.write).not.toHaveBeenCalled();
+  });
+
+  it("skipIfUnchanged + matching Pod hash but DEAD pane: respawns without pushing", async () => {
+    const hash = hashAuthBundle("codex", BUNDLE);
+    mockPod(hash, "bash 0"); // CLI died — pane idling at the drop-to-shell
+    const stderr = fakeStderr();
+
+    const result = await softRefreshSession("sess-1", "codex", {
+      skipIfUnchanged: true,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+    });
+
+    expect(result.changed).toBe(false);
+    expect(result.respawned).toBe(true);
+    expect(result.convId).toBe("conv-123");
+    expect(result.filesPushed).toEqual([]);
+    expect(result.secretKeysPatched).toEqual([]);
+    expect(execScripts().join("\n")).toContain("respawn-pane");
   });
 
   it("skipIfUnchanged + matching previousHash (watch state): skips without touching the Pod", async () => {
