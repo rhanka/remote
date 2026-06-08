@@ -125,6 +125,39 @@ export function findLocalSession(target: string): LocalSession | undefined {
 export type StartLocalResult = { name: string; slug: string };
 
 /**
+ * Make the LOCAL tmux server scroll the conversation on the wheel — same
+ * settings the Pod image bakes into /etc/tmux.conf. Without `mouse on`, the
+ * terminal falls back to alternateScroll (wheel → arrow keys → the CLI's input
+ * history), which reads as "scrolling scrolls the input history". Global,
+ * idempotent, applied at every run/attach so it works even without ~/.tmux.conf
+ * (server options are live: existing sessions pick it up instantly).
+ * Native selection stays available via Shift+drag; OSC52 via set-clipboard.
+ */
+export function ensureScrollConfig(): void {
+  const cmds: ReadonlyArray<ReadonlyArray<string>> = [
+    ["set", "-g", "mouse", "on"],
+    ["set", "-g", "set-clipboard", "on"],
+    ["set", "-g", "focus-events", "on"],
+    [
+      "bind",
+      "-n",
+      "WheelUpPane",
+      "if",
+      "-Ft=",
+      "#{pane_in_mode}",
+      "send-keys -M",
+      "copy-mode -e; send-keys -M",
+    ],
+    ["bind", "-n", "WheelDownPane", "send-keys", "-M"],
+    ["bind", "-n", "PPage", "copy-mode", "-eu"],
+  ];
+  for (const args of cmds) {
+    // Best-effort: no server yet / old tmux must never fail the caller.
+    spawnSync(TMUX, [...args], { stdio: "ignore" });
+  }
+}
+
+/**
  * Start a CLI in a detached local tmux session. Idempotent on name: if a
  * session with the same slug already exists it is reused (returns it). The slug
  * defaults to the workdir basename; pass `label` to override it (e.g. to keep
@@ -139,6 +172,7 @@ export function startLocalSession(
 ): StartLocalResult {
   const slug = slugify(label ?? cwd);
   const name = localSessionName(slug);
+  ensureScrollConfig();
   if (findLocalSession(name)) return { name, slug };
 
   const r = spawnSync(
@@ -274,6 +308,7 @@ export function startH2aWindow(
  * detaches (Ctrl-b d) or the session ends. Returns the tmux exit status.
  */
 export function attachLocalSession(name: string): number {
+  ensureScrollConfig();
   const r = spawnSync(TMUX, ["attach", "-t", name], { stdio: "inherit" });
   return r.status ?? 0;
 }
