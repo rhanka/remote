@@ -1792,10 +1792,22 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         await ensureConnected(remoteUrl);
         // Single-writer guard: the conversation must not stay open locally (or
         // in another pod) while we deport it — stop the local session first
-        // (`remote stop <slug>`), or --force to take over anyway.
-        if (typeof opts.resume === "string") {
+        // (`remote stop <slug>`), or --force to take over anyway. A BARE -r
+        // resumes "the most recent conversation", resolved inside
+        // migrateForward AFTER this point — so resolve the same newest local
+        // conversation HERE (localConvStat on the cwd; claude-family only,
+        // it reads ~/.claude/projects) and guard it exactly like an explicit
+        // convId. No local conversation → nothing to guard (unchanged).
+        const guardConvId =
+          typeof opts.resume === "string"
+            ? opts.resume
+            : opts.resume === true &&
+                coerceCliProfileName(profile) === "claude"
+              ? localConvStat(process.cwd())?.convId
+              : undefined;
+        if (guardConvId !== undefined) {
           const ok = await guardConvWriters({
-            convId: opts.resume,
+            convId: guardConvId,
             cwd: process.cwd(),
             ...(opts.force ? { force: true } : {}),
             fetchRemoteSessions: () => listRemoteSessions(remoteUrl),

@@ -24,6 +24,7 @@ const getDefaultRemote = vi.fn();
 const startLocalSession = vi.fn();
 const migrateForward = vi.fn();
 const migrateBack = vi.fn();
+const localConvStat = vi.fn();
 
 vi.mock("./attach.js", () => ({
   attach: vi.fn(),
@@ -68,6 +69,16 @@ vi.mock("./tmux.js", () => ({
 vi.mock("./migrate.js", () => ({
   migrateForward,
   migrateBack,
+}));
+
+// Controls how a BARE `migrate forward -r` resolves "the most recent local
+// conversation" for the guard — the real localConvStat reads the runner's
+// ~/.claude/projects, which must never leak into the test.
+vi.mock("./convsync.js", () => ({
+  encodeCwd: (cwd: string) => cwd.replace(/\//g, "-"),
+  localConvStat,
+  remoteConvStat: vi.fn(() => undefined),
+  alignment: vi.fn(() => ({ state: "missing", detail: "" })),
 }));
 
 const stderrWrite = vi
@@ -119,6 +130,8 @@ beforeEach(() => {
   startLocalSession.mockReturnValue({ name: "remote-projA", slug: "projA" });
   migrateForward.mockReset();
   migrateBack.mockReset();
+  localConvStat.mockReset();
+  localConvStat.mockReturnValue(undefined);
   stderrWrite.mockClear();
   stdoutWrite.mockClear();
   process.exitCode = 0;
@@ -242,8 +255,76 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     );
   });
 
-  it("does not guard bare --resume (no specific convId to check)", async () => {
+  it("bare --resume guards the resolved most-recent local conversation", async () => {
+    // `-r` without a convId resolves "the most recent conversation" — that
+    // resolution used to happen AFTER the guard, leaving it unprotected.
     getDefaultRemote.mockReturnValue("http://localhost:8080");
+    localConvStat.mockReturnValue({
+      convId: "conv-dup",
+      bytes: 10,
+      lines: 2,
+      sha: "abc",
+    });
+    writeRegistry([liveLocalWriter("conv-dup")]);
+
+    const exitCode = await main([
+      "node", "remote", "migrate", "forward", "claude", "-r",
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(migrateForward).not.toHaveBeenCalled();
+    expect(localConvStat).toHaveBeenCalledWith(process.cwd());
+    expect(stderrText()).toContain(
+      "conversation conv-dup already has a live writer",
+    );
+    expect(stderrText()).toContain("--force");
+  });
+
+  it("bare --resume refuses when a POD already holds the resolved conversation", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    localConvStat.mockReturnValue({
+      convId: "conv-dup",
+      bytes: 10,
+      lines: 2,
+      sha: "abc",
+    });
+    listRemoteSessions.mockResolvedValue([
+      { id: "sess-b", profile: "claude", target: "scaleway-kapsule", createdAt: NOW, cliSessionId: "conv-dup" },
+    ]);
+
+    const exitCode = await main([
+      "node", "remote", "migrate", "forward", "claude", "-r",
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(migrateForward).not.toHaveBeenCalled();
+    expect(stderrText()).toContain("remote stop sess-b");
+  });
+
+  it("bare --resume --force overrides the resolved-conversation guard", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    localConvStat.mockReturnValue({
+      convId: "conv-dup",
+      bytes: 10,
+      lines: 2,
+      sha: "abc",
+    });
+    writeRegistry([liveLocalWriter("conv-dup")]);
+
+    const exitCode = await main([
+      "node", "remote", "migrate", "forward", "claude", "-r", "--force",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(migrateForward).toHaveBeenCalledWith(
+      expect.objectContaining({ profile: "claude", resume: true }),
+    );
+    expect(stderrText()).toContain("--force");
+  });
+
+  it("does not guard bare --resume when there is NO local conversation (unchanged)", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    localConvStat.mockReturnValue(undefined);
     writeRegistry([liveLocalWriter("conv-dup")]);
 
     const exitCode = await main([
