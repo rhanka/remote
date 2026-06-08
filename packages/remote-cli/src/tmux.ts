@@ -366,28 +366,56 @@ export function attachPodTmux(
   // exec'd tmux client — `env LANG=C.UTF-8` (so tmux detects UTF-8) + `tmux -u`
   // (force UTF-8 regardless of detection). (capture-pane never transcodes, which
   // is why a capture test looked fine while the interactive attach showed "_".)
-  const r = spawnSync(
-    "kubectl",
-    [
-      "-n",
-      tunnel.namespace,
-      "exec",
-      "-it",
-      `session-${sessionId}`,
-      "-c",
-      "session-agent",
-      "--",
-      "env",
-      "LANG=C.UTF-8",
-      "LC_ALL=C.UTF-8",
-      "tmux",
-      "-u",
-      "new-session",
-      "-A",
-      "-s",
-      POD_TMUX_SESSION,
-    ],
-    { stdio: "inherit", env },
-  );
-  return r.status ?? 0;
+  const args = [
+    "-n",
+    tunnel.namespace,
+    "exec",
+    "-it",
+    `session-${sessionId}`,
+    "-c",
+    "session-agent",
+    "--",
+    "env",
+    "LANG=C.UTF-8",
+    "LC_ALL=C.UTF-8",
+    "tmux",
+    "-u",
+    "new-session",
+    "-A",
+    "-s",
+    POD_TMUX_SESSION,
+  ];
+  // Long-lived `kubectl exec` streams corrupt over time ("tls: bad record MAC"
+  // / "next reader: local error" from the SPDY/WS executor): the terminal fills
+  // with garbage and the client dies, dumping the user back to their local
+  // shell. The Pod's tmux session SURVIVES that, so we auto-reconnect into it
+  // instead of leaving the user stranded — a clean detach (Ctrl-b d) exits the
+  // tmux client with status 0 and we stop; any non-zero exit is a dropped
+  // stream and we re-exec. If it dies almost instantly several times in a row
+  // the Pod is likely gone, so we give up rather than spin forever.
+  let quickFailures = 0;
+  for (;;) {
+    const startedAt = Date.now();
+    const r = spawnSync("kubectl", args, { stdio: "inherit", env });
+    const status = r.status ?? 0;
+    if (status === 0) return 0; // clean detach/exit
+    const ranMs = Date.now() - startedAt;
+    if (ranMs < 3000) {
+      quickFailures += 1;
+      if (quickFailures >= 5) {
+        process.stderr.write(
+          `[remote] exec attach keeps failing immediately (status ${status}) — the Pod may be gone. ` +
+            `Re-run \`remote attach ${sessionId} --exec\` once it's back.\n`,
+        );
+        return status;
+      }
+    } else {
+      quickFailures = 0; // a real session that ran a while then dropped
+    }
+    process.stderr.write(
+      `[remote] exec stream dropped (status ${status} — e.g. "tls: bad record MAC" on a long kubectl exec). ` +
+        `Your Pod session is intact; reconnecting to its tmux… (Ctrl-C to stop)\n`,
+    );
+    spawnSync("sleep", ["1"], { stdio: "ignore" });
+  }
 }

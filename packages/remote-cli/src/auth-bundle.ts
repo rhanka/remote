@@ -65,7 +65,11 @@ export async function collectProfileAuth(
     try {
       const data = await reader(join(home, relPath));
       const payload =
-        relPath === ".claude.json" ? sanitizeClaudeConfig(data) : Buffer.from(data);
+        relPath === ".claude.json"
+          ? sanitizeClaudeConfig(data)
+          : relPath === ".claude/settings.json"
+            ? sanitizeClaudeSettings(data)
+            : Buffer.from(data);
       bundle[relPath] = payload.toString("base64");
     } catch {
       // missing auth files are skipped silently; the CLI in-Pod will fall back
@@ -89,6 +93,27 @@ function sanitizeClaudeConfig(data: Uint8Array | Buffer): Buffer {
     >;
     delete obj.installMethod;
     delete obj.autoUpdaterStatus;
+    return Buffer.from(JSON.stringify(obj), "utf8");
+  } catch {
+    return Buffer.from(data);
+  }
+}
+
+/**
+ * Strip host/launcher-specific `hooks` from a bundled ~/.claude/settings.json.
+ * `remote enroll --install-hooks` registers SessionStart/SessionEnd hooks that
+ * shell out to the `remote` CLI — which exists on the laptop but NOT inside a
+ * session Pod. Shipping them verbatim makes the in-Pod claude fail every
+ * SessionStart with "SessionStart:resume hook error … /bin/sh: 1: remote: not
+ * found". The hooks are a local-launcher concern, so they never belong in a Pod.
+ */
+function sanitizeClaudeSettings(data: Uint8Array | Buffer): Buffer {
+  try {
+    const obj = JSON.parse(Buffer.from(data).toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    delete obj.hooks;
     return Buffer.from(JSON.stringify(obj), "utf8");
   } catch {
     return Buffer.from(data);
