@@ -68,6 +68,7 @@ import {
   readStdin,
 } from "./enroll.js";
 import { softRefreshSession } from "./soft-refresh.js";
+import { forwardSessionPort } from "./forward.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -1729,6 +1730,51 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             `[remote] not relaunching the Pod CLI — relance la session pour charger : remote refresh ${sessionId} --soft\n`,
           );
         }
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // forward — expose a Pod port locally (UAT/UI control via kubectl port-forward)
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("forward <sessionId> <podPort> [localPort]")
+    .description(
+      "Expose a port of a session Pod on localhost via kubectl port-forward — reach a web UI running in the Pod (UAT/mail control, dev server) at http://localhost:<localPort>. Foreground until Ctrl-C.",
+    )
+    .option("--address <addr>", "local bind address (default 127.0.0.1)")
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(
+      async (
+        sessionId: string,
+        podPort: string,
+        localPort: string | undefined,
+        opts: { address?: string; remote?: string },
+      ) => {
+        const port = Number(podPort);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          process.stderr.write(`[remote] invalid pod port "${podPort}"\n`);
+          process.exitCode = 1;
+          return;
+        }
+        let local: number | undefined;
+        if (localPort !== undefined) {
+          local = Number(localPort);
+          if (!Number.isInteger(local) || local < 1 || local > 65535) {
+            process.stderr.write(`[remote] invalid local port "${localPort}"\n`);
+            process.exitCode = 1;
+            return;
+          }
+        }
+        const url = getConfiguredRemote(opts.remote);
+        await ensureConnected(url);
+        process.exitCode = await forwardSessionPort({
+          sessionId,
+          podPort: port,
+          remoteUrl: url,
+          ...(local !== undefined ? { localPort: local } : {}),
+          ...(opts.address !== undefined ? { address: opts.address } : {}),
+        });
       },
     );
 
