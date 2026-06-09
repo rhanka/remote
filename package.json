@@ -23,9 +23,11 @@
     "uat:laggy": "node e2e/uat-laggy-proxy.mjs",
     "uat:rtt": "node e2e/uat-keystroke-rtt.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "verify": "npm run format && npm run lint && npm run typecheck && npm run build && npm run test"
+    "harness:check": "harness check branch --profile sentropic && harness check scope --profile sentropic",
+    "verify": "npm run harness:check && npm run format && npm run lint && npm run typecheck && npm run build && npm run test"
   },
   "devDependencies": {
+    "@sentropic/harness": "^0.1.1",
     "@types/node": "^22.19.18",
     "prettier": "^3.8.3",
     "typescript": "^6.0.3",
