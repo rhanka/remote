@@ -109,7 +109,7 @@ import {
   type OnConflict,
 } from "./session-restore.js";
 import { run } from "./run.js";
-import { pluginAdd, pluginLs, pluginSync } from "./plugin.js";
+import { pluginAdd, pluginAddInstaller, pluginLs, pluginSync } from "./plugin.js";
 import { smokeRemoteProfile } from "./smoke.js";
 import { migrateForward, migrateBack } from "./migrate.js";
 import {
@@ -167,6 +167,7 @@ export type {
 } from "./migrate.js";
 export {
   pluginAdd,
+  pluginAddInstaller,
   pluginLs,
   pluginSync,
   parseMcpSpec,
@@ -2049,10 +2050,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     );
 
   pluginCommand
-    .command("add <npmPkg>")
+    .command("add <pkgOrName>")
     .description(
-      "npm i -g <npmPkg>, then register its MCP server(s) with claude + codex + agy (Antigravity: merged into ~/.gemini/config/mcp_config.json) and persist the plugin in the remote config. " +
-        "Without --mcp, every bin ending in -mcp is registered (track-mcp -> track). MCPs are registered as `node <realpath>` (never the bare bin: the npm-global symlink breaks some entrypoint guards).",
+      "Register a plugin propagated to sessions. npm (default): `npm i -g <pkg>` + register its MCP server(s) with claude + codex + agy. " +
+        "--curl <url> / --install \"<shell>\": a NON-npm tool, installed in each Pod on sync by piping an https script or running a shell command (e.g. a Go binary's install.sh). " +
+        "Without --mcp, every npm bin ending in -mcp is registered (track-mcp -> track), as `node <realpath>`.",
     )
     .option(
       "--mcp <name=bin>",
@@ -2060,9 +2062,27 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       (value: string, prev: string[]) => [...prev, value],
       [] as string[],
     )
-    .action((npmPkg: string, opts: { mcp: string[] }) => {
-      pluginAdd(npmPkg, opts.mcp);
-    });
+    .option("--curl <url>", "install in Pods via `curl -fsSL <url> | bash` (non-npm)")
+    .option("--install <shell>", "install in Pods by running this shell command (non-npm)")
+    .action(
+      (
+        pkgOrName: string,
+        opts: { mcp: string[]; curl?: string; install?: string },
+      ) => {
+        if (opts.curl !== undefined && opts.install !== undefined) {
+          process.stderr.write("[remote] pass only one of --curl / --install\n");
+          process.exitCode = 1;
+          return;
+        }
+        if (opts.curl !== undefined) {
+          pluginAddInstaller(pkgOrName, { method: "curl", spec: opts.curl });
+        } else if (opts.install !== undefined) {
+          pluginAddInstaller(pkgOrName, { method: "script", spec: opts.install });
+        } else {
+          pluginAdd(pkgOrName, opts.mcp);
+        }
+      },
+    );
 
   pluginCommand
     .command("ls")

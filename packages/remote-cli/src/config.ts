@@ -72,11 +72,26 @@ export type PluginMcp = {
   scriptRel?: string;
 };
 
-/** An npm package installed as an agent plugin (CLI bin(s) + MCP server(s)). */
+/**
+ * How a plugin is installed in a session Pod. Default (omitted) = `npm`
+ * (`npm i -g <pkg>@<version>`). `curl` pipes an installer script
+ * (`curl -fsSL <spec> | bash`) — e.g. a Go binary's install.sh. `script` runs
+ * an arbitrary shell line (from the user's own config). Lets non-npm tools be
+ * propagated the same way.
+ */
+export type PluginInstall = {
+  method: "npm" | "curl" | "script";
+  /** curl: the installer URL; script: the shell command. Unused for npm. */
+  spec?: string;
+};
+
+/** A plugin propagated to sessions (npm pkg, or curl/script installer) + MCP(s). */
 export type PluginEntry = {
   pkg: string;
   version: string;
   mcp: PluginMcp[];
+  /** Install method; omitted ⇒ npm (pkg@version). */
+  install?: PluginInstall;
 };
 
 /**
@@ -180,9 +195,23 @@ function parsePlugins(raw: unknown): PluginEntry[] | undefined {
     const mcp = p.mcp
       .map(parsePluginMcp)
       .filter((m): m is PluginMcp => m !== undefined);
-    plugins.push({ pkg: p.pkg, version: p.version, mcp });
+    const entry: PluginEntry = { pkg: p.pkg, version: p.version, mcp };
+    const install = parsePluginInstall(p.install);
+    if (install) entry.install = install;
+    plugins.push(entry);
   }
   return plugins;
+}
+
+function parsePluginInstall(raw: unknown): PluginInstall | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const i = raw as Record<string, unknown>;
+  if (i.method !== "npm" && i.method !== "curl" && i.method !== "script") {
+    return undefined;
+  }
+  const install: PluginInstall = { method: i.method };
+  if (typeof i.spec === "string") install.spec = i.spec;
+  return install;
 }
 
 // Resolved lazily so tests can redirect the config home via

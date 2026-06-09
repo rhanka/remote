@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PluginEntry } from "./config.js";
 import {
+  buildInstallCommand,
   buildPodSyncScript,
   codexMcpServerBlock,
   detectMcpBins,
@@ -365,5 +366,50 @@ describe("buildPodSyncScript", () => {
     expect(() =>
       buildPodSyncScript({ pkg: "ok", version: "1.0.0'; rm", mcp: [] }, "claude"),
     ).toThrow(/invalid version/);
+  });
+});
+
+describe("buildInstallCommand (install methods)", () => {
+  it("npm (default): npm install -g pkg@version", () => {
+    const r = buildInstallCommand({ pkg: "@sentropic/track", version: "0.10.6", mcp: [] });
+    expect(r.cmd).toBe("npm install -g '@sentropic/track@0.10.6'");
+    expect(r.label).toBe("installed @sentropic/track@0.10.6");
+  });
+
+  it("curl: pipes an https installer", () => {
+    const r = buildInstallCommand({
+      pkg: "agy",
+      version: "installer",
+      mcp: [],
+      install: { method: "curl", spec: "https://antigravity.google/cli/install.sh" },
+    });
+    expect(r.cmd).toBe("curl -fsSL 'https://antigravity.google/cli/install.sh' | bash");
+    expect(r.label).toContain("(curl)");
+  });
+
+  it("curl: rejects a non-https or injection-y url", () => {
+    for (const bad of ["http://x/y", "https://x/y'; rm -rf /", "https://x/y\n", "ftp://x"]) {
+      expect(() =>
+        buildInstallCommand({ pkg: "x", version: "i", mcp: [], install: { method: "curl", spec: bad } }),
+      ).toThrow(/curl install url/);
+    }
+  });
+
+  it("script: runs the user's shell verbatim; empty is rejected", () => {
+    expect(
+      buildInstallCommand({ pkg: "x", version: "i", mcp: [], install: { method: "script", spec: "pipx install foo" } }).cmd,
+    ).toBe("pipx install foo");
+    expect(() =>
+      buildInstallCommand({ pkg: "x", version: "i", mcp: [], install: { method: "script", spec: "  " } }),
+    ).toThrow(/empty script/);
+  });
+
+  it("buildPodSyncScript uses the curl installer for a curl plugin", () => {
+    const s = buildPodSyncScript(
+      { pkg: "agy", version: "installer", mcp: [], install: { method: "curl", spec: "https://antigravity.google/cli/install.sh" } },
+      "claude",
+    );
+    expect(s).toContain("curl -fsSL 'https://antigravity.google/cli/install.sh' | bash");
+    expect(s).toContain('echo "installed agy (curl)"');
   });
 });

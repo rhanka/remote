@@ -36,6 +36,7 @@ import {
   getTunnel,
   setPlugins,
   type PluginEntry,
+  type PluginInstall,
   type PluginMcp,
   type TunnelConfig,
 } from "./config.js";
@@ -63,6 +64,38 @@ function assertSafeName(name: string): void {
 
 function assertSafePkg(pkg: string): void {
   if (!SAFE_PKG.test(pkg)) throw new Error(`invalid npm package name "${pkg}"`);
+}
+
+/**
+ * The shell install command for a plugin + a one-line label. Pure, exported for
+ * tests. npm (default): `npm install -g <pkg>@<ver>`. curl: pipe an https
+ * installer (`curl -fsSL <url> | bash`) — the url is single-quoted and must be
+ * a clean https URL. script: an arbitrary shell line straight from the user's
+ * own config (no extra guard — it is the user's command). Same command runs
+ * locally (pluginAdd) and in the Pod (buildPodSyncScript).
+ */
+export function buildInstallCommand(plugin: PluginEntry): {
+  cmd: string;
+  label: string;
+} {
+  const method = plugin.install?.method ?? "npm";
+  if (method === "npm") {
+    assertSafePkg(plugin.pkg);
+    assertSafeVersion(plugin.version);
+    const spec = `${plugin.pkg}@${plugin.version}`;
+    return { cmd: `npm install -g '${spec}'`, label: `installed ${spec}` };
+  }
+  if (method === "curl") {
+    const url = plugin.install?.spec ?? "";
+    if (!/^https:\/\/[^'"\s]+$/.test(url)) {
+      throw new Error(`invalid curl install url "${url}" (need a clean https URL)`);
+    }
+    return { cmd: `curl -fsSL '${url}' | bash`, label: `installed ${plugin.pkg} (curl)` };
+  }
+  // script: the user's own shell command, run verbatim.
+  const sh = (plugin.install?.spec ?? "").trim();
+  if (!sh) throw new Error(`empty script install for "${plugin.pkg}"`);
+  return { cmd: sh, label: `installed ${plugin.pkg} (script)` };
 }
 
 function assertSafeVersion(version: string): void {
@@ -305,13 +338,11 @@ export function mcpTargetForProfile(
  * Every step echoes one line — the CLI prints them as the per-session recap.
  */
 export function buildPodSyncScript(plugin: PluginEntry, profile: string): string {
-  assertSafePkg(plugin.pkg);
-  assertSafeVersion(plugin.version);
-  const spec = `${plugin.pkg}@${plugin.version}`;
+  const { cmd, label } = buildInstallCommand(plugin);
   const lines: string[] = [
     "set -e",
-    `npm install -g '${spec}' >/dev/null 2>&1`,
-    `echo "installed ${spec}"`,
+    `${cmd} >/dev/null 2>&1`,
+    `echo "${label}"`,
     `ROOT="$(npm root -g)"`,
   ];
   const target = mcpTargetForProfile(profile);
@@ -598,6 +629,28 @@ export function pluginAdd(
   );
   stderr.write(
     `[remote] propagate to live remote sessions with: remote plugin sync\n`,
+  );
+  return entry;
+}
+
+/**
+ * `remote plugin add <name> --curl <url>` / `--install "<shell>"` — register a
+ * NON-npm plugin (a tool installed by piping an https script, or an arbitrary
+ * shell command). No local install is run (unlike the npm path, which must read
+ * the package to detect MCP bins): the installer runs in each Pod on
+ * `remote plugin sync`. Validates the command up front so a bad URL fails now.
+ */
+export function pluginAddInstaller(
+  name: string,
+  install: PluginInstall,
+  stderr: NodeJS.WriteStream = process.stderr,
+): PluginEntry {
+  assertSafePkg(name);
+  const entry: PluginEntry = { pkg: name, version: "installer", mcp: [], install };
+  buildInstallCommand(entry); // throws on a bad curl url / empty script
+  setPlugins([...getPlugins().filter((p) => p.pkg !== name), entry]);
+  stderr.write(
+    `[remote] plugin ${name} (${install.method}) persisted — installs in Pods on \`remote plugin sync\`\n`,
   );
   return entry;
 }
