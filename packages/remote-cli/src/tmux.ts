@@ -106,7 +106,7 @@ export function tmuxAvailable(): boolean {
   }
 }
 
-function slugify(p: string): string {
+export function slugify(p: string): string {
   const base = basename(p).replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/^-+|-+$/g, "");
   return base || "session";
 }

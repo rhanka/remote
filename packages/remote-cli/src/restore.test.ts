@@ -9,6 +9,7 @@ import {
   mergeDiscovered,
   readLastLayout,
   registrySessions,
+  tabCommand,
   writeLastLayout,
   type DiscoveredSession,
 } from "./restore.js";
@@ -171,5 +172,29 @@ describe("layout-last.json", () => {
     expect(last.group).toBeUndefined();
     expect(last.windows[0]!.tabs[0]!.cmd).not.toContain("--resume");
     expect(last.windows[0]!.tabs[0]!.cmd).toContain("--name 'a' --attach");
+  });
+});
+
+describe("tabCommand", () => {
+  it("attaches a SCW session via --exec", () => {
+    expect(tabCommand({ cwd: "/x", label: "surch", remoteId: "sess-1" })).toBe(
+      "remote attach 'sess-1' --exec",
+    );
+  });
+
+  it("runs a local session that is NOT live (create + resume + attach)", () => {
+    expect(
+      tabCommand({ cwd: "/home/u/src/dataviz", label: "dataviz", tool: "codex", sid: "r1" }),
+    ).toBe("remote run 'codex' '/home/u/src/dataviz' --resume 'r1' --name 'dataviz' --attach");
+  });
+
+  it("ATTACHES (not run -r) a local session that is already live — avoids the guard", () => {
+    const live = new Set(["dataviz"]);
+    expect(
+      tabCommand(
+        { cwd: "/home/u/src/dataviz", label: "dataviz", tool: "codex", sid: "r1" },
+        live,
+      ),
+    ).toBe("remote attach 'dataviz'");
   });
 });

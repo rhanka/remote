@@ -26,6 +26,7 @@ import {
   type LayoutConfig,
 } from "./config.js";
 import { listLive, type RegistryEntry } from "./registry.js";
+import { listLocalSessions, slugify } from "./tmux.js";
 
 export type DiscoveredSession = {
   project: string;
@@ -290,12 +291,28 @@ function projLatest(arr: DiscoveredSession[]): number {
   return arr.reduce((m, s) => Math.max(m, s.mtimeMs), 0);
 }
 
-/** Per-tab command: local resume via `remote run`, or SCW via `attach --exec`. */
-function tabCommand(tab: LayoutTab): string {
+/**
+ * Per-tab command: SCW via `attach --exec`; a LOCAL session that is already
+ * live → `remote attach <slug>` (do NOT `remote run -r`, which the single-writer
+ * guard refuses while that session still holds the conversation — this is what
+ * broke a `restore` over still-detached sessions); otherwise create it via
+ * `remote run … --resume … --attach`. `liveSlugs` = slugs of currently-live
+ * local tmux sessions (empty for the reproducible layout snapshot).
+ */
+export function tabCommand(
+  tab: LayoutTab,
+  liveSlugs: ReadonlySet<string> = new Set(),
+): string {
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   if (tab.remoteId) {
     // SCW: attach straight into the Pod's tmux (live, copy-friendly).
     return `remote attach ${q(tab.remoteId)} --exec`;
+  }
+  const slug = slugify(tab.label);
+  if (liveSlugs.has(slug)) {
+    // Already running (e.g. terminals were closed but tmux kept the session):
+    // attach instead of re-running into the guard.
+    return `remote attach ${q(slug)}`;
   }
   return (
     `remote run ${q(tab.tool ?? "shell")} ${q(tab.cwd)} ` +
@@ -335,6 +352,9 @@ export function launchLayout(
   windows: LayoutWindow[],
   stderr: NodeJS.WriteStream = process.stderr,
 ): void {
+  // Sessions already live now: their tabs attach instead of re-running (which
+  // the single-writer guard would refuse).
+  const liveSlugs = new Set(listLocalSessions().map((s) => s.slug));
   for (const win of windows) {
     // Map keyed by per-tab working directory -> the tab's command. Tabs sharing
     // a cwd (several sessions of one project) each claim a distinct line FIFO.
@@ -344,7 +364,8 @@ export function launchLayout(
       `restore-${process.pid}-${slug}-${mapCounter++}.map`,
     );
     const body =
-      win.tabs.map((t) => `${t.cwd}\t${tabCommand(t)}`).join("\n") + "\n";
+      win.tabs.map((t) => `${t.cwd}\t${tabCommand(t, liveSlugs)}`).join("\n") +
+      "\n";
     writeFileSync(mapPath, body, "utf8");
 
     const args: string[] = [];
