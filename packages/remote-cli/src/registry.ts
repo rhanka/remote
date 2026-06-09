@@ -15,6 +15,7 @@
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { uptime } from "node:os";
 import { dirname, join } from "node:path";
 
 import { getLayoutConfig, resolveConfigPath } from "./config.js";
@@ -62,7 +63,16 @@ export type EnrollInput = {
 export type LivenessOpts = {
   tmuxHasSession?: (name: string) => boolean;
   pidAlive?: (pid: number) => boolean;
+  /** System boot time (ms epoch). A `kind:"local"` entry last seen before this
+   * is dead — its process died in the reboot, so its PID must not be trusted
+   * (PID reuse would falsely resurrect it). Injectable for tests. */
+  bootTimeMs?: number;
 };
+
+/** System boot time in ms epoch (now minus uptime). */
+function defaultBootTimeMs(): number {
+  return Date.now() - uptime() * 1000;
+}
 
 type RegistryOpts = LivenessOpts & { path?: string };
 
@@ -213,8 +223,15 @@ export function isLive(e: RegistryEntry, opts: LivenessOpts = {}): boolean {
     return has(e.tmuxSession ?? `remote-${e.id}`);
   }
   if (e.kind === "local") {
-    if (e.pid !== undefined) return (opts.pidAlive ?? defaultPidAlive)(e.pid);
-    return true;
+    if (e.pid === undefined) return true;
+    // A process cannot survive a reboot: if the entry was last seen BEFORE the
+    // machine booted, it is dead — never trust a bare PID across a reboot, as
+    // PID reuse would otherwise falsely report an unrelated live process as the
+    // conversation's writer (this is what blocked ~80% of sessions after a
+    // crash-reboot: their old PIDs had been reassigned).
+    const bootMs = opts.bootTimeMs ?? defaultBootTimeMs();
+    if (Date.parse(e.lastSeenAt) < bootMs) return false;
+    return (opts.pidAlive ?? defaultPidAlive)(e.pid);
   }
   return true;
 }

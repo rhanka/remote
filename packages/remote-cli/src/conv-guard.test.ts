@@ -84,10 +84,29 @@ describe("convOwners", () => {
     const owners = convOwners("conv-1", {
       registryPath: regPath,
       pidAlive: (pid) => pid === 4242,
+      bootTimeMs: 0, // fixed NOW date → treat as post-boot, isolate pid behaviour
     });
     expect(owners).toHaveLength(1);
     expect(owners[0]).toMatchObject({ where: "local" });
     expect(owners[0]!.detail).toContain("pid 4242");
+  });
+
+  it("treats a hook-enrolled local session as DEAD if last seen before boot (PID reuse after reboot)", () => {
+    writeRegistry([
+      entry({
+        id: "uuid-claude-1",
+        kind: "local",
+        convId: "conv-1",
+        pid: 4242,
+        source: "hook",
+      }),
+    ]);
+    const owners = convOwners("conv-1", {
+      registryPath: regPath,
+      pidAlive: () => true, // PID reused by an unrelated live process post-reboot
+      bootTimeMs: Date.now() + 60_000, // entry (NOW) predates this "boot"
+    });
+    expect(owners).toEqual([]); // not a live writer → restore is NOT blocked
   });
 
   it("ignores dead entries, other convIds, the excluded id, and registry remote entries", () => {

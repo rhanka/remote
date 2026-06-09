@@ -78,6 +78,7 @@ export function convOwners(
   const live = listLive({
     ...(opts.tmuxHasSession ? { tmuxHasSession: opts.tmuxHasSession } : {}),
     ...(opts.pidAlive ? { pidAlive: opts.pidAlive } : {}),
+    ...(opts.bootTimeMs !== undefined ? { bootTimeMs: opts.bootTimeMs } : {}),
     ...(opts.registryPath ? { path: opts.registryPath } : {}),
   });
   for (const e of live) {
@@ -162,6 +163,7 @@ export async function guardConvWriters(
     ...(args.registryPath ? { registryPath: args.registryPath } : {}),
     ...(args.tmuxHasSession ? { tmuxHasSession: args.tmuxHasSession } : {}),
     ...(args.pidAlive ? { pidAlive: args.pidAlive } : {}),
+    ...(args.bootTimeMs !== undefined ? { bootTimeMs: args.bootTimeMs } : {}),
   });
   const hard = owners.filter((o) => !o.suspect);
   for (const s of owners.filter((o) => o.suspect)) {

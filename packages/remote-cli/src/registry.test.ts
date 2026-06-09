@@ -146,9 +146,26 @@ describe("registry", () => {
       const live = listLive({
         path: regPath,
         pidAlive: (pid) => pid === 1234,
+        bootTimeMs: 0, // boot at epoch → entries (seen now) are post-boot
       });
       // no-pid local entries are trusted until SessionEnd/prune
       expect(live.map((e) => e.id).sort()).toEqual(["no-pid", "with-pid"]);
+    });
+
+    it("a local entry last seen BEFORE boot is dead even if its PID is now reused", () => {
+      // The crash-reboot case: the process died, but its old PID was reassigned
+      // to an unrelated live process. Without the boot guard, kill(pid,0) would
+      // falsely report it live and the single-writer guard would block restore.
+      enroll(
+        { id: "pre-boot", tool: "claude", kind: "local", cwd: "/x", source: "hook", pid: 1234 },
+        regPath,
+      );
+      const live = listLive({
+        path: regPath,
+        pidAlive: () => true, // PID 1234 is "alive" (reused by another process)
+        bootTimeMs: Date.now() + 60_000, // pretend the machine booted AFTER enrol
+      });
+      expect(live.map((e) => e.id)).toEqual([]); // correctly treated as dead
     });
 
     it("remote entries are always returned (caller reconciles)", () => {
