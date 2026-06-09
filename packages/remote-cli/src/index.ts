@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { Command } from "commander";
@@ -47,6 +47,7 @@ import { syncConversation, type SyncDirection } from "./sync.js";
 import {
   attachLocalSession,
   attachPodTmux,
+  fanoutLabels,
   findLocalSession,
   killLocalSession,
   startH2aWindow,
@@ -2096,6 +2097,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "tmux session slug + tab label (default: workdir basename); use to keep multiple sessions of one project distinct",
     )
     .option(
+      "--count <n>",
+      "fan out N parallel agents (named <base>#1…#N) — run more than the per-project layout cap of claude/codex sessions",
+    )
+    .option(
       "--h2a",
       "also start the h2a MCP server in a side tmux window \"h2a\" (launcher contract: agent reachable/wakeable via ~/h2a-workspace/.h2a); config key `h2a: {enabled, command}` makes it the default",
     )
@@ -2108,6 +2113,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           resume?: string;
           force?: boolean;
           name?: string;
+          count?: string;
           h2a?: boolean;
         },
       ) => {
@@ -2117,6 +2123,24 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           );
           process.exitCode = 1;
           return;
+        }
+        let count = 1;
+        if (opts.count !== undefined) {
+          count = Number(opts.count);
+          if (!Number.isInteger(count) || count < 1) {
+            process.stderr.write(`[remote] --count must be a whole number ≥ 1\n`);
+            process.exitCode = 1;
+            return;
+          }
+          // Fanning out N agents on the SAME conversation = N writers on one
+          // .jsonl (corruption). A fan-out is N FRESH conversations.
+          if (count > 1 && opts.resume) {
+            process.stderr.write(
+              `[remote] --count > 1 cannot combine with -r/--resume (each fanned agent is a fresh conversation; resuming one into N would corrupt it)\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
         }
         const cwd = path ? resolve(path) : process.cwd();
         // Single-writer guard: refuse to resume a conversation another live
@@ -2138,39 +2162,58 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         }
         const command = localCliCommand(profile);
         const args = opts.resume ? localResumeArgs(profile, opts.resume) : [];
-        const { name, slug } = startLocalSession(
-          profile,
-          command,
-          cwd,
-          args,
-          opts.name,
-        );
-        // Auto-enroll in the live-session registry (feeds `remote ls`/`restore`).
-        enrollFromRun({
-          profile,
-          slug,
-          tmuxSession: name,
-          cwd,
-          ...(opts.resume !== undefined ? { convId: opts.resume } : {}),
-        });
-        process.stderr.write(
-          `[remote] local session ${slug} started (${profile}${opts.resume ? ` --resume ${opts.resume}` : ""} in ${cwd})\n`,
-        );
-        // h2a launcher contract (opt-in): --h2a forces it for this run; the
-        // `h2a.enabled` config makes it the default. Never fails the run.
         const h2a = getH2aConfig();
-        if (opts.h2a || h2a.enabled) {
-          if (startH2aWindow(name, cwd, h2a.command)) {
-            process.stderr.write(
-              `[remote] h2a window started in ${slug} (${h2a.command})\n`,
-            );
+        // count==1 keeps the exact prior behaviour (label = opts.name, which may
+        // be undefined → slug derives from cwd). count>1 fans out distinct
+        // labels <base>#k from the name or the cwd basename.
+        const labels: Array<string | undefined> =
+          count > 1
+            ? fanoutLabels(opts.name ?? basename(cwd), count)
+            : [opts.name];
+        const started: Array<{ name: string; slug: string }> = [];
+        for (const label of labels) {
+          const { name, slug } = startLocalSession(
+            profile,
+            command,
+            cwd,
+            args,
+            label,
+          );
+          // Auto-enroll in the live-session registry (feeds `remote ls`/`restore`).
+          enrollFromRun({
+            profile,
+            slug,
+            tmuxSession: name,
+            cwd,
+            ...(opts.resume !== undefined ? { convId: opts.resume } : {}),
+          });
+          started.push({ name, slug });
+          // h2a launcher contract (opt-in): --h2a forces it; `h2a.enabled` makes
+          // it the default. Never fails the run.
+          if (opts.h2a || h2a.enabled) {
+            if (startH2aWindow(name, cwd, h2a.command)) {
+              process.stderr.write(
+                `[remote] h2a window started in ${slug} (${h2a.command})\n`,
+              );
+            }
           }
         }
+        if (count > 1) {
+          process.stderr.write(
+            `[remote] ${started.length} ${profile} agents started in ${cwd}: ${started.map((s) => s.slug).join(", ")}\n` +
+              `[remote] attach one with: remote attach <slug>\n`,
+          );
+          return; // never auto-attach a fleet
+        }
+        const only = started[0]!;
+        process.stderr.write(
+          `[remote] local session ${only.slug} started (${profile}${opts.resume ? ` --resume ${opts.resume}` : ""} in ${cwd})\n`,
+        );
         if (opts.attach) {
-          attachLocalSession(name);
+          attachLocalSession(only.name);
           return;
         }
-        process.stderr.write(`[remote] attach with: remote attach ${slug}\n`);
+        process.stderr.write(`[remote] attach with: remote attach ${only.slug}\n`);
       },
     );
 

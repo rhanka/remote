@@ -58,6 +58,17 @@ export function localRelaunchCommand(
 }
 
 /**
+ * Distinct session labels for a fan-out of `count` parallel agents on one base.
+ * `count <= 1` → just the base (the normal single-session case). `#k` suffixes
+ * keep each tmux session distinct (the slug derives from the label), so you can
+ * run more than the per-project layout cap of parallel claude/codex agents.
+ */
+export function fanoutLabels(base: string, count: number): string[] {
+  if (count <= 1) return [base];
+  return Array.from({ length: count }, (_v, i) => `${base}#${i + 1}`);
+}
+
+/**
  * Same drop-to-shell contract for SIDE windows (h2a, …), but the command is a
  * single configured shell line (quoting preserved via eval), not cli+args.
  * `$0` is a label, `$1` is the command line.

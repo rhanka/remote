@@ -9,6 +9,7 @@ import {
   H2A_WINDOW_NAME,
   LOCAL_WRAPPER,
   buildSessionWindowArgs,
+  fanoutLabels,
   localRelaunchCommand,
   startH2aWindow,
 } from "./tmux.js";
@@ -176,6 +177,20 @@ describe("localRelaunchCommand", () => {
     expect(localRelaunchCommand("codex", "/home/u/src/x", undefined)).toBe(
       "remote run codex /home/u/src/x",
     );
+  });
+});
+
+describe("fanoutLabels", () => {
+  it("returns just the base for count <= 1", () => {
+    expect(fanoutLabels("sentropic", 1)).toEqual(["sentropic"]);
+    expect(fanoutLabels("sentropic", 0)).toEqual(["sentropic"]);
+  });
+  it("suffixes #1…#N for a fan-out", () => {
+    expect(fanoutLabels("sentropic", 3)).toEqual([
+      "sentropic#1",
+      "sentropic#2",
+      "sentropic#3",
+    ]);
   });
 });
 
