@@ -7,10 +7,18 @@ vi.mock("node:child_process", () => ({ spawnSync: spawnSyncMock }));
 
 import {
   H2A_WINDOW_NAME,
+  LOCAL_WRAPPER,
   buildSessionWindowArgs,
   localRelaunchCommand,
   startH2aWindow,
 } from "./tmux.js";
+
+// child_process is mocked module-wide (above); the wrapper regression test needs
+// the REAL spawnSync to actually run bash.
+const { spawnSync: realSpawnSync } =
+  await vi.importActual<typeof import("node:child_process")>(
+    "node:child_process",
+  );
 
 const H2A_CMD = "h2a mcp-serve --auto-open --auto-upgrade --wake local-tmux";
 
@@ -168,5 +176,40 @@ describe("localRelaunchCommand", () => {
     expect(localRelaunchCommand("codex", "/home/u/src/x", undefined)).toBe(
       "remote run codex /home/u/src/x",
     );
+  });
+});
+
+describe("LOCAL_WRAPPER (real bash) — regression: cli runs with its args", () => {
+  // Invoked as `bash -lc WRAPPER <relaunch> <cli> <args…>`: bash puts the FIRST
+  // positional in $0, so the wrapper must read relaunch=$0, cli=$1, shift once.
+  // Reading $1/$2 (the original bug) ran the FIRST CLI ARG as a command —
+  // `--resume: command not found (127)` — dropping every relaunched session to
+  // a shell. stdin is closed so the trailing `exec bash -l` exits at once.
+  function runWrapper(relaunch: string, cli: string, args: string[]) {
+    return realSpawnSync(
+      "bash",
+      ["-lc", LOCAL_WRAPPER, relaunch, cli, ...args],
+      { encoding: "utf8", input: "" },
+    );
+  }
+
+  it("runs `echo --resume CONV` (the resume shape that broke) with both args", () => {
+    const r = runWrapper(
+      "remote run claude /x --name remote -r CONV",
+      "echo",
+      ["--resume", "CONV-abc"],
+    );
+    expect(r.stdout).toContain("--resume CONV-abc"); // echo got BOTH args
+    expect(r.stdout).toContain("echo exited (code 0)");
+    expect(r.stdout).toContain(
+      "relaunch: remote run claude /x --name remote -r CONV",
+    );
+    expect(r.stdout).not.toContain("command not found");
+  });
+
+  it("runs a no-arg CLI cleanly", () => {
+    const r = runWrapper("remote run codex /x", "true", []);
+    expect(r.stdout).toContain("true exited (code 0)");
+    expect(r.stdout).not.toContain("command not found");
   });
 });

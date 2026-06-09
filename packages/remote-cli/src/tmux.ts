@@ -28,9 +28,10 @@ export const POD_TMUX_SESSION = "main";
 /**
  * Persistent-box wrapper (local twin of the Pod one): run the CLI, and when it
  * exits drop into a login shell on the workdir instead of ending the tmux
- * session. `$0` is a label, `$1` is the CLI, the rest are its args.
+ * session. Invoked as `bash -lc WRAPPER <relaunch> <cli> <args…>`, so the FIRST
+ * positional lands in `$0` (the relaunch hint), the CLI in `$1`, args in `$2…`.
  */
-const LOCAL_WRAPPER = `relaunch="$1"; cli="$2"; shift 2
+export const LOCAL_WRAPPER = `relaunch="$0"; cli="$1"; shift
 "$cli" "$@"; code=$?
 printf '\\n[remote] %s exited (code %s) — shell on %s.\\n' "$cli" "$code" "$PWD"
 printf '[remote] relaunch: %s   (or Ctrl-D to end this session)\\n' "$relaunch"
