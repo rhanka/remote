@@ -50,17 +50,21 @@ import {
   fanoutLabels,
   findLocalSession,
   killLocalSession,
+  listLocalSessions,
+  localSessionIdle,
+  relaunchInSession,
   startH2aWindow,
   startLocalSession,
   tmuxAvailable,
 } from "./tmux.js";
+import { planRelaunch } from "./relaunch.js";
 import {
   readLastLayout,
   restore as restoreLayout,
   type RestoreOptions,
 } from "./restore.js";
 import { getLayoutConfig } from "./config.js";
-import { enrollFromRun, listLocalForLs } from "./registry.js";
+import { enrollFromRun, listLocalForLs, loadRegistry } from "./registry.js";
 import { guardConvWriters } from "./conv-guard.js";
 import {
   handleClaudeHook,
@@ -2216,6 +2220,76 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(`[remote] attach with: remote attach ${only.slug}\n`);
       },
     );
+
+  // ---------------------------------------------------------------------------
+  // relaunch — bring idle local sessions back in situ, each resuming its OWN conv
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("relaunch [filter]")
+    .description(
+      "Relaunch the CLI in local tmux sessions whose CLI dropped to a shell, in situ (windows kept), each resuming ITS OWN conversation from the registry. Running sessions are left alone. Dry-run by default; --apply to do it. [filter] = only sessions whose slug contains it.",
+    )
+    .option("--apply", "actually relaunch (default: dry-run, just print the plan)")
+    .action((filter: string | undefined, opts: { apply?: boolean }) => {
+      if (!tmuxAvailable()) {
+        process.stderr.write("[remote] tmux is not installed locally\n");
+        process.exitCode = 1;
+        return;
+      }
+      // slug -> its own convId (local-tmux registry entries; slug is the id).
+      const convBySlug = new Map<string, string>();
+      for (const e of loadRegistry()) {
+        if (e.kind === "local-tmux" && e.convId) convBySlug.set(e.id, e.convId);
+      }
+      const sessions = listLocalSessions().filter(
+        (s) => !filter || s.slug.includes(filter),
+      );
+      const plan = planRelaunch(
+        sessions.map((s) => ({
+          slug: s.slug,
+          name: s.name,
+          profile: s.profile,
+          idle: localSessionIdle(s.name),
+          ...(convBySlug.has(s.slug)
+            ? { convId: convBySlug.get(s.slug)! }
+            : {}),
+        })),
+      );
+      if (plan.actions.length === 0) {
+        process.stderr.write(
+          `[remote] nothing to relaunch${filter ? ` matching "${filter}"` : ""} (${plan.skipped.length} skipped)\n`,
+        );
+        for (const s of plan.skipped) {
+          process.stderr.write(`  - ${s.slug}: ${s.reason}\n`);
+        }
+        return;
+      }
+      if (!opts.apply) {
+        process.stderr.write(
+          `[remote] would relaunch ${plan.actions.length} session(s) — dry-run, pass --apply:\n`,
+        );
+        for (const a of plan.actions) {
+          process.stderr.write(`  ${a.slug}: ${a.cmd}\n`);
+        }
+        for (const s of plan.skipped) {
+          process.stderr.write(`  (skip) ${s.slug}: ${s.reason}\n`);
+        }
+        return;
+      }
+      let ok = 0;
+      for (const a of plan.actions) {
+        if (relaunchInSession(a.name, a.cmd)) {
+          ok += 1;
+          process.stderr.write(`[remote] relaunched ${a.slug}: ${a.cmd}\n`);
+        } else {
+          process.stderr.write(`[remote] FAILED to relaunch ${a.slug}\n`);
+        }
+      }
+      process.stderr.write(
+        `[remote] relaunched ${ok}/${plan.actions.length}${plan.skipped.length ? `, ${plan.skipped.length} skipped` : ""}\n`,
+      );
+    });
 
   // ---------------------------------------------------------------------------
   // h2a — bridge the local agent network (~/h2a-workspace/.h2a) with session Pods

@@ -382,6 +382,47 @@ export function killLocalSession(name: string): boolean {
 }
 
 /**
+ * True when a session's main pane is an IDLE shell (its CLI exited and dropped
+ * to the wrapper's `bash -l`). Idle = pane command is bash/sh AND that pane
+ * process has no child — the relaunch wrapper keeps the CLI as a child of bash,
+ * so `pane_current_command` alone reads "bash" even with a live CLI; the child
+ * count disambiguates. `/proc` scan because the relaunch wrapper context may
+ * lack ps; falls back to ps when /proc is unavailable. Best-effort: on any
+ * doubt returns false (treat as live → never disturbed).
+ */
+export function localSessionIdle(name: string): boolean {
+  const disp = spawnSync(
+    TMUX,
+    ["display", "-p", "-t", name, "#{pane_pid} #{pane_current_command}"],
+    { encoding: "utf8" },
+  );
+  if (disp.status !== 0 || !disp.stdout) return false;
+  const [pidStr, cmd = ""] = disp.stdout.trim().split(/\s+/);
+  if (cmd !== "bash" && cmd !== "sh") return false;
+  const pid = Number(pidStr);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // Count children of the pane shell.
+  const children = spawnSync("bash", [
+    "-lc",
+    `awk -v p="${pid}" '$1=="PPid:" && $2==p {c++} END{print c+0}' /proc/[0-9]*/status 2>/dev/null || ps --ppid ${pid} -o pid= 2>/dev/null | grep -c .`,
+  ], { encoding: "utf8" });
+  const kids = Number((children.stdout ?? "").trim());
+  return Number.isInteger(kids) && kids === 0;
+}
+
+/**
+ * Relaunch a CLI inside an EXISTING session's main pane, in situ: send the
+ * command to the idle shell (it runs at the prompt; when it exits the shell is
+ * still there). Does NOT recreate windows or go through `remote run`/the guard.
+ */
+export function relaunchInSession(name: string, command: string): boolean {
+  const r = spawnSync(TMUX, ["send-keys", "-t", name, command, "Enter"], {
+    stdio: "ignore",
+  });
+  return r.status === 0;
+}
+
+/**
  * Attach the real terminal straight into the Pod's tmux session via
  * `kubectl exec -it`. The local terminal talks to tmux directly (no WS proxy),
  * so scrollback + copy-to-local-clipboard (OSC52) work natively. Requires a
