@@ -92,18 +92,33 @@ const { main } = await import("./index.js");
 
 const NOW = new Date().toISOString();
 
-/** A LIVE local plain-terminal writer on convId (pid = ours, always alive). */
-function liveLocalWriter(convId: string) {
+/**
+ * A hook-enrolled local writer on convId: kind "local", NO pid (the claude
+ * SessionStart hook can't capture claude's pid). Such an entry is UNVERIFIABLE,
+ * so the guard treats it as a SUSPECT (warn) — never a hard block — which is
+ * what stops a crash-stale hook entry from refusing a relaunch forever.
+ */
+function unverifiableLocalWriter(convId: string) {
   return {
     id: "uuid-claude-1",
     tool: "claude",
     kind: "local",
     cwd: "/home/u/src/projA",
     convId,
-    pid: process.pid,
     enrolledAt: NOW,
     lastSeenAt: NOW,
     source: "hook",
+  };
+}
+
+/** A live REMOTE writer (verifiable via cliSessionId) — a HARD block. */
+function liveRemoteWriter(convId: string) {
+  return {
+    id: "sess-b",
+    profile: "claude",
+    target: "scaleway-kapsule",
+    createdAt: NOW,
+    cliSessionId: convId,
   };
 }
 
@@ -143,26 +158,9 @@ afterAll(() => {
 });
 
 describe("remote run -r <conv> single-writer guard", () => {
-  it("refuses when a live local session already holds the conversation", async () => {
-    writeRegistry([liveLocalWriter("conv-dup")]);
-
-    const exitCode = await main([
-      "node", "remote", "run", "claude", "--resume", "conv-dup",
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(startLocalSession).not.toHaveBeenCalled();
-    expect(stderrText()).toContain(
-      "conversation conv-dup already has a live writer",
-    );
-    expect(stderrText()).toContain("--force");
-  });
-
   it("refuses when a live REMOTE session holds the conversation (cliSessionId)", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
-    listRemoteSessions.mockResolvedValue([
-      { id: "sess-b", profile: "claude", target: "scaleway-kapsule", createdAt: NOW, cliSessionId: "conv-dup" },
-    ]);
+    listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "run", "claude", "--resume", "conv-dup",
@@ -173,8 +171,23 @@ describe("remote run -r <conv> single-writer guard", () => {
     expect(stderrText()).toContain("sess-b");
   });
 
-  it("--force overrides the guard with a warning and starts the session", async () => {
-    writeRegistry([liveLocalWriter("conv-dup")]);
+  it("WARNS but PROCEEDS on an unverifiable no-pid local writer (crash-stale hook entry)", async () => {
+    writeRegistry([unverifiableLocalWriter("conv-dup")]);
+
+    const exitCode = await main([
+      "node", "remote", "run", "claude", "--resume", "conv-dup",
+    ]);
+
+    // No hard block: a no-pid hook entry can't be verified, so it must not
+    // refuse the relaunch (this is the crash-recovery fix).
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalled();
+    expect(stderrText()).toContain("make sure it is not resuming");
+  });
+
+  it("--force overrides a hard (remote) block with a warning and starts the session", async () => {
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "run", "claude", "--resume", "conv-dup", "--force",
@@ -187,7 +200,7 @@ describe("remote run -r <conv> single-writer guard", () => {
   });
 
   it("proceeds when the live writer is on a DIFFERENT conversation", async () => {
-    writeRegistry([liveLocalWriter("conv-other")]);
+    writeRegistry([unverifiableLocalWriter("conv-other")]);
 
     const exitCode = await main([
       "node", "remote", "run", "claude", "--resume", "conv-dup",
@@ -196,41 +209,25 @@ describe("remote run -r <conv> single-writer guard", () => {
     expect(exitCode).toBe(0);
     expect(startLocalSession).toHaveBeenCalled();
   });
-
-  it("still guards on the local registry when no remote is configured", async () => {
-    // getDefaultRemote stays undefined -> no remote fetch, local-only guard
-    writeRegistry([liveLocalWriter("conv-dup")]);
-
-    const exitCode = await main([
-      "node", "remote", "run", "claude", "--resume", "conv-dup",
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(listRemoteSessions).not.toHaveBeenCalled();
-  });
 });
 
 describe("remote migrate forward -r <conv> single-writer guard", () => {
-  it("refuses while the conversation is still open locally", async () => {
+  it("WARNS but PROCEEDS on an unverifiable no-pid local writer", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
-    writeRegistry([liveLocalWriter("conv-dup")]);
+    writeRegistry([unverifiableLocalWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "migrate", "forward", "claude", "-r", "conv-dup",
     ]);
 
-    expect(exitCode).toBe(1);
-    expect(migrateForward).not.toHaveBeenCalled();
-    expect(stderrText()).toContain(
-      "conversation conv-dup already has a live writer",
-    );
+    expect(exitCode).toBe(0);
+    expect(migrateForward).toHaveBeenCalled();
+    expect(stderrText()).toContain("make sure it is not resuming");
   });
 
   it("refuses when ANOTHER pod already holds the conversation", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
-    listRemoteSessions.mockResolvedValue([
-      { id: "sess-b", profile: "claude", target: "scaleway-kapsule", createdAt: NOW, cliSessionId: "conv-dup" },
-    ]);
+    listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "migrate", "forward", "claude", "-r", "conv-dup",
@@ -241,9 +238,9 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     expect(stderrText()).toContain("remote stop sess-b");
   });
 
-  it("--force overrides and proceeds with the migration", async () => {
+  it("--force overrides a hard (remote) block and proceeds with the migration", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
-    writeRegistry([liveLocalWriter("conv-dup")]);
+    listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "migrate", "forward", "claude", "-r", "conv-dup", "--force",
@@ -255,9 +252,9 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     );
   });
 
-  it("bare --resume guards the resolved most-recent local conversation", async () => {
+  it("bare --resume resolves the most-recent local conversation and guards it (POD holds it → refuse)", async () => {
     // `-r` without a convId resolves "the most recent conversation" — that
-    // resolution used to happen AFTER the guard, leaving it unprotected.
+    // resolution must happen BEFORE the guard. A POD holding it is a HARD block.
     getDefaultRemote.mockReturnValue("http://localhost:8080");
     localConvStat.mockReturnValue({
       convId: "conv-dup",
@@ -265,7 +262,7 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
       lines: 2,
       sha: "abc",
     });
-    writeRegistry([liveLocalWriter("conv-dup")]);
+    listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "migrate", "forward", "claude", "-r",
@@ -274,30 +271,6 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     expect(exitCode).toBe(1);
     expect(migrateForward).not.toHaveBeenCalled();
     expect(localConvStat).toHaveBeenCalledWith(process.cwd());
-    expect(stderrText()).toContain(
-      "conversation conv-dup already has a live writer",
-    );
-    expect(stderrText()).toContain("--force");
-  });
-
-  it("bare --resume refuses when a POD already holds the resolved conversation", async () => {
-    getDefaultRemote.mockReturnValue("http://localhost:8080");
-    localConvStat.mockReturnValue({
-      convId: "conv-dup",
-      bytes: 10,
-      lines: 2,
-      sha: "abc",
-    });
-    listRemoteSessions.mockResolvedValue([
-      { id: "sess-b", profile: "claude", target: "scaleway-kapsule", createdAt: NOW, cliSessionId: "conv-dup" },
-    ]);
-
-    const exitCode = await main([
-      "node", "remote", "migrate", "forward", "claude", "-r",
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(migrateForward).not.toHaveBeenCalled();
     expect(stderrText()).toContain("remote stop sess-b");
   });
 
@@ -309,7 +282,7 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
       lines: 2,
       sha: "abc",
     });
-    writeRegistry([liveLocalWriter("conv-dup")]);
+    listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "migrate", "forward", "claude", "-r", "--force",
@@ -325,7 +298,7 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
   it("does not guard bare --resume when there is NO local conversation (unchanged)", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
     localConvStat.mockReturnValue(undefined);
-    writeRegistry([liveLocalWriter("conv-dup")]);
+    writeRegistry([unverifiableLocalWriter("conv-dup")]);
 
     const exitCode = await main([
       "node", "remote", "migrate", "forward", "claude", "-r",

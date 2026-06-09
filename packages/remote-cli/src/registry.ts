@@ -67,6 +67,8 @@ export type LivenessOpts = {
    * is dead — its process died in the reboot, so its PID must not be trusted
    * (PID reuse would falsely resurrect it). Injectable for tests. */
   bootTimeMs?: number;
+  /** cmdline of a pid (to detect PID reuse after a crash). Injectable for tests. */
+  processCmdline?: (pid: number) => string | undefined;
 };
 
 /** System boot time in ms epoch (now minus uptime). */
@@ -208,6 +210,39 @@ function defaultPidAlive(pid: number): boolean {
 }
 
 /**
+ * The cmdline of a live pid (NUL-separated args joined with spaces), or
+ * undefined when it can't be read. Used to detect PID REUSE: after a crash the
+ * CLI's pid may be reassigned to an unrelated process, which `kill(pid,0)`
+ * still reports as alive. /proc is Linux-only; elsewhere this returns undefined
+ * and the caller stays conservative (treats the pid as still ours).
+ */
+function defaultProcessCmdline(pid: number): string | undefined {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Does the process at `pid` look like the `tool` CLI? Reads its cmdline and
+ * checks for the tool name. CONSERVATIVE on doubt: if the cmdline can't be read
+ * (non-Linux, permissions) we return true (assume it is still ours) so the
+ * single-writer guard never DROPS a real writer (which would risk two CLIs
+ * corrupting one .jsonl). Only a readable cmdline that clearly isn't the tool
+ * (a reused pid) returns false.
+ */
+function processIsTool(
+  pid: number,
+  tool: RegistryTool,
+  read: (pid: number) => string | undefined,
+): boolean {
+  const cmd = read(pid);
+  if (cmd === undefined) return true; // can't tell → assume still ours
+  return cmd.includes(tool);
+}
+
+/**
  * Liveness:
  *  - local-tmux -> the tmux session exists,
  *  - local      -> pid alive (when recorded) AND not endedAt; without a pid
@@ -223,15 +258,24 @@ export function isLive(e: RegistryEntry, opts: LivenessOpts = {}): boolean {
     return has(e.tmuxSession ?? `remote-${e.id}`);
   }
   if (e.kind === "local") {
-    if (e.pid === undefined) return true;
-    // A process cannot survive a reboot: if the entry was last seen BEFORE the
-    // machine booted, it is dead — never trust a bare PID across a reboot, as
-    // PID reuse would otherwise falsely report an unrelated live process as the
-    // conversation's writer (this is what blocked ~80% of sessions after a
-    // crash-reboot: their old PIDs had been reassigned).
+    // A process cannot survive a reboot: an entry last seen BEFORE the machine
+    // booted is dead, whether or not it carries a pid.
     const bootMs = opts.bootTimeMs ?? defaultBootTimeMs();
     if (Date.parse(e.lastSeenAt) < bootMs) return false;
-    return (opts.pidAlive ?? defaultPidAlive)(e.pid);
+    // No pid (the claude SessionStart hook can't reliably capture claude's pid):
+    // unverifiable. Treat as live here, but convOwners demotes a no-pid local
+    // entry to a SUSPECT (warn), not a hard block — so a stale hook entry left
+    // by a crash never refuses a relaunch.
+    if (e.pid === undefined) return true;
+    if (!(opts.pidAlive ?? defaultPidAlive)(e.pid)) return false;
+    // pid alive — but is it STILL our CLI? After a crash the dead CLI's pid can
+    // be reassigned to an unrelated process that kill(pid,0) reports as alive;
+    // verify the process identity to avoid a false live-writer.
+    return processIsTool(
+      e.pid,
+      e.tool,
+      opts.processCmdline ?? defaultProcessCmdline,
+    );
   }
   return true;
 }

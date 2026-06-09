@@ -63,6 +63,11 @@ function ownerFromEntry(e: RegistryEntry): ConvOwner {
     where: "local",
     label: e.label ?? e.id.slice(0, 12),
     detail: `local ${e.tool} process${e.pid !== undefined ? ` (pid ${e.pid})` : ""} in ${e.cwd} — exit that CLI first`,
+    // A no-pid hook entry is UNVERIFIABLE (no process to probe): a crash leaves
+    // it "live" forever. Demote it to a SUSPECT (warn) so it never hard-blocks
+    // a relaunch; only verifiable writers (live tmux / pid+cmdline / remote)
+    // refuse. A pid'd entry that reached here passed the liveness check → hard.
+    ...(e.pid === undefined ? { suspect: true } : {}),
   };
 }
 
@@ -79,6 +84,7 @@ export function convOwners(
     ...(opts.tmuxHasSession ? { tmuxHasSession: opts.tmuxHasSession } : {}),
     ...(opts.pidAlive ? { pidAlive: opts.pidAlive } : {}),
     ...(opts.bootTimeMs !== undefined ? { bootTimeMs: opts.bootTimeMs } : {}),
+    ...(opts.processCmdline ? { processCmdline: opts.processCmdline } : {}),
     ...(opts.registryPath ? { path: opts.registryPath } : {}),
   });
   for (const e of live) {
@@ -164,6 +170,7 @@ export async function guardConvWriters(
     ...(args.tmuxHasSession ? { tmuxHasSession: args.tmuxHasSession } : {}),
     ...(args.pidAlive ? { pidAlive: args.pidAlive } : {}),
     ...(args.bootTimeMs !== undefined ? { bootTimeMs: args.bootTimeMs } : {}),
+    ...(args.processCmdline ? { processCmdline: args.processCmdline } : {}),
   });
   const hard = owners.filter((o) => !o.suspect);
   for (const s of owners.filter((o) => o.suspect)) {
