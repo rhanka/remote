@@ -140,25 +140,32 @@ Spawn + h2a transport mocked. No real cluster in tests.
 The opus review found three blocking flaws in the first draft; they reshape the
 plan. (Codex 5.5-high review routed via h2a — folded in when it lands.)
 
-### Decisive corrections
-- **F1 — kill the interactive h2a decision-loop from the core.** A headless
-  `claude -p` / `codex exec` does NOT poll a file inbox nor block awaiting a
-  reply; `awaiting-decision` has no realistic producer. → **fire-and-report**:
-  a job that needs a decision **exits with `state:needs-decision` + the question
-  in its result**; the conductor **starts a NEW job** with the answer injected
-  into the task. No blocking, no inbox-read, no resume. The interactive feedback
-  loop (§5) is **demoted to P5 (exploratory)**.
-- **F2 — the queue needs a live driver.** A one-shot CLI can't start queued jobs
-  when a slot frees. A daemon violates the repo's no-service philosophy. →
-  **conductor = a foreground tmux watch loop** (`remote jobs conduct --watch`),
-  the SAME pattern as `h2a bridge --watch` / `watchRefreshLoop`: each pass
-  reconciles jobs vs cluster, consumes finished jobs, starts `pending` jobs under
-  the cap.
-- **F3 — "subPath = free isolation" is false.** Scaleway File Storage CSI =
-  **one volume attach per node** (`spec.ts:108`); N per-job workspaces = N
-  subdirs with quota/scheduling cost + collision with `workspace gc`. →
-  **default-16 concurrency is LOCAL-only**; **remote starts sequential (cap
-  1–2)** on a shared workspace until the File Storage quota/attach math is done.
+### Decisive corrections (opus review + user corrections 2026-06-09)
+- **F1 — RESOLVED by running agents INTERACTIVE in tmux, not headless (user's
+  call).** The default is a **live claude/codex/agy session in tmux** primed with
+  the task, with the **h2a MCP server in a side window** (the existing
+  `remote run --h2a` pattern). Because the agent is interactive and holds the
+  h2a MCP tool, the **parent/master feedback loop IS realistic**: the agent can
+  read its h2a inbox (MCP `h2a_inbox`) and respond to a `decision.reply` — opus's
+  "headless can't poll/block" objection only applied to headless. So the
+  feedback loop stays **core (default)**. **Headless** (`claude -p`/`codex exec`,
+  fire-and-report, run-once-exit) becomes an **`--headless` OPTION** for pure
+  batch jobs.
+- **F2 — the queue needs a live driver (stands).** A one-shot CLI can't start
+  queued jobs when a slot frees; a daemon violates the repo's no-service
+  philosophy. → **conductor = a foreground tmux watch loop**
+  (`remote jobs conduct --watch`), same pattern as `h2a bridge --watch` /
+  `watchRefreshLoop`: each pass reconciles jobs vs cluster, consumes finished
+  jobs, starts `pending` jobs under the cap.
+- **F3 — CORRECTED: the "1 volume attach per node" constraint was WRONG.** Per
+  the official scaleway-filestorage-csi docs, a **RWX volume can be mounted
+  read-write by MANY nodes**. The real (observed) limit was on the number of
+  **DISTINCT** File Storage volumes per node (the old 1-PVC-per-workspace model).
+  Our model is **ONE shared RWX volume, subPath per workspace/job** → mounted RW
+  across all nodes, **no concurrency/packing limit**. → **default-16 concurrency
+  applies LOCAL *and* REMOTE** (remote jobs are isolated by distinct subPaths on
+  the one shared RWX volume), as originally asked. (Earlier sessions
+  hallucinated the per-node attach cap; corrected in `project-remote-rwx-shared`.)
 
 ### Other required changes
 - **Extend `RegistryEntry` (role:"job"), do NOT add a second `jobs.json`.** A job
@@ -186,21 +193,24 @@ plan. (Codex 5.5-high review routed via h2a — folded in when it lands.)
 - **agy headless unconfirmed** (R3): cross-type may ship as claude+codex headless
   + agy interactive-only until an agy headless mode is verified.
 
-### Revised phasing
-- **P1 (do first — zero risky parts): LOCAL fire-and-report on the extended
-  registry.** `remote delegate <type> "<task>" [--cwd|worktree] [--name]` →
-  git-worktree isolation + `claude -p` / `codex exec` in a detached tmux
-  **run-once-exit** wrapper (stdout→`output.log`, write `result.json`, end
-  session); extend `RegistryEntry` (role:"job"); `remote jobs ls/status/logs/
-  attach`; task as argv, name via `assertSafeName`. **No h2a, no reactive cap.**
-  Delivers the real value: supervised, isolated, result-recoverable local
-  fan-out of N headless agents.
-- **P2 — REMOTE delegation** via `createRemoteSession({startupArgs})` (safe
-  channel) + cluster reconciliation (`listRemoteSessions` → dead pod = failed);
-  shared workspace, **sequential** (cap 1–2) until CSI quota is assessed.
-- **P3 — callback** (`job.done`) via claude Stop/SessionEnd hook + h2a transport,
-  only after choosing a reliable-delivery mechanism.
+### Revised phasing (interactive-tmux default, per user)
+- **P1 (do first): LOCAL interactive delegation on the extended registry.**
+  `remote delegate <type> "<task>" [--cwd|worktree] [--name] [--headless]` →
+  a **live tmux agent** (claude/codex/agy) primed with `<task>` (task as a single
+  argv, never shell-concat), in its own **git worktree** (local file-tree
+  isolation; the single-writer guard only protects the `.jsonl`), with the
+  **`--h2a` side-window** so the parent/master dialogue works. Register as a job
+  by **extending `RegistryEntry` (role:"job")**: `jobState`, `parent?`, `task`.
+  `remote jobs ls/status/attach/logs`. `--headless` = run-once-exit wrapper
+  (stdout→`output.log`, `result.json`, end session) for batch. `--name`/jobId via
+  `assertSafeName`.
+- **P2 — REMOTE delegation** via `createRemoteSession({startupArgs})` (safe argv
+  channel) on the shared RWX volume (subPath per job — **concurrent**, no CSI
+  limit) + cluster reconciliation (`listRemoteSessions` → dead pod ⇒ failed,
+  since registry `kind:remote` isLive is always-true).
+- **P3 — callback + feedback** over h2a: `job.done` on the claude Stop/SessionEnd
+  hook; `decision.requested`/`decision.reply` round-trip via the h2a MCP
+  side-window + `h2a bridge`.
 - **P4 — conductor** `jobs conduct --watch` (foreground tmux) + concurrency cap
-  (16 local) + queue + optional track mirroring.
-- **P5 (exploratory) — interactive decision feedback loop** (the original §5),
-  only if a realistic headless-agent inbox-read/resume mechanism is found.
+  (**16, local AND remote**) + queue + `--max-depth` (1–3) + track mirroring
+  (job graph = backlog).
