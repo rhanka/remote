@@ -5,6 +5,38 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.1 — 2026-06-10
+
+Headline: **cross-type async delegation** — `remote` can now delegate an agent
+of any type (claude/codex/agy) into a tmux session, local **or** on a Pod,
+supervise it, and close the loop when it finishes.
+
+- **`remote delegate <type> "<task>"`** `[--remote] [--headless] [--name]
+  [--cwd] [--parent] [--on-done] [--max-concurrent N (default 16)]
+  [--max-depth] [--track]` — spawns a claude/codex/agy agent that lives in an
+  attachable tmux session (interactive by default; `--headless` runs-once-exits).
+  Task payload is passed as argv, never concatenated into `bash -lc`.
+- **`remote jobs ls|status|attach|logs|decisions|decide|conduct`** — a job
+  registry (`role:"job"`, jobState pending→running→done|failed) with liveness
+  guards (tmux has-session, pid+/proc cmdline, boot-time guard) and a
+  foreground conductor watch loop (`conduct`) — not a daemon.
+- **h2a callback**: a finished job emits a signed `job.done` envelope; the
+  parent/conductor reconciles via the claude hook (`REMOTE_JOB_ID`) and by
+  reading `result.json` under the job's `originCwd`. Decision channel
+  (`decisions`/`decide`) shipped **EXPERIMENTAL** (relies on the agent polling
+  its h2a inbox).
+- **`remote conductor-launch`** `[--confirm] [--watch <min>] [--cooldown <min>]`
+  — handler for h2a's `conductor-launch-request` contract: when h2a reports a
+  workspace with stalled work and no live conductor, this launches one via the
+  delegation path (host = first available of `hostPref`), idempotently (dedup on
+  a deterministic conductor slug + best-effort `h2a discover`), gated by
+  `--confirm`, with a per-workspace cooldown (default 30 min).
+- **Hardening** (from the a2a-cli adversarial review): registry mutations
+  serialized under `flock` with an atomic check-cap+enroll; `job.done`/
+  `decision.reply` envelopes authenticated on `actor.instance`; stale-job sweep;
+  remote delegation depth clamped. Job result read at `originCwd` (was process
+  cwd → false failures). 449 tests.
+
 ## v0.5.0 — 2026-06-07
 
 Headline: **the launcher grows up** — real live-session registry instead of
