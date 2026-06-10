@@ -5,6 +5,25 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.2 — 2026-06-10
+
+Headline: **skills follow the session to the Pod** — remote claude sessions now
+get the same Claude Code skills & plugins as local ones.
+
+- **`remote plugin sync-skills`** `[--pod <name>|--all] [--dry-run] [--remote <url>]`
+  — propagates the local Claude Code skill/plugin state into a Pod's
+  `$HOME/.claude/` so delegated/remote claude sessions have the same
+  capabilities (superpowers, track, the h2a skill, graphify, sent-tech-design).
+  Deterministic "copy the resolved cache" approach (the marketplace-reinstall
+  fork is documented but not the default).
+- **Whitelist-only, never leaks auth**: transfers exactly `.claude/skills`,
+  `.claude/plugins/{installed_plugins.json,marketplaces,cache}` and nothing
+  else — `settings.json`, `.credentials.json`, `~/.claude.json`, `projects/`
+  are explicitly excluded (asserted by tests). Archive rides stdin
+  (`tar -c … | kubectl exec -i -- tar -x`); no path/content ever interpolated
+  into a `bash -lc` string. `--all` enumerates running session Pods; `--dry-run`
+  prints the plan and transfers nothing. 469 tests.
+
 ## v0.5.1 — 2026-06-10
 
 Headline: **cross-type async delegation** — `remote` can now delegate an agent
