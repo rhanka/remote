@@ -5,6 +5,22 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.3 — 2026-06-10
+
+Headline: **remote fan-out** — launch a fleet of N concurrent remote sessions
+in one command, each on its own workspace subPath of the shared RWX volume.
+
+- **`remote <profile> --remote --count N [--name <base>]`** (claude/codex/agy/
+  opencode/shell) — creates N concurrent remote session Pods named `<base>-NN`,
+  each with its OWN `createWorkspace` → distinct `subPath` on the ONE shared
+  RWX File-Storage volume (never one PVC per session; RWX mounts RW on many
+  nodes, so N concurrent pods is fine). Prints a `NAME/SESSION/WORKSPACE/STATUS`
+  table; never auto-attaches a fleet. `--count 1` is a byte-for-byte passthrough.
+- Bounded-concurrent creation, cap `DEFAULT_FANOUT_MAX = 16` (mirrors the
+  delegation default). `--count>1` rejects `--resume`/`--sync`/mapped-workspace;
+  dead Pods drop off the live list via the existing `listRemoteSessions`
+  reconciliation. 487 tests.
+
 ## v0.5.2 — 2026-06-10
 
 Headline: **skills follow the session to the Pod** — remote claude sessions now

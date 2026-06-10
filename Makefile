@@ -2,8 +2,8 @@ SHELL := /bin/bash
 
 CLUSTER ?= sentropic-remote
 NAMESPACE ?= sentropic-remote
-CONTROL_PLANE_IMAGE ?= ghcr.io/rhanka/sentropic-remote-control-plane:v0.5.2
-SESSION_AGENT_IMAGE ?= ghcr.io/rhanka/sentropic-remote-session-agent:v0.5.2
+CONTROL_PLANE_IMAGE ?= ghcr.io/rhanka/sentropic-remote-control-plane:v0.5.3
+SESSION_AGENT_IMAGE ?= ghcr.io/rhanka/sentropic-remote-session-agent:v0.5.3
 PORT ?= 8080
 
 .PHONY: help install build typecheck test verify format format-write \
