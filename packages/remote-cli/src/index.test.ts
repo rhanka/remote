@@ -221,6 +221,164 @@ describe("main", () => {
     );
   });
 
+  describe("WP6 — remote fan-out (--count N)", () => {
+    it("--count N creates N sessions, each on its OWN workspace (distinct subPath), and never auto-attaches", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      let wsN = 0;
+      createWorkspace.mockImplementation(async () => ({
+        id: `ws-${++wsN}`,
+        createdAt: "now",
+      }));
+      let sessN = 0;
+      createRemoteSession.mockImplementation(async () => ({
+        id: `sess-${++sessN}`,
+      }));
+
+      const exitCode = await main([
+        "node",
+        "remote",
+        "codex",
+        "--remote",
+        "http://localhost:8080",
+        "--count",
+        "3",
+        "--name",
+        "fleet",
+      ]);
+
+      expect(exitCode).toBe(0);
+      // One workspace per member → N distinct subPaths on the shared RWX volume.
+      expect(createWorkspace).toHaveBeenCalledTimes(3);
+      expect(createWorkspace.mock.calls.map((c) => c[1].displayName)).toEqual([
+        "fleet-1",
+        "fleet-2",
+        "fleet-3",
+      ]);
+      expect(createRemoteSession).toHaveBeenCalledTimes(3);
+      // Each session is bound to its own server-assigned workspaceId.
+      const wsIds = createRemoteSession.mock.calls.map((c) => c[1].workspaceId);
+      expect(new Set(wsIds).size).toBe(3);
+      expect(createRemoteSession.mock.calls.map((c) => c[1].displayName)).toEqual([
+        "fleet-1",
+        "fleet-2",
+        "fleet-3",
+      ]);
+      // A fleet is never auto-attached (no single terminal to take over).
+      expect(attach).not.toHaveBeenCalled();
+    });
+
+    it("--count 1 is the unchanged single-session path (no workspace fan-out, attaches)", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      const exitCode = await main([
+        "node",
+        "remote",
+        "codex",
+        "--remote",
+        "http://localhost:8080",
+        "--count",
+        "1",
+      ]);
+
+      expect(exitCode).toBe(0);
+      expect(createWorkspace).not.toHaveBeenCalled();
+      expect(createRemoteSession).toHaveBeenCalledTimes(1);
+      expect(attach).toHaveBeenCalledTimes(1);
+    });
+
+    it("--count > 1 is rejected without a remote (it is a REMOTE fan-out)", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      run.mockResolvedValue({
+        sessionId: "sess-local",
+        port: 1,
+        exit: Promise.resolve({ exitCode: 0 }),
+      });
+      const exitCode = await main([
+        "node",
+        "remote",
+        "codex",
+        "--local",
+        "--count",
+        "2",
+      ]);
+
+      expect(exitCode).toBe(1);
+      expect(run).not.toHaveBeenCalled();
+      const err = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(err).toContain("REMOTE fan-out");
+    });
+
+    it("--count > 1 cannot combine with --resume (fresh convs on distinct workspaces)", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      const exitCode = await main([
+        "node",
+        "remote",
+        "codex",
+        "--remote",
+        "http://localhost:8080",
+        "--count",
+        "2",
+        "--resume",
+        "conv-x",
+      ]);
+
+      expect(exitCode).toBe(1);
+      expect(createRemoteSession).not.toHaveBeenCalled();
+      const err = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(err).toContain("--count > 1 cannot combine with -r/--resume");
+    });
+
+    it("--count > 1 cannot combine with --sync", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      const exitCode = await main([
+        "node",
+        "remote",
+        "codex",
+        "--remote",
+        "http://localhost:8080",
+        "--count",
+        "2",
+        "--sync",
+      ]);
+
+      expect(exitCode).toBe(1);
+      expect(createRemoteSession).not.toHaveBeenCalled();
+      const err = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(err).toContain("--count > 1 cannot combine with --sync");
+    });
+
+    it("a single failed member sets exit 1 but still creates the rest", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      let wsN = 0;
+      createWorkspace.mockImplementation(async () => ({
+        id: `ws-${++wsN}`,
+        createdAt: "now",
+      }));
+      let sessN = 0;
+      createRemoteSession.mockImplementation(async () => {
+        sessN += 1;
+        if (sessN === 2) throw new Error("control-plane 503");
+        return { id: `sess-${sessN}` };
+      });
+
+      const exitCode = await main([
+        "node",
+        "remote",
+        "codex",
+        "--remote",
+        "http://localhost:8080",
+        "--count",
+        "3",
+        "--name",
+        "fleet",
+      ]);
+
+      expect(exitCode).toBe(1);
+      expect(createRemoteSession).toHaveBeenCalledTimes(3);
+      const out = stdoutWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("FAILED");
+    });
+  });
+
   it("accepts --target on remote profile commands and forwards it to session creation", async () => {
     const exitCode = await main([
       "node",

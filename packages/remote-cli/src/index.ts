@@ -110,6 +110,12 @@ import {
   type DelegateType,
 } from "./delegate.js";
 import {
+  DEFAULT_FANOUT_MAX,
+  mapWithConcurrency,
+  planRemoteFanout,
+  type RemoteFanoutMember,
+} from "./fanout.js";
+import {
   authenticateJobEnvelopes,
   buildDecisionReply,
   dropEnvelope,
@@ -261,6 +267,10 @@ type ProfileOpts = {
   authRefresh?: boolean;
   sync?: boolean;
   workspaceId?: string;
+  /** WP6 — fan out N concurrent REMOTE sessions (each on its own RWX subPath). */
+  count?: number;
+  /** Base label for the fan-out fleet names (default: cwd basename). */
+  name?: string;
 };
 
 type ProfileCliOpts = ProfileOpts & {
@@ -296,11 +306,98 @@ function resumeStartupArgs(profileName: string, resume: string | true): string[]
   return resumeArgsFor(resolveProfile(profileName), resume);
 }
 
+/**
+ * WP6 — REMOTE fan-out: create N concurrent remote sessions, each on its OWN
+ * workspace subPath of the ONE shared RWX volume (each member does its own
+ * `createWorkspace` → distinct server-assigned workspaceId → distinct subPath;
+ * NEVER one PVC per session). The same credential bundle is reused across the
+ * fleet (one auth). Creation is bounded-concurrent (cap = the fleet size,
+ * itself <= DEFAULT_FANOUT_MAX). NEVER auto-attaches — a fleet has no single
+ * terminal to take over; prints a summary table and the per-session attach
+ * hints, mirroring the LOCAL `remote run --count` contract. Reconcile/cleanup
+ * of dead members reuses the existing `remote ls`/`jobs` reconciliation against
+ * `listRemoteSessions` (a dead Pod simply drops off the live list). Returns the
+ * created (id,name) pairs; throws only on a setup error before fan-out.
+ */
+async function startRemoteFanout(
+  remote: string,
+  profileName: string,
+  members: ReadonlyArray<RemoteFanoutMember>,
+  spec: {
+    target: ProfileOpts["target"];
+    startupArgs: readonly string[];
+    credentials?: Readonly<Record<string, string>>;
+  },
+): Promise<void> {
+  const target = spec.target ?? getDefaultTarget();
+  // Bound the creation burst by the fleet size (already <= the fan-out cap).
+  const results = await mapWithConcurrency(
+    members,
+    members.length,
+    async (member) => {
+      // Each member gets its OWN workspace → its OWN subPath on the shared RWX
+      // volume (server assigns the workspaceId). This is the single-session
+      // wiring repeated N times, never a shared tree.
+      const ws = await createWorkspace(remote, { displayName: member.workspaceName });
+      const session = await createRemoteSession(remote, {
+        profile: profileName,
+        target,
+        workspaceId: ws.id,
+        displayName: member.name,
+        ...(spec.startupArgs.length > 0 ? { startupArgs: spec.startupArgs } : {}),
+        ...(spec.credentials ? { credentials: spec.credentials } : {}),
+      });
+      return { name: member.name, sessionId: session.id, workspaceId: ws.id };
+    },
+  );
+  const ok = results.flatMap((r) =>
+    r.status === "fulfilled" ? [r.value] : [],
+  );
+  const failed = members.filter((_m, i) => results[i]!.status === "rejected");
+  // Summary table (reuses the same aligned plain-text style as `jobs ls`).
+  const rows = results.map((r, i) => {
+    const member = members[i]!;
+    if (r.status === "fulfilled") {
+      return [member.name, r.value.sessionId, r.value.workspaceId, "created"].join("\t");
+    }
+    return [member.name, "-", "-", `FAILED: ${(r.reason as Error).message}`].join("\t");
+  });
+  process.stdout.write(
+    `NAME\tSESSION\tWORKSPACE\tSTATUS\n${rows.join("\n")}\n`,
+  );
+  process.stderr.write(
+    `[remote] ${ok.length}/${members.length} remote ${profileName} sessions created on ${remote} (shared RWX, subPath per session)\n`,
+  );
+  if (ok.length > 0) {
+    process.stderr.write(
+      `[remote] attach one with: remote attach <session>   (list: remote ls)\n`,
+    );
+  }
+  if (failed.length > 0) {
+    process.stderr.write(
+      `[remote] ${failed.length} session(s) failed to create — re-run --count for the shortfall, or check the control-plane\n`,
+    );
+    process.exitCode = 1;
+  }
+}
+
 async function runProfile(
   profileName: string,
   opts: ProfileOpts,
   commandArgs: readonly string[] = [],
 ): Promise<void> {
+  // WP6 — validate --count up front (a malformed value must fail loudly, not
+  // silently fall through to a single session).
+  if (opts.count !== undefined) {
+    if (!Number.isInteger(opts.count) || opts.count < 1) {
+      throw new Error("--count must be a whole number >= 1");
+    }
+    if (opts.count > 1 && !opts.remote) {
+      throw new Error(
+        "--count > 1 is a REMOTE fan-out — it needs a configured remote (use `remote run --count` for LOCAL tmux fan-out)",
+      );
+    }
+  }
   if (opts.remote) {
     await ensureConnected(opts.remote);
     let credentials: Readonly<Record<string, string>> | undefined;
@@ -320,6 +417,41 @@ async function runProfile(
         ? resumeStartupArgs(profileName, opts.resume)
         : [];
     const startupArgs = [...resumeArgs, ...commandArgs];
+
+    // WP6 — REMOTE fan-out: --count N spawns N concurrent remote sessions, each
+    // on its OWN workspace subPath of the shared RWX volume. count<=1 falls
+    // through to the single-session path below unchanged.
+    const count = opts.count ?? 1;
+    if (count > 1) {
+      // A fan-out is N FRESH conversations on N DISTINCT workspaces — resuming
+      // one conv into N would corrupt it, --sync seeds ONE cwd into ONE
+      // workspace (ambiguous for N), and an explicit --workspace pins ONE
+      // subPath (collides for N). Mirror the LOCAL --count guards.
+      if (opts.resume !== undefined) {
+        throw new Error(
+          "--count > 1 cannot combine with -r/--resume (each fanned session is a fresh conversation on its own workspace)",
+        );
+      }
+      if (opts.sync) {
+        throw new Error(
+          "--count > 1 cannot combine with --sync (one cwd cannot seed N distinct remote workspaces unambiguously)",
+        );
+      }
+      if (opts.workspaceId) {
+        throw new Error(
+          "--count > 1 cannot reuse a single mapped workspace (each session needs its OWN subPath); run from an unmapped dir or use --no-workspace",
+        );
+      }
+      const base = opts.name ?? basename(process.cwd());
+      const members = planRemoteFanout({ base, count, max: DEFAULT_FANOUT_MAX });
+      await startRemoteFanout(opts.remote, profileName, members, {
+        target: opts.target,
+        startupArgs,
+        ...(credentials ? { credentials } : {}),
+      });
+      return;
+    }
+
     let archive: Buffer | undefined;
     if (opts.sync) {
       process.stderr.write(`[remote] packing ${process.cwd()} (respecting .gitignore)\n`);
@@ -1020,29 +1152,54 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "--no-auth-refresh",
         "skip local auth status preflight before bundling credentials",
       )
+      .option(
+        "--count <n>",
+        `fan out N concurrent REMOTE sessions (named <base>-NN), each on its OWN workspace subPath of the shared RWX volume (cap ${DEFAULT_FANOUT_MAX}); never auto-attaches`,
+        (value: string) => Number(value),
+      )
+      .option(
+        "--name <label>",
+        "base label for the --count fan-out fleet names (default: cwd basename)",
+      )
       .action(async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {
         const { remote: remoteOverride, local, workspace, ...rest } = opts;
         if (local) {
-          await runProfile(profileName, { ...rest }, commandArgs ?? []);
+          try {
+            await runProfile(profileName, { ...rest }, commandArgs ?? []);
+          } catch (err) {
+            process.stderr.write(`[remote] ${(err as Error).message}\n`);
+            process.exitCode = 1;
+          }
           return;
         }
+        // WP6 — a fan-out (--count>1) needs N DISTINCT workspaces, so the cwd's
+        // single .remote/ mapping must NOT pin every member to one subPath:
+        // ignore the marker in that case (each member gets its own workspace).
+        const fanout = (rest.count ?? 1) > 1;
         const marker =
-          workspace === false ? undefined : readWorkspaceMarker(process.cwd());
+          workspace === false || fanout
+            ? undefined
+            : readWorkspaceMarker(process.cwd());
         const remote = getConfiguredRemote(remoteOverride ?? marker?.remote);
         if (marker) {
           process.stderr.write(
             `[remote] cwd mapped to ${marker.workspaceId} (reusing workspace)\n`,
           );
         }
-        await runProfile(
-          profileName,
-          {
-            ...rest,
-            remote,
-            ...(marker ? { workspaceId: marker.workspaceId } : {}),
-          },
-          commandArgs ?? [],
-        );
+        try {
+          await runProfile(
+            profileName,
+            {
+              ...rest,
+              remote,
+              ...(marker ? { workspaceId: marker.workspaceId } : {}),
+            },
+            commandArgs ?? [],
+          );
+        } catch (err) {
+          process.stderr.write(`[remote] ${(err as Error).message}\n`);
+          process.exitCode = 1;
+        }
       });
     if (alias) cmd.alias(alias);
   }
