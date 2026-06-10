@@ -457,6 +457,33 @@ export function killLocalSession(name: string): boolean {
 }
 
 /**
+ * M3 — is a `remote jobs conduct` conductor process running right now? Used by
+ * `jobs ls` to warn when there are queued jobs but nothing to drain them. Matches
+ * the conductor's command line via pgrep, NOT a tmux marker (the conductor may run
+ * in any window/shell). Best-effort: any error (no pgrep, etc.) returns false so
+ * we err toward SHOWING the advisory rather than hiding a real stall. Excludes the
+ * current pid so a `conduct` process that itself shells out to `jobs ls` for
+ * status doesn't self-detect.
+ */
+export function conductorRunning(): boolean {
+  try {
+    const r = spawnSync(
+      "pgrep",
+      ["-f", "jobs +conduct"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (r.status !== 0 || !r.stdout) return false;
+    const pids = r.stdout
+      .split("\n")
+      .map((s) => Number.parseInt(s.trim(), 10))
+      .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid);
+    return pids.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * True when a session's main pane is an IDLE shell (its CLI exited and dropped
  * to the wrapper's `bash -l`). Idle = pane command is bash/sh AND that pane
  * process has no child — the relaunch wrapper keeps the CLI as a child of bash,

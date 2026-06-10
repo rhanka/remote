@@ -361,6 +361,25 @@ export function setMaxConcurrent(value: number): void {
   writeRemoteConfig({ ...readRemoteConfig(), maxConcurrent: value });
 }
 
+/** Generous default age (hours) after which a stuck `running` job is swept → failed. */
+export const DEFAULT_JOB_MAX_AGE_HOURS = 24;
+
+/**
+ * Max age (hours) a delegated job may stay `running`/`awaiting-decision` before
+ * the reconciler sweeps it to `failed` (M2 — convergence: a job whose hook +
+ * liveness signal were both lost would otherwise occupy a slot forever).
+ * `REMOTE_JOB_MAX_AGE_HOURS` overrides; default is generous (24h) so a genuinely
+ * long-running interactive job is never killed prematurely.
+ */
+export function getJobMaxAgeHours(): number {
+  const env = process.env.REMOTE_JOB_MAX_AGE_HOURS;
+  if (env !== undefined) {
+    const n = Number.parseFloat(env);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return DEFAULT_JOB_MAX_AGE_HOURS;
+}
+
 export function getTunnel(): TunnelConfig | undefined {
   return readRemoteConfig().tunnel;
 }

@@ -3,7 +3,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { handleClaudeHook, installClaudeHooks, manualEnroll } from "./enroll.js";
+import {
+  handleClaudeHook,
+  installClaudeHooks,
+  manualEnroll,
+  resolveJobForHook,
+} from "./enroll.js";
 import { enroll, loadRegistry, type RegistryEntry } from "./registry.js";
 
 // Scratch dir inside the package (never /tmp); NEVER the real ~/.claude.
@@ -229,6 +234,119 @@ describe("handleClaudeHook — P3 job.done on claude-end for a delegated job", (
       regPath,
     );
     expect(r).toEqual({ ok: true });
+  });
+});
+
+describe("H1 — job resolved by REMOTE_JOB_ID / convId, not session_id slug", () => {
+  // A delegated interactive job lives under its SLUG; the SessionEnd hook only
+  // sees claude's conversation uuid. Without the env/convId link the job would
+  // never complete. These cover the fix end-to-end.
+  const enrollJob = (id: string) =>
+    enroll(
+      {
+        id,
+        tool: "claude",
+        kind: "local-tmux",
+        cwd: "/work",
+        source: "run",
+        role: "job",
+        jobState: "running",
+        callbackTo: "claude:parent:1",
+      },
+      regPath,
+    );
+
+  it("resolveJobForHook prefers REMOTE_JOB_ID, then convId, then id", () => {
+    const job: RegistryEntry = {
+      id: "job-slug",
+      tool: "claude",
+      kind: "local-tmux",
+      cwd: "/w",
+      source: "run",
+      role: "job",
+      jobState: "running",
+      convId: "uuid-xyz",
+      enrolledAt: "x",
+      lastSeenAt: "x",
+    };
+    // by env
+    expect(resolveJobForHook([job], "irrelevant", "job-slug")?.id).toBe("job-slug");
+    // by convId link
+    expect(resolveJobForHook([job], "uuid-xyz", undefined)?.id).toBe("job-slug");
+    // no match
+    expect(resolveJobForHook([job], "nope", "other")).toBeUndefined();
+  });
+
+  it("claude-start LINKS the conversation uuid onto the job (convId) via REMOTE_JOB_ID", () => {
+    enrollJob("job-A");
+    const r = handleClaudeHook(
+      "claude-start",
+      JSON.stringify({ session_id: "conv-uuid-A", cwd: "/work" }),
+      regPath,
+      { env: { REMOTE_JOB_ID: "job-A" } },
+    );
+    expect(r).toEqual({ ok: true, jobId: "job-A" });
+    const job = loadRegistry(regPath).find((e) => e.id === "job-A");
+    expect(job?.convId).toBe("conv-uuid-A");
+    // It did NOT create a stray entry keyed by the uuid.
+    expect(loadRegistry(regPath).some((e) => e.id === "conv-uuid-A")).toBe(false);
+  });
+
+  it("claude-end completes the job via REMOTE_JOB_ID even when session_id != slug", () => {
+    enrollJob("job-B");
+    const r = handleClaudeHook(
+      "claude-end",
+      JSON.stringify({ session_id: "conv-uuid-B", cwd: "/work" }),
+      regPath,
+      {
+        env: { REMOTE_JOB_ID: "job-B" },
+        emit: (job) => ({
+          emitted: true,
+          path: "/x.json",
+          written: true,
+          to: job.callbackTo!,
+        }),
+      },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.jobId).toBe("job-B");
+    expect(loadRegistry(regPath).find((e) => e.id === "job-B")?.jobState).toBe(
+      "done",
+    );
+  });
+
+  it("claude-end completes the job via the convId link when the env is gone", () => {
+    enrollJob("job-C");
+    // SessionStart linked the uuid; SessionEnd arrives WITHOUT REMOTE_JOB_ID.
+    handleClaudeHook(
+      "claude-start",
+      JSON.stringify({ session_id: "conv-uuid-C", cwd: "/work" }),
+      regPath,
+      { env: { REMOTE_JOB_ID: "job-C" } },
+    );
+    const r = handleClaudeHook(
+      "claude-end",
+      JSON.stringify({ session_id: "conv-uuid-C", cwd: "/work" }),
+      regPath,
+      { env: {}, emit: () => ({ emitted: false, reason: "no-parent" }) },
+    );
+    expect(r.jobId).toBe("job-C");
+    expect(loadRegistry(regPath).find((e) => e.id === "job-C")?.jobState).toBe(
+      "done",
+    );
+  });
+
+  it("claude-start with REMOTE_JOB_ID but no such job enrolls a plain session", () => {
+    const r = handleClaudeHook(
+      "claude-start",
+      JSON.stringify({ session_id: "lone-uuid", cwd: "/work" }),
+      regPath,
+      { env: { REMOTE_JOB_ID: "ghost-job" } },
+    );
+    expect(r).toEqual({ ok: true });
+    const e = loadRegistry(regPath).find((x) => x.id === "lone-uuid");
+    expect(e?.role).toBeUndefined();
+    expect(e?.convId).toBe("lone-uuid");
   });
 });
 

@@ -8,6 +8,8 @@ import {
   canDelegateAtDepth,
   childDepthEnvValue,
   clampDepth,
+  clampRemoteDepthBudget,
+  conductorAdvisory,
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_MAX_DEPTH,
   hasFreeSlot,
@@ -22,6 +24,7 @@ import {
   resolveJobCwd,
   resolveTrackBin,
   runTrackMirror,
+  sweepStaleJobs,
   trackItemNewArgs,
   trackItemRealizeArgs,
 } from "./delegate.js";
@@ -527,5 +530,94 @@ describe("resolveTrackBin / runTrackMirror (best-effort, never throws)", () => {
       throw new Error("track exploded");
     });
     expect(ran).toBe(false);
+  });
+});
+
+describe("sweepStaleJobs (M2 — convergence backstop)", () => {
+  const job = (over: Partial<RegistryEntry>): RegistryEntry => ({
+    id: "j",
+    tool: "claude",
+    kind: "local-tmux",
+    cwd: "/w",
+    source: "run",
+    role: "job",
+    jobState: "running",
+    enrolledAt: new Date(0).toISOString(),
+    lastSeenAt: new Date(0).toISOString(),
+    ...over,
+  });
+  const NOW = 100 * 3600_000; // 100h epoch
+  const MAX = 24 * 3600_000;
+
+  it("fails a running job that is NOT live, has NO result, older than maxAge", () => {
+    const stale = job({ id: "stale", lastSeenAt: new Date(0).toISOString() });
+    const ids = sweepStaleJobs([stale], {
+      isJobLive: () => false,
+      hasResult: () => false,
+      maxAgeMs: MAX,
+      nowMs: NOW,
+    });
+    expect(ids).toEqual(["stale"]);
+  });
+
+  it("leaves a live job, a job with a result, a young job, pending and terminal", () => {
+    const jobs = [
+      job({ id: "live" }),
+      job({ id: "hasResult" }),
+      job({ id: "young", lastSeenAt: new Date(NOW - 1000).toISOString() }),
+      job({ id: "pending", jobState: "pending" }),
+      job({ id: "done", jobState: "done" }),
+    ];
+    const ids = sweepStaleJobs(jobs, {
+      isJobLive: (e) => e.id === "live",
+      hasResult: (e) => e.id === "hasResult",
+      maxAgeMs: MAX,
+      nowMs: NOW,
+    });
+    expect(ids).toEqual([]);
+  });
+
+  it("ignores non-job entries", () => {
+    const session = job({ id: "s" });
+    delete (session as { role?: unknown }).role;
+    expect(
+      sweepStaleJobs([session], {
+        isJobLive: () => false,
+        hasResult: () => false,
+        maxAgeMs: MAX,
+        nowMs: NOW,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("conductorAdvisory (M3 — warn, never self-heal)", () => {
+  const j = (jobState: "pending" | "running" | "done" | "failed") => ({
+    role: "job" as const,
+    jobState,
+  });
+
+  it("warns when there are pending jobs and NO conductor", () => {
+    const msg = conductorAdvisory([j("pending"), j("pending"), j("running")], false);
+    expect(msg).toContain("2 pending");
+    expect(msg).toContain("no active conductor");
+    expect(msg).toContain("remote jobs conduct");
+  });
+
+  it("silent when a conductor is running", () => {
+    expect(conductorAdvisory([j("pending")], true)).toBeUndefined();
+  });
+
+  it("silent when there are no pending jobs", () => {
+    expect(conductorAdvisory([j("running"), j("done")], false)).toBeUndefined();
+  });
+});
+
+describe("clampRemoteDepthBudget (remote depth clamp)", () => {
+  it("clamps a remote job's budget to at most 1", () => {
+    expect(clampRemoteDepthBudget(3)).toBe(1);
+    expect(clampRemoteDepthBudget(2)).toBe(1);
+    expect(clampRemoteDepthBudget(1)).toBe(1);
+    expect(clampRemoteDepthBudget(0)).toBe(0);
   });
 });

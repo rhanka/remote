@@ -129,6 +129,15 @@ export const MAX_MAX_DEPTH = 3;
 export const DEPTH_ENV = "REMOTE_DELEGATE_DEPTH";
 
 /**
+ * Env channel carrying a delegated job's id INTO its agent process (H1). The
+ * local-tmux spawn stamps `REMOTE_JOB_ID=<jobId>` so the claude SessionStart/End
+ * hooks — which only receive claude's conversation uuid (`session_id`), never the
+ * job slug — can resolve the job and complete it. Without this, an interactive
+ * tmux job never advances past `running`.
+ */
+export const JOB_ID_ENV = "REMOTE_JOB_ID";
+
+/**
  * Clamp a requested `--max-depth` into [1, 3] (à la Hermes). A missing /
  * non-finite value falls back to the default (1). Pure, exported for tests.
  */
@@ -173,6 +182,19 @@ export function inheritedDepthBudget(
  */
 export function canDelegateAtDepth(budget: number): boolean {
   return budget > 0;
+}
+
+/**
+ * REMOTE depth clamp (YAGNI/safety): there is NO env channel carrying
+ * `REMOTE_DELEGATE_DEPTH` into a Pod (`createRemoteSession` only passes
+ * `startupArgs`, and the session-agent doesn't forward a depth budget), so a
+ * remote job could NOT enforce a budget even if we recorded one > 1. Until that
+ * channel exists we clamp a REMOTE job's recorded budget to AT MOST 1 — i.e. a
+ * job-in-a-Pod does not re-delegate. (Local jobs DO inherit the budget via the
+ * env, so they keep the full 1–3 range.) Pure, exported for tests.
+ */
+export function clampRemoteDepthBudget(budget: number): number {
+  return Math.min(budget, 1);
 }
 
 /**
@@ -494,6 +516,50 @@ export function reconcileRemoteJobs(
 }
 
 /**
+ * M2 — SWEEP stale jobs. A job stuck in a non-terminal `running` /
+ * `awaiting-decision`-ish state (we only persist `running`; awaiting-decision is
+ * a DISPLAY overlay, so a job awaiting a decision is `running` on disk) whose
+ * runtime signal was lost — NOT live AND no `result.json` AND older than
+ * `maxAgeMs` — would otherwise occupy a concurrency slot forever. This returns
+ * the ids to transition to `failed`. Bounds BOTH plain running jobs and ones
+ * showing awaiting-decision (same persisted `running`). `pending` jobs are NOT
+ * swept here (they were never launched — the conductor owns them). Terminal jobs
+ * are skipped. Pure (liveness + result presence injected), exported for tests.
+ */
+export function sweepStaleJobs(
+  jobs: ReadonlyArray<RegistryEntry>,
+  opts: {
+    isJobLive: (e: RegistryEntry) => boolean;
+    hasResult: (e: RegistryEntry) => boolean;
+    maxAgeMs: number;
+    nowMs?: number;
+  },
+): string[] {
+  const now = opts.nowMs ?? Date.now();
+  const out: string[] = [];
+  for (const job of jobs) {
+    if (job.role !== "job") continue;
+    const state = job.jobState ?? "pending";
+    if (state !== "running") continue; // pending/terminal are not our concern
+    if (opts.isJobLive(job)) continue; // still alive → leave it
+    if (opts.hasResult(job)) continue; // headless finished → reconcile handles it
+    // Age from last activity (lastSeenAt), falling back to enrolledAt. Use
+    // Number.isFinite (NOT `||`) so a legitimate epoch-0 timestamp isn't treated
+    // as missing.
+    const seen = Date.parse(job.lastSeenAt);
+    const enrolled = Date.parse(job.enrolledAt);
+    const last = Number.isFinite(seen)
+      ? seen
+      : Number.isFinite(enrolled)
+        ? enrolled
+        : now;
+    if (now - last < opts.maxAgeMs) continue; // not stale yet
+    out.push(job.id);
+  }
+  return out;
+}
+
+/**
  * Build `jobs ls` rows from job entries + an injectable liveness probe. Pure,
  * exported for tests. `nowMs` makes the age deterministic.
  */
@@ -509,6 +575,28 @@ export function buildJobRows(
     age: humanAge(Date.parse(e.enrolledAt), nowMs),
     cwd: e.cwd,
   }));
+}
+
+/**
+ * M3 — advisory line for `jobs ls`: when there are QUEUED (`pending`) jobs but
+ * NO conductor running to drain them, warn the user (we do NOT self-heal — a
+ * one-shot `jobs ls` can't start the queue; only `jobs conduct` does). Returns
+ * undefined when there's nothing to warn about. Pure (the conductor-liveness
+ * probe is passed in), exported for tests.
+ */
+export function conductorAdvisory(
+  jobs: ReadonlyArray<Pick<RegistryEntry, "role" | "jobState">>,
+  conductorRunning: boolean,
+): string | undefined {
+  if (conductorRunning) return undefined;
+  const pending = jobs.filter(
+    (j) => j.role === "job" && (j.jobState ?? "pending") === "pending",
+  ).length;
+  if (pending === 0) return undefined;
+  return (
+    `[remote] ${pending} pending job(s) and no active conductor — they will NOT start on their own. ` +
+    `Run: remote jobs conduct   (or  remote jobs conduct --watch <min>  to keep draining)`
+  );
 }
 
 /** Render `jobs ls` rows as an aligned plain-text table. Pure. */

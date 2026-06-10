@@ -127,6 +127,52 @@ function envelopeId(kind: string, jobId: string, ts: number): string {
   return `env:${ts}:${kind}-${jobId}`;
 }
 
+// ---------------------------------------------------------------------------
+// S1 — envelope AUTHENTICATION (shared RWX is multi-tenant).
+//
+// The h2a inbox lives on the shared RWX volume, writable by EVERY pod. Nothing
+// signs an envelope, so any pod can DROP a file claiming to be a `job.done` for
+// another job, or a `decision.requested`/`decision.reply` piloting a neighbour's
+// agent. We can't make the file bus cryptographically trustworthy here, but we
+// CAN reject envelopes whose claimed `actor.instance` doesn't match the instance
+// the addressed job is KNOWN to use:
+//   - a `job.done`/`decision.requested` ABOUT job X must come FROM job X's own
+//     agent → actor.instance === jobInstance(X). A different sender is forged.
+//   - a `decision.reply` is PARENT→agent and is treated as ADVISORY: it is never
+//     used to gate a privileged action (the agent chooses to act on it), and a
+//     reply whose actor isn't the job's recorded parent is dropped from the
+//     "answered" set so it can't silently suppress a real pending decision.
+//
+// LIMIT: this is integrity-by-convention, not authentication — a pod that knows
+// the victim's jobId AND can compute jobInstance() (a deterministic
+// `<tool>:job:<id>` / `<tool>:remote:<id>`) could still forge a matching actor.
+// Real trust needs signed envelopes (h2a_sign), tracked separately. This check
+// stops the trivial cross-job spoof, which is the immediate exposure.
+// ---------------------------------------------------------------------------
+
+/** The `actor.instance` an envelope carries, or undefined when malformed. Pure. */
+export function envelopeActorInstance(
+  envelope: H2aEnvelope<unknown>,
+): string | undefined {
+  const inst = envelope.actor?.instance;
+  return typeof inst === "string" && inst.length > 0 ? inst : undefined;
+}
+
+/**
+ * Is `envelope`'s sender the instance we EXPECT for this job? `expectedInstance`
+ * is the job's `jobInstance(...)` (for job.done / decision.requested ABOUT the
+ * job) or the job's recorded parent (for decision.reply). An undefined expected
+ * instance means we can't verify (no job/parent on record) → reject (fail
+ * closed). Pure, exported for tests.
+ */
+export function isEnvelopeFromExpected(
+  envelope: H2aEnvelope<unknown>,
+  expectedInstance: string | undefined,
+): boolean {
+  if (!expectedInstance) return false;
+  return envelopeActorInstance(envelope) === expectedInstance;
+}
+
 /** On-disk file name for an envelope — matches the bridge's SAFE_ENTRY shape. */
 export function envelopeFileName(
   kind: JobEnvelopeType,
@@ -303,6 +349,50 @@ function parseEnvelope(raw: string): H2aEnvelope<unknown> | undefined {
     // not an envelope / malformed → skip
   }
   return undefined;
+}
+
+/**
+ * Resolver: the expected `actor.instance` for an envelope about `jobId`, by
+ * envelope type. For `job.done`/`decision.requested` (ABOUT the job) it is the
+ * job's own `jobInstance(...)`; for `decision.reply` (FROM the parent) it is the
+ * job's recorded parent. Returns undefined when the job is unknown → the
+ * envelope is rejected (fail closed). The CLI builds this off the registry.
+ */
+export type ExpectedInstanceResolver = (
+  jobId: string,
+  type: JobEnvelopeType,
+) => string | undefined;
+
+/**
+ * AUTHENTICATE a flat list of job envelopes (S1): keep only those whose claimed
+ * `actor.instance` matches the instance the addressed job is known to use (per
+ * the resolver). A forged cross-job envelope (wrong actor) is DROPPED. Envelopes
+ * that aren't one of our job types pass through untouched (they're not our
+ * concern here). Pure over (envelopes, resolver), exported for tests.
+ */
+export function authenticateJobEnvelopes(
+  envelopes: ReadonlyArray<H2aEnvelope<unknown>>,
+  expectedInstanceOf: ExpectedInstanceResolver,
+): H2aEnvelope<unknown>[] {
+  const out: H2aEnvelope<unknown>[] = [];
+  for (const e of envelopes) {
+    if (
+      e.type !== "job.done" &&
+      e.type !== "decision.requested" &&
+      e.type !== "decision.reply"
+    ) {
+      out.push(e);
+      continue;
+    }
+    const body = e.body as { jobId?: unknown };
+    const jobId = typeof body?.jobId === "string" ? body.jobId : undefined;
+    if (!jobId) continue; // a job envelope without a jobId is unusable → drop
+    if (isEnvelopeFromExpected(e, expectedInstanceOf(jobId, e.type))) {
+      out.push(e);
+    }
+    // else: forged / unverifiable actor → dropped
+  }
+  return out;
 }
 
 /**

@@ -61,12 +61,49 @@ export type HookResult = {
   /** Set when claude-end finished a delegated job (role:"job") and a job.done
    * callback was attempted. For diagnostics/tests only. */
   callback?: EmitJobDoneResult;
+  /** The job id this hook resolved/finished (diagnostics/tests only). */
+  jobId?: string;
 };
 
-/** Injectable so tests never touch the real ~/h2a-workspace. */
+/** Injectable so tests never touch the real ~/h2a-workspace / process.env. */
 export type HandleClaudeHookOpts = {
   emit?: (job: RegistryEntry) => EmitJobDoneResult;
+  /** Process env (so tests can inject REMOTE_JOB_ID). Defaults to process.env. */
+  env?: Record<string, string | undefined>;
 };
+
+/**
+ * Resolve the delegated JOB an ending/starting claude session belongs to.
+ *
+ * H1 — a job spawned via `remote delegate` is enrolled under a SLUG (the jobId),
+ * NOT under claude's conversation uuid (`session_id`). The SessionEnd hook only
+ * receives `session_id`, so matching the job by `id === session_id` NEVER hits →
+ * an interactive tmux job stays `running` forever. The fix gives the hook a
+ * stable handle on the jobId, two complementary ways:
+ *  1. `REMOTE_JOB_ID` — stamped into the tmux session's env by `startJob`, so the
+ *     claude process (and its hook child) inherit it. Authoritative when present.
+ *  2. `convId` link — at SessionStart we record `session_id` onto the job entry's
+ *     convId (a no-op when no REMOTE_JOB_ID), so SessionEnd can also resolve a job
+ *     whose env didn't survive (some shells scrub it) by `convId === session_id`.
+ * Pure over the registry snapshot, exported for tests.
+ */
+export function resolveJobForHook(
+  entries: ReadonlyArray<RegistryEntry>,
+  sessionId: string,
+  envJobId: string | undefined,
+): RegistryEntry | undefined {
+  // 1. REMOTE_JOB_ID — authoritative (the slug stamped on the tmux env).
+  if (envJobId) {
+    const byEnv = entries.find((e) => e.id === envJobId && e.role === "job");
+    if (byEnv) return byEnv;
+  }
+  // 2. convId link recorded at SessionStart (env didn't survive into the hook).
+  const byConv = entries.find((e) => e.role === "job" && e.convId === sessionId);
+  if (byConv) return byConv;
+  // 3. Back-compat: a job whose registry id IS the conversation uuid (e.g. a
+  //    manually-enrolled job, or one keyed by its session_id).
+  return entries.find((e) => e.id === sessionId && e.role === "job");
+}
 
 /**
  * Handle a Claude Code hook payload. Never throws — the caller reports
@@ -94,22 +131,49 @@ export function handleClaudeHook(
       return { ok: false, error: "hook payload has no session_id" };
     }
     const cwd = typeof payload.cwd === "string" ? payload.cwd : process.cwd();
+    const env = opts.env ?? process.env;
+    const envJobId = env.REMOTE_JOB_ID;
     if (hook === "claude-start") {
+      // H1 — if this claude session IS a delegated job (REMOTE_JOB_ID stamped on
+      // its tmux env by startJob), LINK its conversation uuid onto the job entry
+      // (convId) so SessionEnd can resolve the job even if the env is later
+      // scrubbed. Otherwise enroll a plain session as before.
+      if (envJobId) {
+        const job = loadRegistry(registryPath).find(
+          (e) => e.id === envJobId && e.role === "job",
+        );
+        if (job) {
+          enroll(
+            {
+              id: job.id,
+              tool: job.tool,
+              kind: job.kind,
+              cwd: job.cwd,
+              source: job.source,
+              convId: id,
+              role: "job",
+            },
+            registryPath,
+          );
+          return { ok: true, jobId: job.id };
+        }
+      }
       enroll(
         { id, tool: "claude", kind: "local", cwd, convId: id, source: "hook" },
         registryPath,
       );
       return { ok: true };
     }
-    // claude-end: is this session a DELEGATED JOB? If so, finish it + callback.
-    const job = loadRegistry(registryPath).find(
-      (e) => e.id === id && e.role === "job",
-    );
+    // claude-end: is this session a DELEGATED JOB? Resolve by REMOTE_JOB_ID (the
+    // env stamped by startJob) or by the convId link recorded at SessionStart —
+    // NOT by `id === session_id` (the job lives under its slug, not the uuid).
+    const job = resolveJobForHook(loadRegistry(registryPath), id, envJobId);
     if (job) {
-      // Advance to done (no-op if already terminal). The job interactive agent
-      // ending its session IS the success signal — a non-zero exit isn't
-      // observable from the SessionEnd hook, so "done" is the right default.
-      const advanced = advanceJob(id, "done", registryPath) ?? job;
+      // Advance to done (no-op if already terminal), keyed by the JOB's id (its
+      // slug) — NOT the session uuid. The interactive agent ending its session IS
+      // the success signal; a non-zero exit isn't observable from SessionEnd, so
+      // "done" is the right default.
+      const advanced = advanceJob(job.id, "done", registryPath) ?? job;
       let callback: EmitJobDoneResult;
       try {
         const emit = opts.emit ?? ((j: RegistryEntry) => emitJobDone(j, { state: advanced.jobState ?? "done" }));
@@ -118,7 +182,7 @@ export function handleClaudeHook(
         // a callback failure must NEVER fail the hook
         callback = { emitted: false, reason: "error", error: String(error) };
       }
-      return { ok: true, callback };
+      return { ok: true, callback, jobId: job.id };
     }
     // Not a job — enroll-if-missing so the end of an unknown session still
     // leaves a (terminated) trace, then mark it ended.
