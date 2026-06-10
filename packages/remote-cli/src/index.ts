@@ -80,9 +80,11 @@ import {
   assertSafeName,
   buildDelegateArgs,
   buildJobRows,
+  buildRemoteDelegate,
   isDelegateType,
   jobDir,
   readJobResult,
+  reconcileRemoteJobs,
   renderJobsTable,
   resolveJobCwd,
   type DelegateType,
@@ -2270,11 +2272,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   program
     .command("delegate <type> <task>")
     .description(
-      "Delegate a task to a LIVE agent (claude/codex/agy) in a detached tmux session, primed with <task> (passed as a single argv — never shell-concatenated) and with the h2a side-window so the parent/master dialogue works. Returns a job id. Supervise with `remote jobs`.",
+      "Delegate a task to a LIVE agent (claude/codex/agy) in a detached tmux session, primed with <task> (passed as a single argv — never shell-concatenated) and with the h2a side-window so the parent/master dialogue works. Returns a job id. Supervise with `remote jobs`. `--remote` runs the job CONCURRENTLY in a SCW Pod on the shared RWX volume (subPath per job).",
+    )
+    .option(
+      "--remote [url]",
+      "run the job in a SCW Pod (concurrent; isolated by a per-job workspace subPath on the shared RWX volume) instead of a local tmux session; optional control-plane URL (default: the configured remote)",
     )
     .option(
       "--cwd <path>",
-      "run the agent in this directory as-is (default: a dedicated git worktree under .remote/jobs/<id>/wt when cwd is a repo, else cwd)",
+      "run the agent in this directory as-is (default: a dedicated git worktree under .remote/jobs/<id>/wt when cwd is a repo, else cwd). Local only.",
     )
     .option(
       "--name <label>",
@@ -2288,15 +2294,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       async (
         type: string,
         task: string,
-        opts: { cwd?: string; name?: string; headless?: boolean },
+        opts: {
+          remote?: string | boolean;
+          cwd?: string;
+          name?: string;
+          headless?: boolean;
+        },
       ) => {
-        if (!tmuxAvailable()) {
-          process.stderr.write(
-            "[remote] tmux is not installed locally — `remote delegate` needs it.\n",
-          );
-          process.exitCode = 1;
-          return;
-        }
         if (!isDelegateType(type)) {
           process.stderr.write(
             `[remote] unknown agent type "${type}" (use: claude | codex | agy)\n`,
@@ -2310,6 +2314,74 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           assertSafeName(jobId);
         } catch (err) {
           process.stderr.write(`[remote] ${(err as Error).message}\n`);
+          process.exitCode = 1;
+          return;
+        }
+
+        // --- REMOTE delegation (P2): a CONCURRENT job in a SCW Pod. -----------
+        // Each job gets its OWN control-plane workspace, which becomes a distinct
+        // subPath on the ONE shared RWX volume (no per-job PVC; RWX is multi-node
+        // → no concurrency cap). The task rides the SAFE argv channel
+        // `startupArgs` (→ SESSION_STARTUP_ARGS JSON), never a shell string.
+        if (opts.remote !== undefined && opts.remote !== false) {
+          let url: string;
+          let remoteArgs: { profile: DelegateType; startupArgs: string[] };
+          try {
+            url = getConfiguredRemote(
+              typeof opts.remote === "string" ? opts.remote : undefined,
+            );
+            remoteArgs = buildRemoteDelegate(
+              jobType,
+              task,
+              opts.headless === true,
+            );
+          } catch (err) {
+            process.stderr.write(`[remote] ${(err as Error).message}\n`);
+            process.exitCode = 1;
+            return;
+          }
+          await ensureConnected(url);
+          // Per-job workspace → per-job subPath on the shared RWX volume.
+          const ws = await createWorkspace(url, { displayName: `job-${jobId}` });
+          const session = await createRemoteSession(url, {
+            profile: remoteArgs.profile,
+            target: getDefaultTarget(),
+            workspaceId: ws.id,
+            displayName: `job-${jobId}`,
+            ...(remoteArgs.startupArgs.length > 0
+              ? { startupArgs: remoteArgs.startupArgs }
+              : {}),
+          });
+          try {
+            enroll({
+              id: jobId,
+              tool: jobType,
+              kind: "remote",
+              cwd: ws.id,
+              source: "remote",
+              label: jobId,
+              remoteId: session.id,
+              role: "job",
+              jobState: "running",
+              task,
+            });
+          } catch {
+            // registry hiccup must not break the delegation
+          }
+          process.stderr.write(
+            `[remote] delegated REMOTE job ${jobId} (${jobType}${opts.headless ? " headless" : ""}) ` +
+              `→ ${url}/sessions/${session.id} (workspace ${ws.id})\n` +
+              `[remote] supervise: remote jobs status ${jobId}   attach: remote jobs attach ${jobId}\n`,
+          );
+          process.stdout.write(`${jobId}\n`);
+          return;
+        }
+
+        // --- LOCAL delegation (P1): a detached tmux session. -----------------
+        if (!tmuxAvailable()) {
+          process.stderr.write(
+            "[remote] tmux is not installed locally — local `remote delegate` needs it (use --remote for a Pod).\n",
+          );
           process.exitCode = 1;
           return;
         }
@@ -2407,18 +2479,47 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   const jobLive = (e: ReturnType<typeof listJobs>[number]): boolean =>
     isLive(e);
 
-  // Persist the terminal state of jobs whose tmux session has ended: a HEADLESS
-  // job that wrote a result.json reconciles to its real done/failed; any other
-  // dead-but-still-"running" job (interactive crashed/finished) reconciles to
-  // failed. Makes the registry the source of truth; the pure reconciler is just
-  // a display fallback. Returns the freshly-reloaded jobs.
-  const reconcileJobs = (): ReturnType<typeof listJobs> => {
+  // Persist the terminal state of jobs whose runtime has ended:
+  //  - LOCAL: a HEADLESS job that wrote a result.json reconciles to its real
+  //    done/failed; any other dead-but-still-"running" job (interactive
+  //    crashed/finished) reconciles to failed.
+  //  - REMOTE (P2): the registry reports `kind:"remote"` as live ALWAYS (it
+  //    can't probe the cluster), so we reconcile against `listRemoteSessions` —
+  //    a remote job whose Pod is no longer listed has ended (→ result.json's
+  //    state if present, else failed). Fetched ONCE, only when there is a
+  //    non-terminal remote job; a control-plane hiccup must not break `jobs`.
+  // Makes the registry the source of truth; the pure reconcilers are display
+  // fallbacks. Returns the freshly-reloaded jobs.
+  const reconcileJobs = async (): Promise<ReturnType<typeof listJobs>> => {
+    // Local: tmux/pid liveness (no cluster call).
     for (const job of listJobs()) {
+      if (job.kind === "remote") continue;
       const state = job.jobState ?? "pending";
       if (state === "done" || state === "failed") continue;
       if (jobLive(job)) continue;
       const result = readJobResult(process.cwd(), job.id);
       advanceJob(job.id, result?.state ?? "failed");
+    }
+    // Remote: reconcile against the control-plane session list.
+    const remoteJobs = listJobs().filter(
+      (j) =>
+        j.kind === "remote" &&
+        j.jobState !== "done" &&
+        j.jobState !== "failed",
+    );
+    if (remoteJobs.length > 0) {
+      try {
+        const url = getConfiguredRemote();
+        const live = await listRemoteSessions(url);
+        const liveIds = new Set(live.map((s) => s.id));
+        for (const t of reconcileRemoteJobs(remoteJobs, liveIds, (j) =>
+          readJobResult(process.cwd(), j.id),
+        )) {
+          advanceJob(t.id, t.to);
+        }
+      } catch {
+        // no remote configured / unreachable → leave remote jobs as-is
+      }
     }
     return listJobs();
   };
@@ -2426,10 +2527,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   jobsCommand
     .command("ls")
     .description(
-      "List delegated jobs (id/type/state/age/cwd), live state reconciled against tmux.",
+      "List delegated jobs (id/type/state/age/cwd), live state reconciled against tmux (local) and the control-plane session list (remote).",
     )
-    .action(() => {
-      const rows = buildJobRows(reconcileJobs(), jobLive);
+    .action(async () => {
+      const rows = buildJobRows(await reconcileJobs(), jobLive);
       process.stdout.write(`${renderJobsTable(rows)}\n`);
     });
 
@@ -2438,8 +2539,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Show a job's detail (+ output.log / result.json paths for headless jobs).",
     )
-    .action((id: string) => {
-      reconcileJobs();
+    .action(async (id: string) => {
+      await reconcileJobs();
       const job = listJobs().find((e) => e.id === id);
       if (!job) {
         process.stderr.write(`[remote] no job "${id}" (see: remote jobs ls)\n`);
@@ -2451,9 +2552,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const lines = [
         `id:      ${job.id}`,
         `type:    ${job.tool}`,
+        `target:  ${job.kind === "remote" ? "remote" : "local"}`,
         `state:   ${job.jobState ?? "pending"}${live ? " (live)" : ""}`,
         `cwd:     ${job.cwd}`,
-        `tmux:    ${job.tmuxSession ?? "-"}`,
+        job.kind === "remote"
+          ? `session: ${job.remoteId ?? "-"}`
+          : `tmux:    ${job.tmuxSession ?? "-"}`,
         `task:    ${job.task ?? "-"}`,
         `started: ${job.enrolledAt}`,
       ];
@@ -2466,9 +2570,42 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   jobsCommand
     .command("attach <id>")
-    .description("Attach into the job's tmux session (Ctrl-b d to detach).")
-    .action((id: string) => {
+    .description(
+      "Attach into the job's tmux session (Ctrl-b d to detach). Remote jobs exec into the Pod's tmux, like `remote attach <id> --exec`.",
+    )
+    .action(async (id: string) => {
       const job = listJobs().find((e) => e.id === id);
+      // REMOTE job (P2): exec into the Pod's tmux over the configured tunnel,
+      // reusing the same path as `remote attach <id> --exec`.
+      if (job?.kind === "remote") {
+        const remoteId = job.remoteId;
+        if (!remoteId) {
+          process.stderr.write(
+            `[remote] remote job "${id}" has no session id recorded (see: remote jobs status ${id})\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const tunnel = getTunnel();
+        if (!tunnel) {
+          process.stderr.write(
+            "[remote] attaching a remote job needs a tunnel configured (remote config tunnel …)\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        try {
+          await ensureConnected(getConfiguredRemote());
+        } catch {
+          // best-effort: the kubectl exec below works off the tunnel regardless
+        }
+        process.stderr.write(
+          `[remote] exec-attaching into Pod tmux for job ${id} (${remoteId}) (Ctrl-b d to detach)\n`,
+        );
+        process.exitCode = attachPodTmux(tunnel, remoteId);
+        return;
+      }
+      // LOCAL job (P1): attach into the detached tmux session.
       const name = job?.tmuxSession ?? localSessionName(id);
       if (!findLocalSession(name)) {
         process.stderr.write(
@@ -2495,6 +2632,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const logPath = join(jobDir(process.cwd(), id), "output.log");
       if (existsSync(logPath)) {
         process.stdout.write(readFileSync(logPath, "utf8"));
+        return;
+      }
+      // REMOTE job: the output lives in the Pod's tmux, not a local pane.
+      if (job.kind === "remote") {
+        process.stderr.write(
+          `[remote] remote job "${id}" runs in a Pod — view it live with: remote jobs attach ${id}\n`,
+        );
+        process.exitCode = 1;
         return;
       }
       const name = job.tmuxSession ?? localSessionName(id);
