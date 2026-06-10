@@ -61,6 +61,9 @@ export type RegistryEntry = {
   parent?: string;
   /** The task the delegated agent was primed with. */
   task?: string;
+  /** h2a instance to address the `job.done` callback to (P3); the delegating
+   * parent/master. Absent = no callback recipient (best-effort, no-op). */
+  callbackTo?: string;
 };
 
 export type EnrollInput = {
@@ -78,6 +81,7 @@ export type EnrollInput = {
   jobState?: JobState;
   parent?: string;
   task?: string;
+  callbackTo?: string;
 };
 
 /** Injectable liveness probes (tests stay deterministic, no tmux/pid needed). */
@@ -182,6 +186,8 @@ export function enroll(
   if (parent !== undefined) entry.parent = parent;
   const task = input.task ?? prev?.task;
   if (task !== undefined) entry.task = task;
+  const callbackTo = input.callbackTo ?? prev?.callbackTo;
+  if (callbackTo !== undefined) entry.callbackTo = callbackTo;
   if (idx >= 0) entries[idx] = entry;
   else entries.push(entry);
   saveRegistry(entries, path);
