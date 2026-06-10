@@ -97,8 +97,13 @@ const stdoutWrite = vi
   .spyOn(process.stdout, "write")
   .mockImplementation(() => true);
 
-const { main, parseWatchMinutes, softRefreshAllSessions, watchRefreshLoop } =
-  await import("./index.js");
+const {
+  conductLoop,
+  main,
+  parseWatchMinutes,
+  softRefreshAllSessions,
+  watchRefreshLoop,
+} = await import("./index.js");
 
 describe("main", () => {
   beforeEach(() => {
@@ -629,6 +634,63 @@ describe("main", () => {
         const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
         expect(out).toMatch(/refresh pass — \d{4}-\d{2}-\d{2}T/); // timestamped
         expect(out).toContain("watch stopped (SIGINT)");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("conductLoop runs conductor passes on the interval and stops cleanly on SIGINT (exit 0)", async () => {
+      vi.useFakeTimers();
+      try {
+        const { EventEmitter } = await import("node:events");
+        const signals = new EventEmitter();
+        const pass = vi
+          .fn<() => Promise<{ started: number; finished: number }>>()
+          .mockImplementationOnce(async () => ({ started: 2, finished: 0 }))
+          .mockImplementationOnce(async () => {
+            signals.emit("SIGINT"); // Ctrl-C during the second pass
+            return { started: 1, finished: 1 };
+          });
+
+        const loop = conductLoop(5, pass, signals);
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        const code = await loop;
+
+        expect(code).toBe(0);
+        expect(pass).toHaveBeenCalledTimes(2);
+        expect(signals.listenerCount("SIGINT")).toBe(0); // handler removed
+        const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+        expect(out).toMatch(/conduct pass — \d{4}-\d{2}-\d{2}T/); // timestamped
+        expect(out).toContain("2 started, 0 finished"); // pass recap
+        expect(out).toContain("conduct stopped (SIGINT)");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("conductLoop keeps going when a pass throws (logs, no crash)", async () => {
+      vi.useFakeTimers();
+      try {
+        const { EventEmitter } = await import("node:events");
+        const signals = new EventEmitter();
+        const pass = vi
+          .fn<() => Promise<{ started: number; finished: number }>>()
+          .mockImplementationOnce(async () => {
+            throw new Error("cluster unreachable");
+          })
+          .mockImplementationOnce(async () => {
+            signals.emit("SIGINT");
+            return { started: 0, finished: 0 };
+          });
+
+        const loop = conductLoop(2, pass, signals);
+        await vi.advanceTimersByTimeAsync(2 * 60_000);
+        const code = await loop;
+
+        expect(code).toBe(0);
+        expect(pass).toHaveBeenCalledTimes(2);
+        const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+        expect(out).toContain("conduct pass failed: cluster unreachable");
       } finally {
         vi.useRealTimers();
       }

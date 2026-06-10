@@ -21,6 +21,7 @@ import {
   getDefaultTarget,
   getDefaultTools,
   getH2aConfig,
+  getMaxConcurrent,
   getTunnel,
   setDefaultRemote,
   setDefaultTarget,
@@ -75,18 +76,30 @@ import {
   listJobs,
   listLocalForLs,
   loadRegistry,
+  type RegistryEntry,
 } from "./registry.js";
 import {
   assertSafeName,
   buildDelegateArgs,
   buildJobRows,
   buildRemoteDelegate,
+  canDelegateAtDepth,
+  childDepthEnvValue,
+  clampDepth,
+  DEFAULT_MAX_CONCURRENT,
+  DEPTH_ENV,
+  hasFreeSlot,
+  inheritedDepthBudget,
   isDelegateType,
   jobDir,
+  planNextStarts,
   readJobResult,
   reconcileRemoteJobs,
   renderJobsTable,
   resolveJobCwd,
+  runTrackMirror,
+  trackItemNewArgs,
+  trackItemRealizeArgs,
   type DelegateType,
 } from "./delegate.js";
 import {
@@ -597,6 +610,214 @@ export async function watchRefreshLoop(
   }
   process.stderr.write("[remote] watch stopped (SIGINT)\n");
   return 0;
+}
+
+/**
+ * P4 — the conductor's FOREGROUND watch loop (NO daemon, NO pid file — run it in
+ * a dedicated tmux window, exactly like `watchRefreshLoop` / `h2a bridge
+ * --watch`). Each pass is timestamped; SIGINT (Ctrl-C) stops it cleanly with a
+ * message and exit 0. A pass failure is logged and the loop keeps going. The
+ * `pass` is the conductor pass (reconcile + start `pending` jobs under the cap);
+ * `signals` is injectable so tests never emit a real SIGINT.
+ */
+export async function conductLoop(
+  minutes: number,
+  pass: () => Promise<{ started: number; finished: number }>,
+  signals: {
+    on(event: "SIGINT", listener: () => void): unknown;
+    removeListener(event: "SIGINT", listener: () => void): unknown;
+  } = process,
+): Promise<number> {
+  let stopped = false;
+  let wake: (() => void) | undefined;
+  const onSigint = () => {
+    stopped = true;
+    wake?.();
+  };
+  signals.on("SIGINT", onSigint);
+  try {
+    while (!stopped) {
+      process.stderr.write(
+        `[remote] conduct pass — ${new Date().toISOString()}\n`,
+      );
+      try {
+        const { started, finished } = await pass();
+        process.stderr.write(
+          `[remote] conduct: ${started} started, ${finished} finished this pass\n`,
+        );
+      } catch (error) {
+        process.stderr.write(
+          `[remote] conduct pass failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}\n`,
+        );
+      }
+      if (stopped) break;
+      process.stderr.write(
+        `[remote] next conduct pass in ${minutes} min (Ctrl-C to stop)\n`,
+      );
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, minutes * 60_000);
+        wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      wake = undefined;
+    }
+  } finally {
+    signals.removeListener("SIGINT", onSigint);
+  }
+  process.stderr.write("[remote] conduct stopped (SIGINT)\n");
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// P4 — startJob: the EFFECTIVE launch (local tmux / remote Pod) of one job,
+// factored out of the `delegate` action so BOTH `delegate` (when a slot is free)
+// and the conductor (draining the `pending` queue) launch jobs the same way.
+// ---------------------------------------------------------------------------
+
+export type StartJobResult =
+  | { started: true; target: "local" | "remote"; detail: string }
+  | { started: false; error: string };
+
+/**
+ * Launch a job that is enrolled in the registry (typically `pending`): spawn the
+ * agent (local detached tmux, or a Pod), advance the registry entry to
+ * `running`, mirror it under track (best-effort), and propagate the spawn-depth
+ * budget to the child via `REMOTE_DELEGATE_DEPTH`. The launch params are read
+ * from the entry's queued-launch fields (tool/task/headless/remoteTarget/
+ * originCwd/explicitCwd/depthBudget/trackWp), set at `delegate` time.
+ *
+ * Never throws: any spawn/registry error is returned as `{started:false}` so the
+ * conductor loop keeps going. For remote, the per-job workspace is created here
+ * (so a queued remote job doesn't hold a workspace while waiting).
+ */
+export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
+  const task = job.task ?? "";
+  const headless = job.headless === true;
+  const trackWp = job.trackWp;
+  // Mirror the job under track as soon as it actually starts (best-effort).
+  const mirrorNew = () => {
+    if (trackWp) {
+      runTrackMirror(
+        trackItemNewArgs(trackWp, { id: job.id, ...(job.task !== undefined ? { task: job.task } : {}) }),
+        job.originCwd ?? process.cwd(),
+      );
+    }
+  };
+
+  // --- REMOTE (P2 path), now also queue-driven. -----------------------------
+  if (job.remoteTarget !== undefined) {
+    try {
+      const url = job.remoteTarget;
+      await ensureConnected(url);
+      const ws = await createWorkspace(url, { displayName: `job-${job.id}` });
+      const remoteArgs = buildRemoteDelegate(job.tool, task, headless);
+      const session = await createRemoteSession(url, {
+        profile: remoteArgs.profile,
+        target: getDefaultTarget(),
+        workspaceId: ws.id,
+        displayName: `job-${job.id}`,
+        ...(remoteArgs.startupArgs.length > 0
+          ? { startupArgs: remoteArgs.startupArgs }
+          : {}),
+      });
+      enroll({
+        id: job.id,
+        tool: job.tool,
+        kind: "remote",
+        cwd: ws.id,
+        source: "remote",
+        label: job.id,
+        remoteId: session.id,
+        role: "job",
+        jobState: "running",
+      });
+      mirrorNew();
+      return {
+        started: true,
+        target: "remote",
+        detail: `${url}/sessions/${session.id} (workspace ${ws.id})`,
+      };
+    } catch (err) {
+      return { started: false, error: (err as Error).message };
+    }
+  }
+
+  // --- LOCAL (P1 path), now also queue-driven. ------------------------------
+  if (!tmuxAvailable()) {
+    return { started: false, error: "tmux is not installed locally" };
+  }
+  const originCwd = job.originCwd ?? process.cwd();
+  let argv: { command: string; args: string[] };
+  try {
+    argv = buildDelegateArgs(job.tool, task, headless);
+  } catch (err) {
+    return { started: false, error: (err as Error).message };
+  }
+  let runCwd: string;
+  let isolated: boolean;
+  try {
+    ({ runCwd, isolated } = resolveJobCwd(originCwd, job.id, {
+      ...(job.explicitCwd !== undefined ? { explicitCwd: job.explicitCwd } : {}),
+    }));
+  } catch (err) {
+    return { started: false, error: (err as Error).message };
+  }
+
+  // Propagate the child's remaining spawn-depth budget through the env so a job
+  // that itself runs `remote delegate` inherits a DECREMENTED budget (depth=0 →
+  // refuse). tmux inherits the spawning process's env, so set it around spawn.
+  const prevDepth = process.env[DEPTH_ENV];
+  process.env[DEPTH_ENV] = childDepthEnvValue(job.depthBudget ?? clampDepth(undefined));
+  let tmuxSession: string;
+  try {
+    if (headless) {
+      const dir = jobDir(originCwd, job.id);
+      ({ name: tmuxSession } = startHeadlessSession(
+        job.tool,
+        argv.command,
+        runCwd,
+        argv.args,
+        join(dir, "result.json"),
+        join(dir, "output.log"),
+        job.id,
+      ));
+    } else {
+      ({ name: tmuxSession } = startLocalSession(
+        job.tool,
+        argv.command,
+        runCwd,
+        argv.args,
+        job.id,
+      ));
+      const h2a = getH2aConfig();
+      startH2aWindow(tmuxSession, runCwd, h2a.command);
+    }
+  } catch (err) {
+    return { started: false, error: (err as Error).message };
+  } finally {
+    if (prevDepth === undefined) delete process.env[DEPTH_ENV];
+    else process.env[DEPTH_ENV] = prevDepth;
+  }
+
+  enroll({
+    id: job.id,
+    tool: job.tool,
+    kind: "local-tmux",
+    cwd: runCwd,
+    source: "run",
+    label: job.id,
+    tmuxSession,
+    role: "job",
+    jobState: "running",
+  });
+  mirrorNew();
+  return {
+    started: true,
+    target: "local",
+    detail: `${runCwd}${isolated ? " [worktree]" : ""}`,
+  };
 }
 
 function getConfiguredRemote(overrideUrl?: string): string {
@@ -2284,7 +2505,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   program
     .command("delegate <type> <task>")
     .description(
-      "Delegate a task to a LIVE agent (claude/codex/agy) in a detached tmux session, primed with <task> (passed as a single argv — never shell-concatenated) and with the h2a side-window so the parent/master dialogue works. Returns a job id. Supervise with `remote jobs`. `--remote` runs the job CONCURRENTLY in a SCW Pod on the shared RWX volume (subPath per job).",
+      "Delegate a task to a LIVE agent (claude/codex/agy) in a detached tmux session, primed with <task> (passed as a single argv — never shell-concatenated) and with the h2a side-window so the parent/master dialogue works. Returns a job id. Supervise with `remote jobs`; drain the queue with `remote jobs conduct`. `--remote` runs the job CONCURRENTLY in a SCW Pod on the shared RWX volume (subPath per job). Beyond the concurrency cap (default 16) the job is QUEUED (pending) and started by the conductor as slots free.",
     )
     .option(
       "--remote [url]",
@@ -2310,6 +2531,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--parent <h2a-instance>",
       "alias of --on-done: the delegating parent's h2a instance (callback + decision recipient)",
     )
+    .option(
+      "--max-concurrent <n>",
+      "concurrency cap for this delegation decision (default: config maxConcurrent / REMOTE_MAX_CONCURRENT / 16). Beyond `running` jobs at the cap, this job is QUEUED (pending).",
+    )
+    .option(
+      "--max-depth <d>",
+      "spawn-depth budget granted to this job (clamp 1–3, default 1, à la Hermes). A job inherits a DECREMENTED budget via REMOTE_DELEGATE_DEPTH; at 0 a nested `delegate` refuses.",
+    )
+    .option(
+      "--track <wpId>",
+      "mirror this job as a track item under workpackage <wpId> (`track item new --parent`, realized on done/failed). Best-effort: skipped silently if track is absent.",
+    )
     .action(
       async (
         type: string,
@@ -2321,6 +2554,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           headless?: boolean;
           onDone?: string;
           parent?: string;
+          maxConcurrent?: string;
+          maxDepth?: string;
+          track?: string;
         },
       ) => {
         if (!isDelegateType(type)) {
@@ -2342,150 +2578,127 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
 
-        // --- REMOTE delegation (P2): a CONCURRENT job in a SCW Pod. -----------
-        // Each job gets its OWN control-plane workspace, which becomes a distinct
-        // subPath on the ONE shared RWX volume (no per-job PVC; RWX is multi-node
-        // → no concurrency cap). The task rides the SAFE argv channel
-        // `startupArgs` (→ SESSION_STARTUP_ARGS JSON), never a shell string.
-        if (opts.remote !== undefined && opts.remote !== false) {
-          let url: string;
-          let remoteArgs: { profile: DelegateType; startupArgs: string[] };
+        // --- Spawn-depth guard (P4). A `delegate` invoked FROM a job inherits a
+        // budget via REMOTE_DELEGATE_DEPTH; at 0 it must refuse (runaway-tree
+        // guard, à la Hermes max_spawn_depth). Top-level: the requested
+        // --max-depth (clamped 1–3) is the budget.
+        const requestedDepth =
+          opts.maxDepth !== undefined ? Number.parseInt(opts.maxDepth, 10) : undefined;
+        const depthBudget = inheritedDepthBudget(requestedDepth, process.env);
+        if (!canDelegateAtDepth(depthBudget)) {
+          process.stderr.write(
+            "[remote] spawn-depth budget exhausted (REMOTE_DELEGATE_DEPTH=0) — this job has reached its --max-depth and may not delegate further.\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        // --- Concurrency cap (P4). The cap applies to BOTH local and remote
+        // (shared RWX is multi-node; no CSI packing limit). Beyond `running`
+        // jobs at the cap, ENQUEUE the job (jobState:"pending") instead of
+        // launching it; the conductor (`remote jobs conduct`) starts it later.
+        const cap =
+          opts.maxConcurrent !== undefined
+            ? Number.parseInt(opts.maxConcurrent, 10)
+            : getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT;
+        const effectiveCap =
+          Number.isFinite(cap) && cap > 0 ? cap : DEFAULT_MAX_CONCURRENT;
+
+        const isRemote = opts.remote !== undefined && opts.remote !== false;
+        let remoteTarget: string | undefined;
+        if (isRemote) {
           try {
-            url = getConfiguredRemote(
+            remoteTarget = getConfiguredRemote(
               typeof opts.remote === "string" ? opts.remote : undefined,
-            );
-            remoteArgs = buildRemoteDelegate(
-              jobType,
-              task,
-              opts.headless === true,
             );
           } catch (err) {
             process.stderr.write(`[remote] ${(err as Error).message}\n`);
             process.exitCode = 1;
             return;
           }
-          await ensureConnected(url);
-          // Per-job workspace → per-job subPath on the shared RWX volume.
-          const ws = await createWorkspace(url, { displayName: `job-${jobId}` });
-          const session = await createRemoteSession(url, {
-            profile: remoteArgs.profile,
-            target: getDefaultTarget(),
-            workspaceId: ws.id,
-            displayName: `job-${jobId}`,
-            ...(remoteArgs.startupArgs.length > 0
-              ? { startupArgs: remoteArgs.startupArgs }
-              : {}),
-          });
-          try {
-            enroll({
-              id: jobId,
-              tool: jobType,
-              kind: "remote",
-              cwd: ws.id,
-              source: "remote",
-              label: jobId,
-              remoteId: session.id,
-              role: "job",
-              jobState: "running",
-              task,
-              ...(callbackTo !== undefined ? { callbackTo } : {}),
-            });
-          } catch {
-            // registry hiccup must not break the delegation
-          }
-          process.stderr.write(
-            `[remote] delegated REMOTE job ${jobId} (${jobType}${opts.headless ? " headless" : ""}) ` +
-              `→ ${url}/sessions/${session.id} (workspace ${ws.id})\n` +
-              `[remote] supervise: remote jobs status ${jobId}   attach: remote jobs attach ${jobId}\n`,
-          );
-          process.stdout.write(`${jobId}\n`);
-          return;
-        }
-
-        // --- LOCAL delegation (P1): a detached tmux session. -----------------
-        if (!tmuxAvailable()) {
+        } else if (!tmuxAvailable()) {
           process.stderr.write(
             "[remote] tmux is not installed locally — local `remote delegate` needs it (use --remote for a Pod).\n",
           );
           process.exitCode = 1;
           return;
         }
-        const originCwd = process.cwd();
-        let argv: { command: string; args: string[] };
-        try {
-          argv = buildDelegateArgs(jobType, task, opts.headless === true);
-        } catch (err) {
-          process.stderr.write(`[remote] ${(err as Error).message}\n`);
-          process.exitCode = 1;
-          return;
-        }
-        // File-tree isolation: a dedicated git worktree per job (default), or
-        // the explicit --cwd. The single-writer guard only protects the .jsonl,
-        // so concurrent jobs in the shared cwd would clobber the working tree.
-        let runCwd: string;
-        let isolated: boolean;
-        try {
-          ({ runCwd, isolated } = resolveJobCwd(originCwd, jobId, {
-            ...(opts.cwd !== undefined ? { explicitCwd: resolve(opts.cwd) } : {}),
-          }));
-        } catch (err) {
-          process.stderr.write(`[remote] ${(err as Error).message}\n`);
-          process.exitCode = 1;
-          return;
-        }
 
-        let tmuxSession: string;
-        if (opts.headless === true) {
-          const dir = jobDir(originCwd, jobId);
-          const { name } = startHeadlessSession(
-            jobType,
-            argv.command,
-            runCwd,
-            argv.args,
-            join(dir, "result.json"),
-            join(dir, "output.log"),
-            jobId,
-          );
-          tmuxSession = name;
-        } else {
-          const { name } = startLocalSession(
-            jobType,
-            argv.command,
-            runCwd,
-            argv.args,
-            jobId,
-          );
-          tmuxSession = name;
-          // h2a side-window so the parent/master feedback loop is possible.
-          const h2a = getH2aConfig();
-          if (startH2aWindow(name, runCwd, h2a.command)) {
-            process.stderr.write(
-              `[remote] h2a window started in ${jobId} (${h2a.command})\n`,
-            );
-          }
-        }
-
-        // Enroll the job in the SAME registry (role:"job"); reuses the atomic
-        // write + liveness guards. Best-effort: the tmux session is up regardless.
+        // Enroll the job FIRST as `pending`, carrying the full queued-launch spec
+        // so the conductor can launch it later from the registry alone. Reuses
+        // the atomic write. Best-effort: a registry hiccup must not crash the CLI.
+        const explicitCwd =
+          !isRemote && opts.cwd !== undefined ? resolve(opts.cwd) : undefined;
         try {
           enroll({
             id: jobId,
             tool: jobType,
-            kind: "local-tmux",
-            cwd: runCwd,
-            source: "run",
+            kind: isRemote ? "remote" : "local-tmux",
+            cwd: isRemote ? `job-${jobId}` : process.cwd(),
+            source: isRemote ? "remote" : "run",
             label: jobId,
-            tmuxSession,
             role: "job",
-            jobState: "running",
+            jobState: "pending",
             task,
+            headless: opts.headless === true,
+            originCwd: process.cwd(),
+            depthBudget,
+            ...(remoteTarget !== undefined ? { remoteTarget } : {}),
+            ...(explicitCwd !== undefined ? { explicitCwd } : {}),
             ...(callbackTo !== undefined ? { callbackTo } : {}),
+            ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
           });
         } catch {
           // registry hiccup must not break the delegation
         }
+
+        // Free slot? Launch now (same path as the conductor). Else stay queued.
+        if (!hasFreeSlot(listJobs(), effectiveCap)) {
+          process.stderr.write(
+            `[remote] queued job ${jobId} (${jobType}${opts.headless ? " headless" : ""}${isRemote ? " remote" : ""}) — ` +
+              `${effectiveCap} concurrent slot(s) busy. Start it with: remote jobs conduct\n`,
+          );
+          process.stdout.write(`${jobId}\n`);
+          return;
+        }
+
+        const job = listJobs().find((e) => e.id === jobId);
+        if (!job) {
+          // Registry write failed AND we have a free slot — fall back to a
+          // throwaway in-memory entry so the launch still happens.
+          process.stderr.write(
+            `[remote] job ${jobId} not in registry after enroll — launching from an in-memory spec\n`,
+          );
+        }
+        const launchEntry: RegistryEntry =
+          job ??
+          ({
+            id: jobId,
+            tool: jobType,
+            kind: isRemote ? "remote" : "local-tmux",
+            cwd: process.cwd(),
+            enrolledAt: new Date().toISOString(),
+            lastSeenAt: new Date().toISOString(),
+            source: isRemote ? "remote" : "run",
+            role: "job",
+            jobState: "pending",
+            task,
+            headless: opts.headless === true,
+            originCwd: process.cwd(),
+            depthBudget,
+            ...(remoteTarget !== undefined ? { remoteTarget } : {}),
+            ...(explicitCwd !== undefined ? { explicitCwd } : {}),
+            ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
+          } satisfies RegistryEntry);
+
+        const result = await startJob(launchEntry);
+        if (!result.started) {
+          process.stderr.write(`[remote] failed to start job ${jobId}: ${result.error}\n`);
+          process.exitCode = 1;
+          return;
+        }
         process.stderr.write(
-          `[remote] delegated job ${jobId} (${jobType}${opts.headless ? " headless" : ""}) in ${runCwd}${isolated ? " [worktree]" : ""}\n` +
+          `[remote] delegated ${result.target === "remote" ? "REMOTE " : ""}job ${jobId} (${jobType}${opts.headless ? " headless" : ""}) ${result.target === "remote" ? "→ " : "in "}${result.detail}\n` +
             `[remote] supervise: remote jobs status ${jobId}` +
             (opts.headless ? "" : `   attach: remote jobs attach ${jobId}`) +
             "\n",
@@ -2504,6 +2717,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   const jobLive = (e: ReturnType<typeof listJobs>[number]): boolean =>
     isLive(e);
+
+  // Best-effort: realize the track mirror item when a job reaches a terminal
+  // state. Skipped silently when the job carries no `trackWp` or track is absent.
+  const realizeTrackMirror = (job: RegistryEntry): void => {
+    if (!job.trackWp) return;
+    runTrackMirror(trackItemRealizeArgs({ id: job.id }), job.originCwd ?? process.cwd());
+  };
 
   // Persist the terminal state of jobs whose runtime has ended:
   //  - LOCAL: a HEADLESS job that wrote a result.json reconciles to its real
@@ -2524,7 +2744,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     for (const job of listJobs()) {
       if (job.kind === "remote") continue;
       const state = job.jobState ?? "pending";
-      if (state === "done" || state === "failed") continue;
+      // A `pending` job is QUEUED, not launched: it has no tmux session yet, so
+      // its non-liveness must NOT be read as a crash. Leave it for the conductor.
+      if (state === "pending" || state === "done" || state === "failed") continue;
       if (jobLive(job)) continue;
       const result = readJobResult(process.cwd(), job.id);
       const advanced = advanceJob(job.id, result?.state ?? "failed");
@@ -2533,14 +2755,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           state: advanced.jobState ?? "failed",
           ...(result?.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
         });
+        realizeTrackMirror(advanced);
       }
     }
-    // Remote: reconcile against the control-plane session list.
+    // Remote: reconcile against the control-plane session list. Skip `pending`
+    // (queued, no Pod yet) — only RUNNING remote jobs are checked against live.
     const remoteJobs = listJobs().filter(
       (j) =>
         j.kind === "remote" &&
-        j.jobState !== "done" &&
-        j.jobState !== "failed",
+        (j.jobState ?? "pending") === "running",
     );
     if (remoteJobs.length > 0) {
       try {
@@ -2555,6 +2778,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           // the parent's Pod if the parent is remote (idempotent by file name).
           if (advanced) {
             emitJobDone(advanced, { state: advanced.jobState ?? t.to });
+            realizeTrackMirror(advanced);
           }
         }
       } catch {
@@ -2778,6 +3002,98 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.exitCode = 1;
       }
     });
+
+  // P4 — the CONDUCTOR. A single pass: (a) reconcile job state (consume finished
+  // jobs → frees a slot + emits job.done + realizes the track mirror), (b) start
+  // `pending` jobs while `running < cap`, via the SAME `startJob` path delegate
+  // uses. With `--watch <min>` it loops in the FOREGROUND (dedicated tmux
+  // window, like `h2a bridge --watch`), no daemon. SIGINT → clean exit 0.
+  const conductPass = async (
+    cap: number,
+  ): Promise<{ started: number; finished: number }> => {
+    const before = listJobs();
+    const terminalBefore = before.filter(
+      (j) => j.jobState === "done" || j.jobState === "failed",
+    ).length;
+    // (a) reconcile (also emits job.done + realizes track mirror on terminal).
+    const after = await reconcileJobs();
+    const terminalAfter = after.filter(
+      (j) => j.jobState === "done" || j.jobState === "failed",
+    ).length;
+    const finished = Math.max(0, terminalAfter - terminalBefore);
+    // (b) start pending jobs under the cap (oldest-first FIFO).
+    let started = 0;
+    for (const id of planNextStarts(after, cap)) {
+      const job = listJobs().find((e) => e.id === id);
+      if (!job) continue;
+      const result = await startJob(job);
+      if (result.started) {
+        started += 1;
+        process.stderr.write(
+          `[remote] conduct: started ${id} (${job.tool}) ${result.target === "remote" ? "→ " : "in "}${result.detail}\n`,
+        );
+      } else {
+        // A launch failure fails the job (frees nothing it didn't hold) so the
+        // queue keeps moving; the error is recorded on stderr.
+        advanceJob(id, "failed");
+        process.stderr.write(
+          `[remote] conduct: failed to start ${id}: ${result.error}\n`,
+        );
+      }
+    }
+    return { started, finished };
+  };
+
+  jobsCommand
+    .command("conduct")
+    .description(
+      "Conductor: reconcile job state, consume finished jobs, and START queued (pending) jobs while running < cap — the SAME launch path as `remote delegate`. One pass by default; `--watch <min>` loops in the FOREGROUND (run in a dedicated tmux window, no daemon; Ctrl-C to stop).",
+    )
+    .option(
+      "--watch <minutes>",
+      "loop in the foreground every <minutes> (whole number >= 1); without it, runs a single pass and exits",
+    )
+    .option(
+      "--max-concurrent <n>",
+      "concurrency cap (default: config maxConcurrent / REMOTE_MAX_CONCURRENT / 16)",
+    )
+    .option(
+      "--max-depth <d>",
+      "spawn-depth budget recorded for jobs this conductor starts (clamp 1–3, default: each job's recorded budget)",
+    )
+    .action(
+      async (opts: {
+        watch?: string;
+        maxConcurrent?: string;
+        maxDepth?: string;
+      }) => {
+        const capRaw =
+          opts.maxConcurrent !== undefined
+            ? Number.parseInt(opts.maxConcurrent, 10)
+            : getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT;
+        const cap =
+          Number.isFinite(capRaw) && capRaw > 0 ? capRaw : DEFAULT_MAX_CONCURRENT;
+        // `--max-depth` here clamps the budget the conductor re-stamps on the
+        // jobs it starts (a job enrolled by a parent already carries its budget;
+        // this only matters for jobs the conductor may re-stamp). Validate it.
+        if (opts.maxDepth !== undefined) {
+          clampDepth(Number.parseInt(opts.maxDepth, 10));
+        }
+        const minutes =
+          opts.watch === undefined ? undefined : parseWatchMinutes(opts.watch);
+        if (minutes === undefined) {
+          const { started, finished } = await conductPass(cap);
+          process.stderr.write(
+            `[remote] conduct: cap ${cap} — ${started} started, ${finished} finished\n`,
+          );
+          return;
+        }
+        process.stderr.write(
+          `[remote] conducting (cap ${cap}, every ${minutes} min) — Ctrl-C to stop\n`,
+        );
+        process.exitCode = await conductLoop(minutes, () => conductPass(cap));
+      },
+    );
 
   // ---------------------------------------------------------------------------
   // relaunch — bring idle local sessions back in situ, each resuming its OWN conv
