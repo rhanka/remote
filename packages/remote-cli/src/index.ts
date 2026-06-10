@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { Command } from "commander";
@@ -47,13 +47,16 @@ import { syncConversation, type SyncDirection } from "./sync.js";
 import {
   attachLocalSession,
   attachPodTmux,
+  capturePane,
   fanoutLabels,
   findLocalSession,
   killLocalSession,
   listLocalSessions,
   localSessionIdle,
+  localSessionName,
   relaunchInSession,
   startH2aWindow,
+  startHeadlessSession,
   startLocalSession,
   tmuxAvailable,
 } from "./tmux.js";
@@ -64,7 +67,26 @@ import {
   type RestoreOptions,
 } from "./restore.js";
 import { getLayoutConfig } from "./config.js";
-import { enrollFromRun, listLocalForLs, loadRegistry } from "./registry.js";
+import {
+  advanceJob,
+  enroll,
+  enrollFromRun,
+  isLive,
+  listJobs,
+  listLocalForLs,
+  loadRegistry,
+} from "./registry.js";
+import {
+  assertSafeName,
+  buildDelegateArgs,
+  buildJobRows,
+  isDelegateType,
+  jobDir,
+  readJobResult,
+  renderJobsTable,
+  resolveJobCwd,
+  type DelegateType,
+} from "./delegate.js";
 import { guardConvWriters } from "./conv-guard.js";
 import {
   handleClaudeHook,
@@ -2240,6 +2262,252 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(`[remote] attach with: remote attach ${only.slug}\n`);
       },
     );
+
+  // ---------------------------------------------------------------------------
+  // delegate — spawn a cross-type agent (claude/codex/agy) as a LOCAL job (P1)
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("delegate <type> <task>")
+    .description(
+      "Delegate a task to a LIVE agent (claude/codex/agy) in a detached tmux session, primed with <task> (passed as a single argv — never shell-concatenated) and with the h2a side-window so the parent/master dialogue works. Returns a job id. Supervise with `remote jobs`.",
+    )
+    .option(
+      "--cwd <path>",
+      "run the agent in this directory as-is (default: a dedicated git worktree under .remote/jobs/<id>/wt when cwd is a repo, else cwd)",
+    )
+    .option(
+      "--name <label>",
+      "job id / tmux slug (letters/digits/_/-; default: <type>-<random>)",
+    )
+    .option(
+      "--headless",
+      "run-once-exit batch mode: claude -p / codex exec, stdout→output.log, write result.json, then END the session (no live agent; agy has no headless mode)",
+    )
+    .action(
+      async (
+        type: string,
+        task: string,
+        opts: { cwd?: string; name?: string; headless?: boolean },
+      ) => {
+        if (!tmuxAvailable()) {
+          process.stderr.write(
+            "[remote] tmux is not installed locally — `remote delegate` needs it.\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (!isDelegateType(type)) {
+          process.stderr.write(
+            `[remote] unknown agent type "${type}" (use: claude | codex | agy)\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const jobType: DelegateType = type;
+        const jobId = opts.name ?? `${jobType}-${Math.random().toString(36).slice(2, 8)}`;
+        try {
+          assertSafeName(jobId);
+        } catch (err) {
+          process.stderr.write(`[remote] ${(err as Error).message}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        const originCwd = process.cwd();
+        let argv: { command: string; args: string[] };
+        try {
+          argv = buildDelegateArgs(jobType, task, opts.headless === true);
+        } catch (err) {
+          process.stderr.write(`[remote] ${(err as Error).message}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        // File-tree isolation: a dedicated git worktree per job (default), or
+        // the explicit --cwd. The single-writer guard only protects the .jsonl,
+        // so concurrent jobs in the shared cwd would clobber the working tree.
+        let runCwd: string;
+        let isolated: boolean;
+        try {
+          ({ runCwd, isolated } = resolveJobCwd(originCwd, jobId, {
+            ...(opts.cwd !== undefined ? { explicitCwd: resolve(opts.cwd) } : {}),
+          }));
+        } catch (err) {
+          process.stderr.write(`[remote] ${(err as Error).message}\n`);
+          process.exitCode = 1;
+          return;
+        }
+
+        let tmuxSession: string;
+        if (opts.headless === true) {
+          const dir = jobDir(originCwd, jobId);
+          const { name } = startHeadlessSession(
+            jobType,
+            argv.command,
+            runCwd,
+            argv.args,
+            join(dir, "result.json"),
+            join(dir, "output.log"),
+            jobId,
+          );
+          tmuxSession = name;
+        } else {
+          const { name } = startLocalSession(
+            jobType,
+            argv.command,
+            runCwd,
+            argv.args,
+            jobId,
+          );
+          tmuxSession = name;
+          // h2a side-window so the parent/master feedback loop is possible.
+          const h2a = getH2aConfig();
+          if (startH2aWindow(name, runCwd, h2a.command)) {
+            process.stderr.write(
+              `[remote] h2a window started in ${jobId} (${h2a.command})\n`,
+            );
+          }
+        }
+
+        // Enroll the job in the SAME registry (role:"job"); reuses the atomic
+        // write + liveness guards. Best-effort: the tmux session is up regardless.
+        try {
+          enroll({
+            id: jobId,
+            tool: jobType,
+            kind: "local-tmux",
+            cwd: runCwd,
+            source: "run",
+            label: jobId,
+            tmuxSession,
+            role: "job",
+            jobState: "running",
+            task,
+          });
+        } catch {
+          // registry hiccup must not break the delegation
+        }
+        process.stderr.write(
+          `[remote] delegated job ${jobId} (${jobType}${opts.headless ? " headless" : ""}) in ${runCwd}${isolated ? " [worktree]" : ""}\n` +
+            `[remote] supervise: remote jobs status ${jobId}` +
+            (opts.headless ? "" : `   attach: remote jobs attach ${jobId}`) +
+            "\n",
+        );
+        process.stdout.write(`${jobId}\n`);
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // jobs — supervise delegated jobs (ls / status / attach / logs)
+  // ---------------------------------------------------------------------------
+
+  const jobsCommand = program
+    .command("jobs")
+    .description("Supervise delegated agent jobs (see `remote delegate`).");
+
+  const jobLive = (e: ReturnType<typeof listJobs>[number]): boolean =>
+    isLive(e);
+
+  // Persist the terminal state of jobs whose tmux session has ended: a HEADLESS
+  // job that wrote a result.json reconciles to its real done/failed; any other
+  // dead-but-still-"running" job (interactive crashed/finished) reconciles to
+  // failed. Makes the registry the source of truth; the pure reconciler is just
+  // a display fallback. Returns the freshly-reloaded jobs.
+  const reconcileJobs = (): ReturnType<typeof listJobs> => {
+    for (const job of listJobs()) {
+      const state = job.jobState ?? "pending";
+      if (state === "done" || state === "failed") continue;
+      if (jobLive(job)) continue;
+      const result = readJobResult(process.cwd(), job.id);
+      advanceJob(job.id, result?.state ?? "failed");
+    }
+    return listJobs();
+  };
+
+  jobsCommand
+    .command("ls")
+    .description(
+      "List delegated jobs (id/type/state/age/cwd), live state reconciled against tmux.",
+    )
+    .action(() => {
+      const rows = buildJobRows(reconcileJobs(), jobLive);
+      process.stdout.write(`${renderJobsTable(rows)}\n`);
+    });
+
+  jobsCommand
+    .command("status <id>")
+    .description(
+      "Show a job's detail (+ output.log / result.json paths for headless jobs).",
+    )
+    .action((id: string) => {
+      reconcileJobs();
+      const job = listJobs().find((e) => e.id === id);
+      if (!job) {
+        process.stderr.write(`[remote] no job "${id}" (see: remote jobs ls)\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const live = jobLive(job);
+      const dir = jobDir(process.cwd(), id);
+      const lines = [
+        `id:      ${job.id}`,
+        `type:    ${job.tool}`,
+        `state:   ${job.jobState ?? "pending"}${live ? " (live)" : ""}`,
+        `cwd:     ${job.cwd}`,
+        `tmux:    ${job.tmuxSession ?? "-"}`,
+        `task:    ${job.task ?? "-"}`,
+        `started: ${job.enrolledAt}`,
+      ];
+      const resultPath = join(dir, "result.json");
+      const logPath = join(dir, "output.log");
+      if (existsSync(resultPath)) lines.push(`result:  ${resultPath}`);
+      if (existsSync(logPath)) lines.push(`output:  ${logPath}`);
+      process.stdout.write(`${lines.join("\n")}\n`);
+    });
+
+  jobsCommand
+    .command("attach <id>")
+    .description("Attach into the job's tmux session (Ctrl-b d to detach).")
+    .action((id: string) => {
+      const job = listJobs().find((e) => e.id === id);
+      const name = job?.tmuxSession ?? localSessionName(id);
+      if (!findLocalSession(name)) {
+        process.stderr.write(
+          `[remote] no live tmux session for job "${id}" (it may have ended; see: remote jobs status ${id})\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      attachLocalSession(name);
+    });
+
+  jobsCommand
+    .command("logs <id>")
+    .description(
+      "Tail a job's output: output.log (headless) or the tmux pane capture (interactive).",
+    )
+    .action((id: string) => {
+      const job = listJobs().find((e) => e.id === id);
+      if (!job) {
+        process.stderr.write(`[remote] no job "${id}" (see: remote jobs ls)\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const logPath = join(jobDir(process.cwd(), id), "output.log");
+      if (existsSync(logPath)) {
+        process.stdout.write(readFileSync(logPath, "utf8"));
+        return;
+      }
+      const name = job.tmuxSession ?? localSessionName(id);
+      const pane = capturePane(name);
+      if (pane) {
+        process.stdout.write(pane);
+        return;
+      }
+      process.stderr.write(
+        `[remote] no logs for job "${id}" (no output.log and the tmux pane is gone)\n`,
+      );
+      process.exitCode = 1;
+    });
 
   // ---------------------------------------------------------------------------
   // relaunch — bring idle local sessions back in situ, each resuming its OWN conv
