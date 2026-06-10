@@ -14,7 +14,16 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { uptime } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -171,6 +180,116 @@ function saveRegistry(entries: RegistryEntry[], path: string): void {
   renameSync(tmp, path);
 }
 
+// ---------------------------------------------------------------------------
+// Cross-process lock for load-modify-save mutations (S2/S3 fix).
+//
+// The registry is read-modified-written by CONCURRENT processes — `delegate`,
+// the conductor, and the claude SessionEnd hook can all mutate it at once.
+// Without a lock, two writers each load the same snapshot, modify a disjoint
+// entry, and the last `saveRegistry` wins → the other's enroll/advance is LOST.
+// The same race makes the concurrency cap leaky: `delegate` checks
+// `hasFreeSlot` then enrolls-as-running in two steps, so N delegations racing
+// can all see a free slot and overshoot the cap.
+//
+// The registry is LOCAL ONLY (the CLI writes it; pods never touch it — they have
+// no access to ~/.config/.../registry.json), so a LOCAL file lock is sufficient
+// — there is no cross-host writer to coordinate with. We use an exclusive
+// lockfile (`<path>.lock`, O_CREAT|O_EXCL) with a bounded spin and stale-lock
+// takeover, NOT a real OS flock(2): exclusive-create on the SAME local fs is the
+// portable primitive here (Node has no flock), and a crashed holder is recovered
+// by the staleness break below.
+// ---------------------------------------------------------------------------
+
+/** Spin parameters for the lockfile (bounded — a deadlock must never hang a hook). */
+const LOCK_STALE_MS = 10_000; // a lockfile older than this is assumed orphaned
+const LOCK_SPIN_MS = 5; // busy-wait granularity between acquire attempts
+const LOCK_MAX_WAIT_MS = 4_000; // give up waiting after this (then proceed best-effort)
+
+function lockPath(path: string): string {
+  return `${path}.lock`;
+}
+
+/** Busy-wait `ms` without a timer (we are holding a process-wide critical section). */
+function spinSleep(ms: number): void {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    // tight spin — ms is tiny (LOCK_SPIN_MS); a registry mutation is sub-ms.
+  }
+}
+
+/**
+ * Acquire the registry lockfile (exclusive create). Returns the fd on success,
+ * or undefined if it could not be acquired within LOCK_MAX_WAIT_MS (the caller
+ * then proceeds best-effort — a slow lock must NEVER take down a claude hook).
+ * Breaks a STALE lock (holder crashed) by age.
+ */
+function acquireLock(path: string): number | undefined {
+  const lp = lockPath(path);
+  mkdirSync(dirname(path), { recursive: true });
+  const deadline = Date.now() + LOCK_MAX_WAIT_MS;
+  for (;;) {
+    try {
+      const fd = openSync(lp, "wx"); // O_CREAT|O_EXCL|O_WRONLY
+      return fd;
+    } catch {
+      // Held — break it if it is stale (a crashed holder left it behind).
+      try {
+        const age = Date.now() - statSync(lp).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          rmSync(lp, { force: true });
+          continue; // retry the exclusive create immediately
+        }
+      } catch {
+        // raced with the holder releasing it → just retry the create
+      }
+      if (Date.now() >= deadline) return undefined; // give up, proceed best-effort
+      spinSleep(LOCK_SPIN_MS);
+    }
+  }
+}
+
+function releaseLock(fd: number, path: string): void {
+  try {
+    closeSync(fd);
+  } catch {
+    // already closed
+  }
+  try {
+    rmSync(lockPath(path), { force: true });
+  } catch {
+    // already gone
+  }
+}
+
+/**
+ * Run `fn` under the registry lock: load the current entries, let `fn` mutate
+ * them (and compute a return value), then persist atomically — all inside ONE
+ * critical section, so concurrent processes serialize and no enroll/advance is
+ * lost. `fn` returns `{ entries, result, save? }`: `entries` is what to save
+ * (return the same array you mutated), `result` is passed back to the caller, and
+ * `save:false` skips the write entirely (a read-only no-op must not rewrite — nor
+ * create — the file). If the lock can't be taken (a crashed holder, contention
+ * storm), we proceed WITHOUT it rather than block a hook — best-effort,
+ * last-writer-wins as before. Exported for tests.
+ */
+export function withRegistryLock<T>(
+  path: string,
+  fn: (entries: RegistryEntry[]) => {
+    entries: RegistryEntry[];
+    result: T;
+    save?: boolean;
+  },
+): T {
+  const fd = acquireLock(path);
+  try {
+    const { entries, result, save } = fn(loadRegistry(path));
+    if (save !== false) saveRegistry(entries, path);
+    return result;
+  } finally {
+    if (fd !== undefined) releaseLock(fd, path);
+  }
+}
+
 /**
  * Upsert by id. A re-enroll refreshes lastSeenAt, merges the new fields over
  * the stored ones, and REVIVES an ended entry (endedAt is dropped) — e.g. a
@@ -180,7 +299,18 @@ export function enroll(
   input: EnrollInput,
   path: string = resolveRegistryPath(),
 ): RegistryEntry {
-  const entries = loadRegistry(path);
+  return withRegistryLock(path, (entries) => {
+    const entry = applyEnroll(entries, input);
+    return { entries, result: entry };
+  });
+}
+
+/**
+ * Upsert `input` into `entries` IN PLACE and return the resulting entry. Pure
+ * over the array (no fs); shared by `enroll` (under the lock) and the atomic
+ * check-cap-and-enroll helper. The lock is held by the caller.
+ */
+function applyEnroll(entries: RegistryEntry[], input: EnrollInput): RegistryEntry {
   const now = new Date().toISOString();
   const idx = entries.findIndex((e) => e.id === input.id);
   const prev = idx >= 0 ? entries[idx] : undefined;
@@ -227,8 +357,39 @@ export function enroll(
   if (trackWp !== undefined) entry.trackWp = trackWp;
   if (idx >= 0) entries[idx] = entry;
   else entries.push(entry);
-  saveRegistry(entries, path);
   return entry;
+}
+
+/**
+ * ATOMIC "is there a free slot? → enroll-as-running" (S3 fix). The cap check and
+ * the running-enroll happen in ONE locked critical section, so two concurrent
+ * `delegate`s can never both see the same free slot and overshoot the cap.
+ * `running` counts CURRENT `running` jobs (`role:"job"`); when `running < cap`
+ * the `input` is upserted with `jobState:"running"` and the returned entry is
+ * non-undefined. When the cap is full, NOTHING is written and `undefined` is
+ * returned (the caller enqueues a `pending` entry instead). Exported for tests.
+ */
+export function tryClaimSlot(
+  input: EnrollInput,
+  cap: number,
+  path: string = resolveRegistryPath(),
+): RegistryEntry | undefined {
+  return withRegistryLock(path, (entries) => {
+    if (cap <= 0) return { entries, result: undefined, save: false };
+    const running = entries.filter(
+      (e) => e.role === "job" && (e.jobState ?? "pending") === "running",
+    ).length;
+    // The job being claimed may already exist as `pending` (delegate enrolled it
+    // first); don't double-count it against itself.
+    const self = entries.find((e) => e.id === input.id);
+    const selfRunning =
+      self?.role === "job" && (self.jobState ?? "pending") === "running" ? 1 : 0;
+    if (running - selfRunning >= cap) {
+      return { entries, result: undefined, save: false };
+    }
+    const entry = applyEnroll(entries, { ...input, jobState: "running" });
+    return { entries, result: entry };
+  });
 }
 
 /**
@@ -257,16 +418,22 @@ export function advanceJob(
   to: JobState,
   path: string = resolveRegistryPath(),
 ): RegistryEntry | undefined {
-  const entries = loadRegistry(path);
-  const entry = entries.find((e) => e.id === id);
-  if (!entry || entry.role !== "job") return undefined;
-  const from = entry.jobState ?? "pending";
-  if (from !== to && !canTransitionJob(from, to)) return undefined;
-  entry.jobState = to;
-  entry.lastSeenAt = new Date().toISOString();
-  if (to === "done" || to === "failed") entry.endedAt = entry.endedAt ?? entry.lastSeenAt;
-  saveRegistry(entries, path);
-  return entry;
+  return withRegistryLock(path, (entries) => {
+    const entry = entries.find((e) => e.id === id);
+    if (!entry || entry.role !== "job") {
+      return { entries, result: undefined, save: false };
+    }
+    const from = entry.jobState ?? "pending";
+    if (from !== to && !canTransitionJob(from, to)) {
+      return { entries, result: undefined, save: false };
+    }
+    entry.jobState = to;
+    entry.lastSeenAt = new Date().toISOString();
+    if (to === "done" || to === "failed") {
+      entry.endedAt = entry.endedAt ?? entry.lastSeenAt;
+    }
+    return { entries, result: entry };
+  });
 }
 
 /** Live job entries (role "job"), liveness reconciled like any other entry. */
@@ -280,12 +447,12 @@ export function touchEntry(
   id: string,
   path: string = resolveRegistryPath(),
 ): boolean {
-  const entries = loadRegistry(path);
-  const entry = entries.find((e) => e.id === id);
-  if (!entry) return false;
-  entry.lastSeenAt = new Date().toISOString();
-  saveRegistry(entries, path);
-  return true;
+  return withRegistryLock(path, (entries) => {
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) return { entries, result: false, save: false };
+    entry.lastSeenAt = new Date().toISOString();
+    return { entries, result: true };
+  });
 }
 
 /** Record the session's end. Returns false when the id is unknown. */
@@ -293,14 +460,14 @@ export function markEnded(
   id: string,
   path: string = resolveRegistryPath(),
 ): boolean {
-  const entries = loadRegistry(path);
-  const entry = entries.find((e) => e.id === id);
-  if (!entry) return false;
-  const now = new Date().toISOString();
-  entry.endedAt = now;
-  entry.lastSeenAt = now;
-  saveRegistry(entries, path);
-  return true;
+  return withRegistryLock(path, (entries) => {
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) return { entries, result: false, save: false };
+    const now = new Date().toISOString();
+    entry.endedAt = now;
+    entry.lastSeenAt = now;
+    return { entries, result: true };
+  });
 }
 
 function defaultTmuxHasSession(name: string): boolean {
@@ -410,16 +577,16 @@ export function listLive(opts: RegistryOpts = {}): RegistryEntry[] {
  */
 export function prune(maxAgeHours: number, opts: RegistryOpts = {}): number {
   const path = opts.path ?? resolveRegistryPath();
-  const entries = loadRegistry(path);
   const cutoff = Date.now() - maxAgeHours * 3600 * 1000;
-  const kept = entries.filter((e) => {
-    if (isLive(e, opts)) return true;
-    const last = Date.parse(e.endedAt ?? e.lastSeenAt);
-    return Number.isFinite(last) && last >= cutoff;
+  return withRegistryLock(path, (entries) => {
+    const kept = entries.filter((e) => {
+      if (isLive(e, opts)) return true;
+      const last = Date.parse(e.endedAt ?? e.lastSeenAt);
+      return Number.isFinite(last) && last >= cutoff;
+    });
+    if (kept.length === entries.length) return { entries, result: 0, save: false };
+    return { entries: kept, result: entries.length - kept.length };
   });
-  if (kept.length === entries.length) return 0;
-  saveRegistry(kept, path);
-  return entries.length - kept.length;
 }
 
 /** Map a CLI profile name to a registry tool (undefined for shell/opencode/…). */

@@ -13,6 +13,8 @@ import {
   markEnded,
   prune,
   touchEntry,
+  tryClaimSlot,
+  withRegistryLock,
   type RegistryEntry,
 } from "./registry.js";
 
@@ -346,5 +348,86 @@ describe("registry", () => {
         expect(loaded?.trackWp).toBeUndefined();
       });
     });
+  });
+});
+
+describe("registry concurrency (S2/S3)", () => {
+  const jobInput = (id: string) => ({
+    id,
+    tool: "claude" as const,
+    kind: "local-tmux" as const,
+    cwd: "/repo",
+    source: "run" as const,
+    role: "job" as const,
+  });
+
+  it("withRegistryLock serializes load-modify-save (no lost write across calls)", () => {
+    enroll({ ...jobInput("a"), jobState: "pending" }, regPath);
+    enroll({ ...jobInput("b"), jobState: "pending" }, regPath);
+    // Two interleaved-looking mutations on DISJOINT entries: under the lock each
+    // re-reads the freshest snapshot, so neither clobbers the other.
+    withRegistryLock(regPath, (entries) => {
+      const e = entries.find((x) => x.id === "a")!;
+      e.label = "first";
+      return { entries, result: undefined };
+    });
+    withRegistryLock(regPath, (entries) => {
+      const e = entries.find((x) => x.id === "b")!;
+      e.label = "second";
+      return { entries, result: undefined };
+    });
+    const all = loadRegistry(regPath);
+    expect(all.find((e) => e.id === "a")?.label).toBe("first");
+    expect(all.find((e) => e.id === "b")?.label).toBe("second");
+  });
+
+  it("withRegistryLock save:false does NOT create/rewrite the file", () => {
+    const r = withRegistryLock(regPath, (entries) => ({
+      entries,
+      result: 42,
+      save: false,
+    }));
+    expect(r).toBe(42);
+    expect(existsSync(regPath)).toBe(false);
+  });
+
+  it("tryClaimSlot enrolls running while under the cap", () => {
+    const claimed = tryClaimSlot(jobInput("j1"), 2, regPath);
+    expect(claimed?.jobState).toBe("running");
+    expect(loadRegistry(regPath).find((e) => e.id === "j1")?.jobState).toBe(
+      "running",
+    );
+  });
+
+  it("tryClaimSlot REFUSES at the cap and writes nothing (atomic check+enroll)", () => {
+    tryClaimSlot(jobInput("r1"), 1, regPath); // fills the only slot
+    const before = readFileSync(regPath, "utf8");
+    const claimed = tryClaimSlot(jobInput("r2"), 1, regPath);
+    expect(claimed).toBeUndefined();
+    // r2 was NOT written (no overshoot of the cap, and no stray entry).
+    expect(readFileSync(regPath, "utf8")).toBe(before);
+    expect(loadRegistry(regPath).some((e) => e.id === "r2")).toBe(false);
+  });
+
+  it("tryClaimSlot does not double-count a job already pending as its own slot", () => {
+    // Enroll j as pending, then claim it: it should be admitted (it is not yet
+    // running, so it doesn't count against the cap as itself).
+    enroll({ ...jobInput("j"), jobState: "pending" }, regPath);
+    const claimed = tryClaimSlot(jobInput("j"), 1, regPath);
+    expect(claimed?.jobState).toBe("running");
+  });
+
+  it("the cap counts only RUNNING jobs (pending/terminal free their slot)", () => {
+    enroll({ ...jobInput("done1"), jobState: "done" }, regPath);
+    enroll({ ...jobInput("pend1"), jobState: "pending" }, regPath);
+    // cap 1, no RUNNING job yet → a fresh claim succeeds.
+    expect(tryClaimSlot(jobInput("new1"), 1, regPath)?.jobState).toBe("running");
+    // now one is running → cap 1 is full.
+    expect(tryClaimSlot(jobInput("new2"), 1, regPath)).toBeUndefined();
+  });
+
+  it("cap <= 0 admits nothing", () => {
+    expect(tryClaimSlot(jobInput("z"), 0, regPath)).toBeUndefined();
+    expect(existsSync(regPath)).toBe(false);
   });
 });
