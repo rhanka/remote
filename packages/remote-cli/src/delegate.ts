@@ -85,6 +85,29 @@ export function buildDelegateArgs(
   }
 }
 
+/**
+ * P2 — REMOTE delegation. Map a (type, task) to the control-plane session body
+ * for a delegated agent running in a Pod. The agent CLI is the session PROFILE
+ * (profiles claude/codex/agy launch the matching binary on the Pod), and the
+ * task rides the ALREADY-SAFE argv channel `startupArgs` — exactly the args that
+ * follow the binary, which the session-agent reads from `SESSION_STARTUP_ARGS`
+ * (a JSON array, never a `bash -lc` string). We reuse `buildDelegateArgs` and
+ * DROP its `command` (the profile already provides the binary): `args` is what
+ * trails it (the bare task token interactive, `-p <task>` / `exec <task>`
+ * headless). Pure, exported for tests.
+ *
+ * SECURITY: the task stays a single argv element through `startupArgs` → JSON →
+ * the agent's argv; it is NEVER concatenated into a shell string.
+ */
+export function buildRemoteDelegate(
+  type: DelegateType,
+  task: string,
+  headless: boolean,
+): { profile: DelegateType; startupArgs: string[] } {
+  const { args } = buildDelegateArgs(type, task, headless);
+  return { profile: type, startupArgs: args };
+}
+
 /** Per-job directory under the ORIGIN cwd (where worktree + logs live). */
 export function jobDir(originCwd: string, jobId: string): string {
   return join(originCwd, ".remote", "jobs", jobId);
@@ -224,6 +247,35 @@ export function reconcileJobState(
   if (entry.endedAt) return "failed";
   if (!live) return "failed";
   return persisted;
+}
+
+/**
+ * P2 — CLUSTER reconciliation for REMOTE jobs (`kind:"remote"`). The registry
+ * reports a remote entry as `isLive` ALWAYS (it can't probe the cluster —
+ * registry.ts), so a delegated Pod that died/finished would stay "running"
+ * forever. Given the set of session ids the control-plane still lists
+ * (`listRemoteSessions`), this decides the transitions to apply: a remote job
+ * still in a non-terminal state whose `remoteId` is NOT in the live set has
+ * ended → `done` when it left a `result.json` (success/known exit), else
+ * `failed`. Jobs whose Pod is still listed, or already terminal, are untouched.
+ * Pure (the result read is injected), exported for tests.
+ */
+export function reconcileRemoteJobs(
+  jobs: ReadonlyArray<RegistryEntry>,
+  liveRemoteIds: ReadonlySet<string>,
+  readResult: (job: RegistryEntry) => JobResult | undefined,
+): Array<{ id: string; to: JobState }> {
+  const out: Array<{ id: string; to: JobState }> = [];
+  for (const job of jobs) {
+    if (job.kind !== "remote" || job.role !== "job") continue;
+    const state = job.jobState ?? "pending";
+    if (state === "done" || state === "failed") continue;
+    // The Pod is still listed by the control-plane → leave the job alone.
+    if (job.remoteId !== undefined && liveRemoteIds.has(job.remoteId)) continue;
+    const result = readResult(job);
+    out.push({ id: job.id, to: result?.state ?? "failed" });
+  }
+  return out;
 }
 
 /**

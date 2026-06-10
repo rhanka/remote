@@ -4,10 +4,12 @@ import {
   assertSafeName,
   buildDelegateArgs,
   buildJobRows,
+  buildRemoteDelegate,
   isDelegateType,
   jobDir,
   readJobResult,
   reconcileJobState,
+  reconcileRemoteJobs,
   renderJobsTable,
   resolveJobCwd,
 } from "./delegate.js";
@@ -202,5 +204,124 @@ describe("buildJobRows / renderJobsTable (jobs ls rendering)", () => {
 
   it("empty job list renders a placeholder", () => {
     expect(renderJobsTable([])).toBe("(no delegated jobs)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2 — REMOTE delegation
+// ---------------------------------------------------------------------------
+
+describe("buildRemoteDelegate (task via the safe startupArgs argv channel)", () => {
+  it("profile = type; interactive task is the bare positional argv", () => {
+    expect(buildRemoteDelegate("claude", "do X", false)).toEqual({
+      profile: "claude",
+      startupArgs: ["do X"],
+    });
+    expect(buildRemoteDelegate("codex", "do X", false)).toEqual({
+      profile: "codex",
+      startupArgs: ["do X"],
+    });
+    expect(buildRemoteDelegate("agy", "do X", false)).toEqual({
+      profile: "agy",
+      startupArgs: ["do X"],
+    });
+  });
+
+  it("headless drops the binary, keeps the per-type flags + task token", () => {
+    // The profile already provides the binary on the Pod; startupArgs is only
+    // what TRAILS it — never the binary name itself.
+    expect(buildRemoteDelegate("claude", "ship it", true)).toEqual({
+      profile: "claude",
+      startupArgs: ["-p", "ship it"],
+    });
+    expect(buildRemoteDelegate("codex", "ship it", true)).toEqual({
+      profile: "codex",
+      startupArgs: ["exec", "ship it"],
+    });
+  });
+
+  it("a task with shell metacharacters stays ONE argv element (no injection)", () => {
+    const evil = '"; rm -rf / #';
+    const { startupArgs } = buildRemoteDelegate("claude", evil, false);
+    expect(startupArgs).toEqual([evil]);
+    expect(startupArgs).toHaveLength(1);
+  });
+
+  it("headless agy is rejected (no confirmed headless mode)", () => {
+    expect(() => buildRemoteDelegate("agy", "x", true)).toThrow(/headless/);
+  });
+});
+
+describe("reconcileRemoteJobs (cluster reconciliation vs listRemoteSessions)", () => {
+  const remoteJob = (over: Partial<RegistryEntry>): RegistryEntry =>
+    jobEntry({ kind: "remote", source: "remote", remoteId: "sess-1", ...over });
+
+  it("a remote job whose Pod is still listed is left alone", () => {
+    const jobs = [remoteJob({ id: "a", remoteId: "sess-1" })];
+    const live = new Set(["sess-1"]);
+    expect(reconcileRemoteJobs(jobs, live, () => undefined)).toEqual([]);
+  });
+
+  it("a remote job whose Pod vanished → failed (no result.json)", () => {
+    const jobs = [remoteJob({ id: "a", remoteId: "sess-gone" })];
+    const live = new Set(["sess-other"]);
+    expect(reconcileRemoteJobs(jobs, live, () => undefined)).toEqual([
+      { id: "a", to: "failed" },
+    ]);
+  });
+
+  it("a remote job whose Pod vanished but left a result.json → that state", () => {
+    const jobs = [remoteJob({ id: "a", remoteId: "sess-gone" })];
+    const live = new Set<string>();
+    const readResult = () =>
+      ({ state: "done", exitCode: 0 }) as const;
+    expect(reconcileRemoteJobs(jobs, live, readResult)).toEqual([
+      { id: "a", to: "done" },
+    ]);
+  });
+
+  it("terminal remote jobs are never reconciled again", () => {
+    const jobs = [
+      remoteJob({ id: "a", remoteId: "gone", jobState: "done" }),
+      remoteJob({ id: "b", remoteId: "gone", jobState: "failed" }),
+    ];
+    expect(reconcileRemoteJobs(jobs, new Set(), () => undefined)).toEqual([]);
+  });
+
+  it("ignores LOCAL jobs and non-job entries entirely", () => {
+    const local = jobEntry({ id: "loc", kind: "local-tmux", jobState: "running" });
+    const session: RegistryEntry = {
+      id: "sess",
+      tool: "claude",
+      kind: "remote",
+      cwd: "/x",
+      enrolledAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      source: "remote",
+      remoteId: "sess-z",
+      // no role:"job" → a plain session, not a delegated job
+    };
+    expect(
+      reconcileRemoteJobs([local, session], new Set(), () => undefined),
+    ).toEqual([]);
+  });
+
+  it("a remote job with no recorded remoteId is treated as ended (failed)", () => {
+    // Build without remoteId at all (exactOptionalPropertyTypes: omit, don't
+    // assign undefined). A missing remoteId can never be in the live set.
+    const noId: RegistryEntry = {
+      id: "a",
+      tool: "claude",
+      kind: "remote",
+      cwd: "/x",
+      enrolledAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      source: "remote",
+      role: "job",
+      jobState: "running",
+    };
+    expect(
+      reconcileRemoteJobs([noId], new Set(["sess-1"]), () => undefined),
+    ).toEqual([{ id: "a", to: "failed" }]);
   });
 });
