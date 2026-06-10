@@ -64,6 +64,25 @@ export type RegistryEntry = {
   /** h2a instance to address the `job.done` callback to (P3); the delegating
    * parent/master. Absent = no callback recipient (best-effort, no-op). */
   callbackTo?: string;
+  /**
+   * P4 — queued-launch spec. A job over the concurrency cap is enrolled
+   * `pending` WITHOUT being launched; the conductor launches it later. These
+   * fields carry everything `startJob` needs to launch it from the queue (they
+   * are also set on an immediately-launched job, harmlessly). All optional so
+   * every existing entry stays a valid RegistryEntry (back-compat).
+   */
+  /** Run the job in a Pod (the remote control-plane URL), else a local tmux session. */
+  remoteTarget?: string;
+  /** Run-once-exit headless mode (claude -p / codex exec). */
+  headless?: boolean;
+  /** The cwd the delegate was invoked from (origin for the per-job worktree/logs). */
+  originCwd?: string;
+  /** Explicit `--cwd` override (local; used as-is, no worktree). */
+  explicitCwd?: string;
+  /** Remaining spawn-depth budget this job may spend if it re-delegates (P4 depth clamp). */
+  depthBudget?: number;
+  /** Track workpackage id to mirror this job under (`track item new --parent`). */
+  trackWp?: string;
 };
 
 export type EnrollInput = {
@@ -82,6 +101,12 @@ export type EnrollInput = {
   parent?: string;
   task?: string;
   callbackTo?: string;
+  remoteTarget?: string;
+  headless?: boolean;
+  originCwd?: string;
+  explicitCwd?: string;
+  depthBudget?: number;
+  trackWp?: string;
 };
 
 /** Injectable liveness probes (tests stay deterministic, no tmux/pid needed). */
@@ -188,6 +213,18 @@ export function enroll(
   if (task !== undefined) entry.task = task;
   const callbackTo = input.callbackTo ?? prev?.callbackTo;
   if (callbackTo !== undefined) entry.callbackTo = callbackTo;
+  const remoteTarget = input.remoteTarget ?? prev?.remoteTarget;
+  if (remoteTarget !== undefined) entry.remoteTarget = remoteTarget;
+  const headless = input.headless ?? prev?.headless;
+  if (headless !== undefined) entry.headless = headless;
+  const originCwd = input.originCwd ?? prev?.originCwd;
+  if (originCwd !== undefined) entry.originCwd = originCwd;
+  const explicitCwd = input.explicitCwd ?? prev?.explicitCwd;
+  if (explicitCwd !== undefined) entry.explicitCwd = explicitCwd;
+  const depthBudget = input.depthBudget ?? prev?.depthBudget;
+  if (depthBudget !== undefined) entry.depthBudget = depthBudget;
+  const trackWp = input.trackWp ?? prev?.trackWp;
+  if (trackWp !== undefined) entry.trackWp = trackWp;
   if (idx >= 0) entries[idx] = entry;
   else entries.push(entry);
   saveRegistry(entries, path);

@@ -281,5 +281,70 @@ describe("registry", () => {
         expect(canTransitionJob("pending", "done")).toBe(false);
       });
     });
+
+    describe("P4 queued-launch spec fields", () => {
+      it("round-trips the queued-launch fields through enroll (pending job)", () => {
+        enroll(
+          {
+            id: "q-1",
+            tool: "claude",
+            kind: "local-tmux",
+            cwd: "/repo",
+            source: "run",
+            role: "job",
+            jobState: "pending",
+            task: "queued task",
+            headless: true,
+            originCwd: "/repo",
+            explicitCwd: "/repo/sub",
+            depthBudget: 2,
+            remoteTarget: "http://cp:8080",
+            trackWp: "wp-9",
+          },
+          regPath,
+        );
+        const [loaded] = loadRegistry(regPath);
+        expect(loaded).toMatchObject({
+          id: "q-1",
+          jobState: "pending",
+          headless: true,
+          originCwd: "/repo",
+          explicitCwd: "/repo/sub",
+          depthBudget: 2,
+          remoteTarget: "http://cp:8080",
+          trackWp: "wp-9",
+        });
+      });
+
+      it("a pending job advances to running (the conductor launch), keeping its spec", () => {
+        enroll(
+          {
+            id: "q-2",
+            tool: "claude",
+            kind: "local-tmux",
+            cwd: "/repo",
+            source: "run",
+            role: "job",
+            jobState: "pending",
+            depthBudget: 3,
+            trackWp: "wp-1",
+          },
+          regPath,
+        );
+        const advanced = advanceJob("q-2", "running", regPath);
+        expect(advanced?.jobState).toBe("running");
+        expect(advanced?.depthBudget).toBe(3);
+        expect(advanced?.trackWp).toBe("wp-1");
+      });
+
+      it("a plain session keeps NO queued-launch fields (back-compat)", () => {
+        enroll(baseInput, regPath);
+        const [loaded] = loadRegistry(regPath);
+        expect(loaded?.headless).toBeUndefined();
+        expect(loaded?.depthBudget).toBeUndefined();
+        expect(loaded?.remoteTarget).toBeUndefined();
+        expect(loaded?.trackWp).toBeUndefined();
+      });
+    });
   });
 });

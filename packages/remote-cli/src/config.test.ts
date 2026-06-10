@@ -10,6 +10,8 @@ import {
   setPlugins,
   getH2aConfig,
   setH2aConfig,
+  getMaxConcurrent,
+  setMaxConcurrent,
   readRemoteConfig,
   DEFAULT_H2A_COMMAND,
   type PluginEntry,
@@ -120,5 +122,37 @@ describe("h2a config", () => {
       enabled: false,
       command: DEFAULT_H2A_COMMAND,
     });
+  });
+});
+
+describe("maxConcurrent config (P4 concurrency cap)", () => {
+  beforeEach(() => {
+    delete process.env.REMOTE_MAX_CONCURRENT;
+  });
+  afterEach(() => {
+    delete process.env.REMOTE_MAX_CONCURRENT;
+  });
+
+  it("is undefined when unset (caller falls back to the default 16)", () => {
+    expect(getMaxConcurrent()).toBeUndefined();
+  });
+
+  it("round-trips a written value", () => {
+    setMaxConcurrent(32);
+    expect(getMaxConcurrent()).toBe(32);
+    expect(readRemoteConfig().maxConcurrent).toBe(32);
+  });
+
+  it("ignores a non-positive / non-finite persisted value", () => {
+    setMaxConcurrent(0);
+    expect(getMaxConcurrent()).toBeUndefined();
+  });
+
+  it("the REMOTE_MAX_CONCURRENT env override wins over config", () => {
+    setMaxConcurrent(8);
+    process.env.REMOTE_MAX_CONCURRENT = "24";
+    expect(getMaxConcurrent()).toBe(24);
+    process.env.REMOTE_MAX_CONCURRENT = "garbage";
+    expect(getMaxConcurrent()).toBe(8); // bad env → fall back to config
   });
 });

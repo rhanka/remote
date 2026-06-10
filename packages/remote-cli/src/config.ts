@@ -124,6 +124,8 @@ export type RemoteCliConfig = {
   plugins?: PluginEntry[];
   /** h2a launcher contract for `remote run` (opt-in side window). */
   h2a?: H2aConfig;
+  /** P4 — default concurrency cap for delegated jobs (local AND remote). */
+  maxConcurrent?: number;
 };
 
 /** Default session target when none is configured/passed. */
@@ -263,6 +265,13 @@ export function readRemoteConfig(): RemoteCliConfig {
       if (plugins) config.plugins = plugins;
       const h2a = parseH2a(parsed.h2a);
       if (h2a) config.h2a = h2a;
+      if (
+        typeof parsed.maxConcurrent === "number" &&
+        Number.isFinite(parsed.maxConcurrent) &&
+        parsed.maxConcurrent > 0
+      ) {
+        config.maxConcurrent = Math.trunc(parsed.maxConcurrent);
+      }
       return config;
     }
     return {};
@@ -331,6 +340,25 @@ export function getH2aConfig(): Required<H2aConfig> {
 
 export function setH2aConfig(h2a: H2aConfig): void {
   writeRemoteConfig({ ...readRemoteConfig(), h2a });
+}
+
+/**
+ * P4 — the configured default concurrency cap for delegated jobs, or undefined
+ * when unset (the caller falls back to DEFAULT_MAX_CONCURRENT). The env override
+ * `REMOTE_MAX_CONCURRENT` wins so a conductor window can be tuned without writing
+ * config.
+ */
+export function getMaxConcurrent(): number | undefined {
+  const env = process.env.REMOTE_MAX_CONCURRENT;
+  if (env !== undefined) {
+    const n = Number.parseInt(env, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return readRemoteConfig().maxConcurrent;
+}
+
+export function setMaxConcurrent(value: number): void {
+  writeRemoteConfig({ ...readRemoteConfig(), maxConcurrent: value });
 }
 
 export function getTunnel(): TunnelConfig | undefined {

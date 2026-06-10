@@ -5,13 +5,25 @@ import {
   buildDelegateArgs,
   buildJobRows,
   buildRemoteDelegate,
+  canDelegateAtDepth,
+  childDepthEnvValue,
+  clampDepth,
+  DEFAULT_MAX_CONCURRENT,
+  DEFAULT_MAX_DEPTH,
+  hasFreeSlot,
+  inheritedDepthBudget,
   isDelegateType,
   jobDir,
+  planNextStarts,
   readJobResult,
   reconcileJobState,
   reconcileRemoteJobs,
   renderJobsTable,
   resolveJobCwd,
+  resolveTrackBin,
+  runTrackMirror,
+  trackItemNewArgs,
+  trackItemRealizeArgs,
 } from "./delegate.js";
 import type { RegistryEntry } from "./registry.js";
 
@@ -323,5 +335,197 @@ describe("reconcileRemoteJobs (cluster reconciliation vs listRemoteSessions)", (
     expect(
       reconcileRemoteJobs([noId], new Set(["sess-1"]), () => undefined),
     ).toEqual([{ id: "a", to: "failed" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4 — spawn-depth clamp + inheritance (Hermes max_spawn_depth)
+// ---------------------------------------------------------------------------
+
+describe("clampDepth (1–3, default 1)", () => {
+  it("defaults to 1 when missing / non-finite", () => {
+    expect(clampDepth(undefined)).toBe(DEFAULT_MAX_DEPTH);
+    expect(clampDepth(Number.NaN)).toBe(1);
+    expect(clampDepth(Infinity)).toBe(1);
+  });
+  it("clamps into [1,3] and truncates", () => {
+    expect(clampDepth(0)).toBe(1);
+    expect(clampDepth(-5)).toBe(1);
+    expect(clampDepth(2)).toBe(2);
+    expect(clampDepth(2.9)).toBe(2);
+    expect(clampDepth(3)).toBe(3);
+    expect(clampDepth(99)).toBe(3);
+  });
+});
+
+describe("inheritedDepthBudget + canDelegateAtDepth + childDepthEnvValue", () => {
+  it("top-level (no env): clamps the requested --max-depth", () => {
+    expect(inheritedDepthBudget(undefined, {})).toBe(1);
+    expect(inheritedDepthBudget(3, {})).toBe(3);
+    expect(inheritedDepthBudget(9, {})).toBe(3);
+  });
+  it("inside a job: the inherited (already-decremented) budget wins", () => {
+    expect(inheritedDepthBudget(3, { REMOTE_DELEGATE_DEPTH: "2" })).toBe(2);
+    expect(inheritedDepthBudget(undefined, { REMOTE_DELEGATE_DEPTH: "0" })).toBe(0);
+    // garbage env → fall back to the requested clamp
+    expect(inheritedDepthBudget(2, { REMOTE_DELEGATE_DEPTH: "x" })).toBe(2);
+    // out-of-range env is clamped
+    expect(inheritedDepthBudget(undefined, { REMOTE_DELEGATE_DEPTH: "9" })).toBe(3);
+    expect(inheritedDepthBudget(undefined, { REMOTE_DELEGATE_DEPTH: "-1" })).toBe(0);
+  });
+  it("a budget of 0 refuses further delegation", () => {
+    expect(canDelegateAtDepth(0)).toBe(false);
+    expect(canDelegateAtDepth(1)).toBe(true);
+    expect(canDelegateAtDepth(3)).toBe(true);
+  });
+  it("the child env is the parent budget minus one, never below 0", () => {
+    expect(childDepthEnvValue(3)).toBe("2");
+    expect(childDepthEnvValue(1)).toBe("0");
+    expect(childDepthEnvValue(0)).toBe("0");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4 — queue / cap decision (planNextStarts + hasFreeSlot)
+// ---------------------------------------------------------------------------
+
+describe("planNextStarts (which pending jobs to start under the cap)", () => {
+  const j = (
+    id: string,
+    jobState: RegistryEntry["jobState"],
+    ageMs = 0,
+  ): Pick<RegistryEntry, "id" | "role" | "jobState" | "enrolledAt"> => ({
+    id,
+    role: "job",
+    ...(jobState !== undefined ? { jobState } : {}),
+    enrolledAt: new Date(Date.now() - ageMs).toISOString(),
+  });
+
+  it("starts pending jobs up to the cap, oldest-first (FIFO)", () => {
+    const jobs = [
+      j("r1", "running"),
+      j("p-new", "pending", 100),
+      j("p-old", "pending", 9000),
+      j("p-mid", "pending", 5000),
+    ];
+    // cap 3, 1 running → 2 free → the two OLDEST pending.
+    expect(planNextStarts(jobs, 3)).toEqual(["p-old", "p-mid"]);
+  });
+
+  it("admits nothing when running already meets the cap", () => {
+    const jobs = [j("a", "running"), j("b", "running"), j("c", "pending")];
+    expect(planNextStarts(jobs, 2)).toEqual([]);
+  });
+
+  it("treats a missing jobState as pending", () => {
+    const jobs = [j("a", undefined, 10), j("b", undefined, 5)];
+    expect(planNextStarts(jobs, 1)).toEqual(["a"]); // oldest
+  });
+
+  it("ignores non-job entries and a non-positive cap", () => {
+    // A plain session: no `role` field at all (exactOptionalPropertyTypes: omit).
+    const session: Pick<RegistryEntry, "id" | "role" | "jobState" | "enrolledAt"> = {
+      id: "s",
+      enrolledAt: new Date().toISOString(),
+    };
+    expect(planNextStarts([session, j("p", "pending")], 1)).toEqual(["p"]);
+    expect(planNextStarts([j("p", "pending")], 0)).toEqual([]);
+    expect(planNextStarts([j("p", "pending")], -1)).toEqual([]);
+  });
+
+  it("the default cap is 16", () => {
+    expect(DEFAULT_MAX_CONCURRENT).toBe(16);
+  });
+});
+
+describe("hasFreeSlot (delegate's launch-now vs enqueue decision)", () => {
+  const run = (n: number): Pick<RegistryEntry, "role" | "jobState">[] =>
+    Array.from({ length: n }, () => ({ role: "job" as const, jobState: "running" as const }));
+
+  it("true while running < cap, false at/over the cap", () => {
+    expect(hasFreeSlot(run(0), 16)).toBe(true);
+    expect(hasFreeSlot(run(15), 16)).toBe(true);
+    expect(hasFreeSlot(run(16), 16)).toBe(false);
+    expect(hasFreeSlot(run(20), 16)).toBe(false);
+  });
+
+  it("pending / terminal jobs don't occupy a slot", () => {
+    const jobs = [
+      { role: "job" as const, jobState: "running" as const },
+      { role: "job" as const, jobState: "pending" as const },
+      { role: "job" as const, jobState: "done" as const },
+      { role: "job" as const, jobState: "failed" as const },
+    ];
+    expect(hasFreeSlot(jobs, 2)).toBe(true); // only 1 running < 2
+  });
+
+  it("a non-positive cap never has a free slot", () => {
+    expect(hasFreeSlot([], 0)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4 — track mirror derivation (job graph = backlog)
+// ---------------------------------------------------------------------------
+
+describe("trackItemNewArgs / trackItemRealizeArgs (pure argv, ref by job id)", () => {
+  it("new: parents under the WP with role item, title from task, ref job:<id>", () => {
+    expect(trackItemNewArgs("wp-42", { id: "build-x", task: "build the thing" })).toEqual([
+      "item",
+      "new",
+      "--parent",
+      "wp-42",
+      "--role",
+      "item",
+      "--title",
+      "build the thing",
+      "--ref",
+      "job:build-x",
+    ]);
+  });
+
+  it("new: falls back to `job <id>` when there is no task", () => {
+    expect(trackItemNewArgs("wp-1", { id: "j1" })).toContain("job j1");
+  });
+
+  it("realize: closes the item by the same job:<id> ref", () => {
+    expect(trackItemRealizeArgs({ id: "j1" })).toEqual([
+      "item",
+      "realize",
+      "--ref",
+      "job:j1",
+    ]);
+  });
+});
+
+describe("resolveTrackBin / runTrackMirror (best-effort, never throws)", () => {
+  it("resolves `node <realpath>` when track is on PATH", () => {
+    expect(
+      resolveTrackBin(
+        () => "/usr/bin/track",
+        (p) => `${p}-real`,
+      ),
+    ).toEqual({ command: "node", prefix: ["/usr/bin/track-real"] });
+  });
+
+  it("returns undefined when track is not installed", () => {
+    expect(resolveTrackBin(() => undefined)).toBeUndefined();
+  });
+
+  it("runTrackMirror runs the injected runner and reports true", () => {
+    const calls: string[][] = [];
+    const ran = runTrackMirror(["item", "realize", "--ref", "job:j1"], "/repo", (args) => {
+      calls.push([...args]);
+      return { status: 0 };
+    });
+    expect(ran).toBe(true);
+    expect(calls).toEqual([["item", "realize", "--ref", "job:j1"]]);
+  });
+
+  it("runTrackMirror swallows a throwing runner (delivery is never coupled to track)", () => {
+    const ran = runTrackMirror(["item", "new"], "/repo", () => {
+      throw new Error("track exploded");
+    });
+    expect(ran).toBe(false);
   });
 });
