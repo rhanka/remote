@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -123,6 +124,20 @@ import {
   repliedDecisionJobIds,
   type ExpectedInstanceResolver,
 } from "./h2a-jobs.js";
+import {
+  buildConductorTask,
+  computeDurableWorkspaceId,
+  detectAvailableHosts,
+  freshestLaunchEnvelope,
+  h2aReportsLiveConductor,
+  markLaunchEnvelopeProcessed,
+  readLastLaunchAt,
+  readLaunchEnvelopes,
+  recordLaunchAt,
+  selectHost,
+  shouldLaunch,
+  type ConductorLaunchRequest,
+} from "./conductor-launch.js";
 import { guardConvWriters } from "./conv-guard.js";
 import {
   handleClaudeHook,
@@ -3207,6 +3222,246 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           `[remote] conducting (cap ${cap}, every ${minutes} min) — Ctrl-C to stop\n`,
         );
         process.exitCode = await conductLoop(minutes, () => conductPass(cap));
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // WP10 — conductor-launch: handle h2a `conductor-launch-request` envelopes.
+  //
+  // h2a (a2a-cli, h2a 0.68.0) EMITS an envelope into remote's h2a inbox when a
+  // workspace has stalled work AND no live conductor; h2a NEVER spawns — remote
+  // executes. We read the freshest unprocessed envelope, decide (idempotency vs
+  // our own job registry + a best-effort `h2a discover`, per-workspace cooldown,
+  // host availability on PATH), and LAUNCH a conductor via the SAME delegation
+  // path (`startJob`) — gated by `--confirm` (else dry-run). The launched
+  // conductor's task tells it to claim the conductor role at boot.
+  //
+  // Reversible defaults (documented here + in conductor-launch.ts):
+  //  - jobId = `conductor-<first 12 hex of the durable workspace hash>` — stable,
+  //    so a relaunch attempt for the SAME workspace reuses the slug and the live
+  //    job is found (registry-level idempotency on top of the launch gate).
+  //  - host detection = login-shell `command -v` for claude/codex/agy (same probe
+  //    as the tmux side-window), default order = the envelope's hostPref.
+  //  - durable-id input = git remote origin url if present, else the repo
+  //    toplevel (canonicalized). MISMATCH with the envelope's workspaceId is
+  //    logged and acts as a guard (flagged for a2a-cli alignment).
+  //  - cooldown default = 30 min / workspace; processed-marking = sibling
+  //    `.processed` stamp (non-destructive, like dropEnvelope).
+  // ---------------------------------------------------------------------------
+
+  /** Durable id of the CURRENT repo: git remote origin url, else toplevel path. */
+  const localDurableWorkspaceId = (): string | undefined => {
+    try {
+      const remote = spawnSync(
+        "git",
+        ["config", "--get", "remote.origin.url"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const url = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const input =
+        remote.status === 0 && remote.stdout.trim().length > 0
+          ? remote.stdout.trim()
+          : url.status === 0 && url.stdout.trim().length > 0
+            ? url.stdout.trim()
+            : undefined;
+      return input ? computeDurableWorkspaceId(input) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Count conductors we already know to be ALIVE for `workspaceId`:
+   *  - our own registry: live `role:"job"` jobs in `running` state whose id is
+   *    the deterministic conductor slug for this workspace, PLUS
+   *  - h2a's own view (`h2a discover`), best-effort: +1 if it reports one, 0 if
+   *    it ran and didn't, ignored entirely when h2a is unavailable.
+   */
+  const countLiveConductors = (workspaceId: string, slug: string): number => {
+    let n = 0;
+    for (const job of listJobs()) {
+      if (job.role !== "job") continue;
+      if ((job.jobState ?? "pending") !== "running") continue;
+      if (job.id === slug && isLive(job)) n += 1;
+    }
+    const h2aSays = h2aReportsLiveConductor(workspaceId);
+    if (h2aSays === true) n += 1;
+    return n;
+  };
+
+  /**
+   * Process ONE conductor-launch request. Returns a short outcome for the watch
+   * loop's recap. `confirm=false` → DRY-RUN (decide + print, launch nothing, do
+   * NOT mark processed so a later `--confirm` run can still act). With confirm,
+   * a launched/skipped envelope is marked processed (idempotent stamp).
+   */
+  const processLaunchRequest = async (
+    env: { path: string; request: ConductorLaunchRequest },
+    confirm: boolean,
+    cooldownMs: number,
+  ): Promise<{ launched: boolean; detail: string }> => {
+    const { request } = env;
+    const slug = `conductor-${request.workspaceId.replace(/^ws:sha256:/, "").slice(0, 12)}`;
+
+    // Durable-id alignment guard (flagged for a2a-cli): warn on a mismatch but
+    // proceed — the envelope's workspaceId is authoritative for the launch.
+    const localId = localDurableWorkspaceId();
+    if (localId && localId !== request.workspaceId) {
+      process.stderr.write(
+        `[remote] conductor-launch: workspace id mismatch — envelope ${request.workspaceId} vs local ${localId} ` +
+          `(proceeding with the envelope's id; align canonicalization with a2a-cli)\n`,
+      );
+    }
+
+    const liveConductors = countLiveConductors(request.workspaceId, slug);
+    const lastLaunchAt = readLastLaunchAt(request.workspaceId);
+    const gate = shouldLaunch({
+      request,
+      liveConductors,
+      lastLaunchAt,
+      now: Date.now(),
+      cooldownMs,
+    });
+    if (!gate.launch) {
+      if (confirm) markLaunchEnvelopeProcessed(env.path, `skip: ${gate.reason}`);
+      process.stderr.write(`[remote] conductor-launch: SKIP — ${gate.reason}\n`);
+      return { launched: false, detail: gate.reason };
+    }
+
+    const available = detectAvailableHosts();
+    const host = selectHost(request.hostPref, available);
+    if (!host) {
+      const detail = `no preferred host available on PATH (wanted ${request.hostPref.join("/")}, found ${[...available].join("/") || "none"})`;
+      if (confirm) markLaunchEnvelopeProcessed(env.path, `skip: ${detail}`);
+      process.stderr.write(`[remote] conductor-launch: SKIP — ${detail}\n`);
+      return { launched: false, detail };
+    }
+
+    const task = buildConductorTask(request);
+    if (!confirm) {
+      process.stderr.write(
+        `[remote] conductor-launch DRY-RUN — would launch a ${host} conductor "${slug}" ` +
+          `for ${request.workspaceId} (${request.stalled.length} stalled item(s)). ` +
+          `Re-run with --confirm to launch.\n`,
+      );
+      return { launched: false, detail: `dry-run (${host})` };
+    }
+
+    // Enroll + launch via the SAME path delegate uses (task rides argv, never a
+    // shell string). Mark processed + record the cooldown timestamp regardless of
+    // the spawn result (a failed spawn shouldn't tight-loop a watch).
+    const launchEntry: RegistryEntry = {
+      id: slug,
+      tool: host,
+      kind: "local-tmux",
+      cwd: process.cwd(),
+      enrolledAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      source: "run",
+      label: slug,
+      role: "job",
+      jobState: "running",
+      task,
+      headless: false,
+      originCwd: process.cwd(),
+      depthBudget: clampDepth(undefined),
+    };
+    enroll({
+      id: slug,
+      tool: host,
+      kind: "local-tmux",
+      cwd: process.cwd(),
+      source: "run",
+      label: slug,
+      role: "job",
+      jobState: "pending",
+      task,
+      headless: false,
+      originCwd: process.cwd(),
+      depthBudget: clampDepth(undefined),
+    });
+    const result = await startJob(launchEntry);
+    recordLaunchAt(request.workspaceId);
+    markLaunchEnvelopeProcessed(
+      env.path,
+      result.started ? `launched ${host} ${slug}` : `launch-failed: ${result.error}`,
+    );
+    if (!result.started) {
+      advanceJob(slug, "failed");
+      process.stderr.write(
+        `[remote] conductor-launch: FAILED to launch ${slug}: ${result.error}\n`,
+      );
+      return { launched: false, detail: result.error };
+    }
+    process.stderr.write(
+      `[remote] conductor-launch: launched ${host} conductor ${slug} for ${request.workspaceId} in ${result.detail}\n` +
+        `[remote] supervise: remote jobs status ${slug}   attach: remote jobs attach ${slug}\n`,
+    );
+    return { launched: true, detail: `${host} ${slug}` };
+  };
+
+  /** One pass: handle the freshest unprocessed launch envelope (or report none). */
+  const launchPass = async (
+    confirm: boolean,
+    cooldownMs: number,
+  ): Promise<{ started: number; finished: number }> => {
+    const fresh = freshestLaunchEnvelope(readLaunchEnvelopes());
+    if (!fresh) {
+      process.stderr.write(
+        "[remote] conductor-launch: no unprocessed conductor-launch-request in the h2a inbox\n",
+      );
+      return { started: 0, finished: 0 };
+    }
+    const r = await processLaunchRequest(fresh, confirm, cooldownMs);
+    return { started: r.launched ? 1 : 0, finished: 0 };
+  };
+
+  program
+    .command("conductor-launch")
+    .description(
+      "Handle an h2a `conductor-launch-request` envelope: when h2a reports stalled work and no live conductor, launch one (claude/codex/agy, first available on PATH) via the same delegation path as `remote delegate`, instructed to claim the conductor role at boot. DRY-RUN unless --confirm. Idempotent (skips when a conductor is already alive) and rate-limited per workspace (cooldown). One pass by default; --watch loops in the FOREGROUND (no daemon; Ctrl-C to stop).",
+    )
+    .option(
+      "--confirm",
+      "actually launch (default: dry-run — decide and print what WOULD launch, launch nothing)",
+    )
+    .option(
+      "--watch <minutes>",
+      "loop in the foreground every <minutes> (whole number >= 1); without it, runs a single pass and exits",
+    )
+    .option(
+      "--cooldown <min>",
+      "minimum minutes between launches for the SAME workspace (default 30)",
+    )
+    .action(
+      async (opts: { confirm?: boolean; watch?: string; cooldown?: string }) => {
+        const confirm = opts.confirm === true;
+        const cooldownMin =
+          opts.cooldown !== undefined ? Number(opts.cooldown) : 30;
+        if (!Number.isFinite(cooldownMin) || cooldownMin < 0) {
+          throw new Error("--cooldown must be a non-negative number of minutes");
+        }
+        const cooldownMs = cooldownMin * 60_000;
+        const minutes =
+          opts.watch === undefined ? undefined : parseWatchMinutes(opts.watch);
+        if (!confirm) {
+          process.stderr.write(
+            "[remote] conductor-launch: DRY-RUN (no --confirm) — nothing will be launched\n",
+          );
+        }
+        if (minutes === undefined) {
+          await launchPass(confirm, cooldownMs);
+          return;
+        }
+        process.stderr.write(
+          `[remote] conductor-launch watching (every ${minutes} min, cooldown ${cooldownMin} min${confirm ? "" : ", DRY-RUN"}) — Ctrl-C to stop\n`,
+        );
+        process.exitCode = await conductLoop(minutes, () =>
+          launchPass(confirm, cooldownMs),
+        );
       },
     );
 
