@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { handleClaudeHook, installClaudeHooks, manualEnroll } from "./enroll.js";
-import { loadRegistry } from "./registry.js";
+import { enroll, loadRegistry, type RegistryEntry } from "./registry.js";
 
 // Scratch dir inside the package (never /tmp); NEVER the real ~/.claude.
 const SCRATCH_ROOT = join(
@@ -142,6 +142,93 @@ describe("handleClaudeHook", () => {
     expect(handleClaudeHook("claude-start", "{}", regPath).ok).toBe(false);
     expect(handleClaudeHook("claude-oops", payload, regPath).ok).toBe(false);
     expect(loadRegistry(regPath)).toEqual([]);
+  });
+});
+
+describe("handleClaudeHook — P3 job.done on claude-end for a delegated job", () => {
+  const jobPayload = JSON.stringify({ session_id: "claude-job1", cwd: "/work" });
+
+  it("advances the job to done and emits a job.done callback (emit injected)", () => {
+    // Enroll a role:"job" entry directly into the scratch registry.
+    enroll(
+      {
+        id: "claude-job1",
+        tool: "claude",
+        kind: "local-tmux",
+        cwd: "/work",
+        source: "run",
+        role: "job",
+        jobState: "running",
+        callbackTo: "claude:parent:1",
+        task: "do X",
+      },
+      regPath,
+    );
+    const emitted: RegistryEntry[] = [];
+    const r = handleClaudeHook("claude-end", jobPayload, regPath, {
+      emit: (job) => {
+        emitted.push(job);
+        return { emitted: true, path: "/scratch/x.json", written: true, to: job.callbackTo! };
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.callback).toEqual({
+      emitted: true,
+      path: "/scratch/x.json",
+      written: true,
+      to: "claude:parent:1",
+    });
+    // job advanced to done in the registry
+    const entry = loadRegistry(regPath).find((e) => e.id === "claude-job1");
+    expect(entry?.jobState).toBe("done");
+    expect(entry?.endedAt).toBeTruthy();
+    // the emit saw the advanced (done) entry
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.jobState).toBe("done");
+  });
+
+  it("STILL exits ok even if the emit throws (callback failure never breaks the hook)", () => {
+    enroll(
+      {
+        id: "claude-job2",
+        tool: "claude",
+        kind: "local-tmux",
+        cwd: "/work",
+        source: "run",
+        role: "job",
+        jobState: "running",
+        callbackTo: "p",
+      },
+      regPath,
+    );
+    const r = handleClaudeHook(
+      "claude-end",
+      JSON.stringify({ session_id: "claude-job2", cwd: "/work" }),
+      regPath,
+      {
+        emit: () => {
+          throw new Error("boom");
+        },
+      },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.callback?.emitted).toBe(false);
+    expect(loadRegistry(regPath).find((e) => e.id === "claude-job2")?.jobState).toBe(
+      "done",
+    );
+  });
+
+  it("a non-job session end is untouched (no callback field)", () => {
+    enroll(
+      { id: "plain-1", tool: "claude", kind: "local", cwd: "/work", source: "hook" },
+      regPath,
+    );
+    const r = handleClaudeHook(
+      "claude-end",
+      JSON.stringify({ session_id: "plain-1", cwd: "/work" }),
+      regPath,
+    );
+    expect(r).toEqual({ ok: true });
   });
 });
 

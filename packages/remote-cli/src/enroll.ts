@@ -20,11 +20,15 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 import {
+  advanceJob,
   coerceRegistryTool,
   enroll,
+  loadRegistry,
   markEnded,
   resolveRegistryPath,
+  type RegistryEntry,
 } from "./registry.js";
+import { emitJobDone, type EmitJobDoneResult } from "./h2a-jobs.js";
 
 // ---------------------------------------------------------------------------
 // Hook mode
@@ -51,17 +55,34 @@ export function readStdin(
   });
 }
 
-export type HookResult = { ok: boolean; error?: string };
+export type HookResult = {
+  ok: boolean;
+  error?: string;
+  /** Set when claude-end finished a delegated job (role:"job") and a job.done
+   * callback was attempted. For diagnostics/tests only. */
+  callback?: EmitJobDoneResult;
+};
+
+/** Injectable so tests never touch the real ~/h2a-workspace. */
+export type HandleClaudeHookOpts = {
+  emit?: (job: RegistryEntry) => EmitJobDoneResult;
+};
 
 /**
  * Handle a Claude Code hook payload. Never throws — the caller reports
  * `error` on stderr and exits 0 regardless (a registry bug must not take the
  * user's claude session down with it).
+ *
+ * P3: on claude-end, if the ending session is a DELEGATED JOB (role:"job" in
+ * the registry), advance it to `done` and emit a best-effort `job.done` h2a
+ * envelope to its parent (callbackTo). The hook STILL always succeeds — a
+ * callback failure is recorded in `callback`, never surfaced as `ok:false`.
  */
 export function handleClaudeHook(
   hook: string,
   rawPayload: string,
   registryPath: string = resolveRegistryPath(),
+  opts: HandleClaudeHookOpts = {},
 ): HookResult {
   try {
     if (hook !== "claude-start" && hook !== "claude-end") {
@@ -80,7 +101,26 @@ export function handleClaudeHook(
       );
       return { ok: true };
     }
-    // claude-end: enroll-if-missing so the end of an unknown session still
+    // claude-end: is this session a DELEGATED JOB? If so, finish it + callback.
+    const job = loadRegistry(registryPath).find(
+      (e) => e.id === id && e.role === "job",
+    );
+    if (job) {
+      // Advance to done (no-op if already terminal). The job interactive agent
+      // ending its session IS the success signal — a non-zero exit isn't
+      // observable from the SessionEnd hook, so "done" is the right default.
+      const advanced = advanceJob(id, "done", registryPath) ?? job;
+      let callback: EmitJobDoneResult;
+      try {
+        const emit = opts.emit ?? ((j: RegistryEntry) => emitJobDone(j, { state: advanced.jobState ?? "done" }));
+        callback = emit(advanced);
+      } catch (error) {
+        // a callback failure must NEVER fail the hook
+        callback = { emitted: false, reason: "error", error: String(error) };
+      }
+      return { ok: true, callback };
+    }
+    // Not a job — enroll-if-missing so the end of an unknown session still
     // leaves a (terminated) trace, then mark it ended.
     if (!markEnded(id, registryPath)) {
       enroll(

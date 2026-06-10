@@ -89,6 +89,18 @@ import {
   resolveJobCwd,
   type DelegateType,
 } from "./delegate.js";
+import {
+  buildDecisionReply,
+  dropEnvelope,
+  emitJobDone,
+  envelopeFileName,
+  isAwaitingDecision,
+  parentInstance,
+  pendingDecisions,
+  readInboxEnvelopes,
+  renderPendingDecisions,
+  repliedDecisionJobIds,
+} from "./h2a-jobs.js";
 import { guardConvWriters } from "./conv-guard.js";
 import {
   handleClaudeHook,
@@ -2290,6 +2302,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--headless",
       "run-once-exit batch mode: claude -p / codex exec, stdout→output.log, write result.json, then END the session (no live agent; agy has no headless mode)",
     )
+    .option(
+      "--on-done <h2a-instance>",
+      "h2a instance to notify with a `job.done` envelope when the job ends, and the parent for the decision channel (e.g. claude:remote:abc / claude:job:foo). Alias: --parent.",
+    )
+    .option(
+      "--parent <h2a-instance>",
+      "alias of --on-done: the delegating parent's h2a instance (callback + decision recipient)",
+    )
     .action(
       async (
         type: string,
@@ -2299,6 +2319,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           cwd?: string;
           name?: string;
           headless?: boolean;
+          onDone?: string;
+          parent?: string;
         },
       ) => {
         if (!isDelegateType(type)) {
@@ -2310,6 +2332,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         }
         const jobType: DelegateType = type;
         const jobId = opts.name ?? `${jobType}-${Math.random().toString(36).slice(2, 8)}`;
+        // Parent h2a instance to notify on done + answer decisions (best-effort).
+        const callbackTo = opts.onDone ?? opts.parent;
         try {
           assertSafeName(jobId);
         } catch (err) {
@@ -2364,6 +2388,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
               role: "job",
               jobState: "running",
               task,
+              ...(callbackTo !== undefined ? { callbackTo } : {}),
             });
           } catch {
             // registry hiccup must not break the delegation
@@ -2454,6 +2479,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             role: "job",
             jobState: "running",
             task,
+            ...(callbackTo !== undefined ? { callbackTo } : {}),
           });
         } catch {
           // registry hiccup must not break the delegation
@@ -2491,14 +2517,23 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   // Makes the registry the source of truth; the pure reconcilers are display
   // fallbacks. Returns the freshly-reloaded jobs.
   const reconcileJobs = async (): Promise<ReturnType<typeof listJobs>> => {
-    // Local: tmux/pid liveness (no cluster call).
+    // Local: tmux/pid liveness (no cluster call). On a terminal transition,
+    // emit a best-effort `job.done` to the parent (headless/codex/agy + a
+    // crashed interactive job). The claude SessionEnd hook covers the normal
+    // interactive case; the file name is stable so a double-emit is a no-op.
     for (const job of listJobs()) {
       if (job.kind === "remote") continue;
       const state = job.jobState ?? "pending";
       if (state === "done" || state === "failed") continue;
       if (jobLive(job)) continue;
       const result = readJobResult(process.cwd(), job.id);
-      advanceJob(job.id, result?.state ?? "failed");
+      const advanced = advanceJob(job.id, result?.state ?? "failed");
+      if (advanced) {
+        emitJobDone(advanced, {
+          state: advanced.jobState ?? "failed",
+          ...(result?.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+        });
+      }
     }
     // Remote: reconcile against the control-plane session list.
     const remoteJobs = listJobs().filter(
@@ -2515,7 +2550,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         for (const t of reconcileRemoteJobs(remoteJobs, liveIds, (j) =>
           readJobResult(process.cwd(), j.id),
         )) {
-          advanceJob(t.id, t.to);
+          const advanced = advanceJob(t.id, t.to);
+          // Drop the callback into the LOCAL inbox; `h2a bridge` carries it to
+          // the parent's Pod if the parent is remote (idempotent by file name).
+          if (advanced) {
+            emitJobDone(advanced, { state: advanced.jobState ?? t.to });
+          }
         }
       } catch {
         // no remote configured / unreachable → leave remote jobs as-is
@@ -2549,16 +2589,31 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
       const live = jobLive(job);
       const dir = jobDir(process.cwd(), id);
+      // awaiting-decision is a DISPLAY state (an unanswered decision.requested
+      // for this job in the local h2a inbox), surfaced over the persisted state
+      // for a still-running job. Best-effort: a missing/unreadable inbox is no
+      // decision pending. Reads the inbox once.
+      let displayState: string = job.jobState ?? "pending";
+      if ((displayState === "running" || displayState === "pending") && live) {
+        try {
+          if (isAwaitingDecision(id, readInboxEnvelopes())) {
+            displayState = "awaiting-decision";
+          }
+        } catch {
+          // no h2a store / unreadable → no decision pending
+        }
+      }
       const lines = [
         `id:      ${job.id}`,
         `type:    ${job.tool}`,
         `target:  ${job.kind === "remote" ? "remote" : "local"}`,
-        `state:   ${job.jobState ?? "pending"}${live ? " (live)" : ""}`,
+        `state:   ${displayState}${live ? " (live)" : ""}`,
         `cwd:     ${job.cwd}`,
         job.kind === "remote"
           ? `session: ${job.remoteId ?? "-"}`
           : `tmux:    ${job.tmuxSession ?? "-"}`,
         `task:    ${job.task ?? "-"}`,
+        `parent:  ${parentInstance(job) ?? "-"}`,
         `started: ${job.enrolledAt}`,
       ];
       const resultPath = join(dir, "result.json");
@@ -2652,6 +2707,76 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         `[remote] no logs for job "${id}" (no output.log and the tmux pane is gone)\n`,
       );
       process.exitCode = 1;
+    });
+
+  // P3 — the decision channel (h2a). A delegated INTERACTIVE job can emit a
+  // `decision.requested` envelope; the parent lists them here and answers with
+  // `decide`. Both ride the local h2a inbox + `remote h2a bridge` to the Pod.
+  jobsCommand
+    .command("decisions")
+    .description(
+      "List unanswered `decision.requested` envelopes from delegated jobs (read from the local h2a inbox), with the asking job id and its question.",
+    )
+    .action(() => {
+      let envelopes;
+      try {
+        envelopes = readInboxEnvelopes();
+      } catch (error) {
+        process.stderr.write(
+          `[remote] cannot read the h2a inbox: ${(error instanceof Error ? error.message : String(error)).slice(0, 160)}\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const replied = repliedDecisionJobIds(envelopes);
+      const pending = pendingDecisions(envelopes, replied);
+      process.stdout.write(`${renderPendingDecisions(pending)}\n`);
+    });
+
+  jobsCommand
+    .command("decide <jobId> <answer>")
+    .description(
+      "Answer a job's `decision.requested`: write a `decision.reply` envelope into the job's h2a inbox (carried to its Pod by `remote h2a bridge`). <answer> is a single argv — never shell-concatenated.",
+    )
+    .option(
+      "--from <h2a-instance>",
+      "parent/master h2a instance to attribute the reply to (default: the job's recorded parent, else `remote:cli`)",
+    )
+    .action((jobId: string, answer: string, opts: { from?: string }) => {
+      try {
+        assertSafeName(jobId);
+      } catch (err) {
+        process.stderr.write(`[remote] ${(err as Error).message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const job = listJobs().find((e) => e.id === jobId);
+      if (!job) {
+        process.stderr.write(
+          `[remote] no job "${jobId}" (see: remote jobs ls)\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const from = opts.from ?? parentInstance(job) ?? "remote:cli";
+      const envelope = buildDecisionReply({ job, parentInstance: from, answer });
+      try {
+        const { path, written } = dropEnvelope(
+          envelope,
+          envelopeFileName("decision.reply", jobId, Date.now()),
+        );
+        process.stderr.write(
+          `[remote] decision.reply for ${jobId} → ${envelope.to}` +
+            `${written ? "" : " (already present, not overwritten)"}\n` +
+            `[remote] envelope: ${path}\n` +
+            `[remote] delivered to the job's Pod on the next: remote h2a bridge\n`,
+        );
+      } catch (error) {
+        process.stderr.write(
+          `[remote] failed to write decision.reply: ${(error instanceof Error ? error.message : String(error)).slice(0, 160)}\n`,
+        );
+        process.exitCode = 1;
+      }
     });
 
   // ---------------------------------------------------------------------------
