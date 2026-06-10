@@ -133,6 +133,7 @@ import {
 import {
   buildConductorTask,
   computeDurableWorkspaceId,
+  normalizeRootCommits,
   detectAvailableHosts,
   freshestLaunchEnvelope,
   h2aReportsLiveConductor,
@@ -3431,22 +3432,27 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   /** Durable id of the CURRENT repo: git remote origin url, else toplevel path. */
   const localDurableWorkspaceId = (): string | undefined => {
     try {
-      const remote = spawnSync(
-        "git",
-        ["config", "--get", "remote.origin.url"],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-      );
-      const url = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-      const input =
-        remote.status === 0 && remote.stdout.trim().length > 0
-          ? remote.stdout.trim()
-          : url.status === 0 && url.stdout.trim().length > 0
-            ? url.stdout.trim()
-            : undefined;
-      return input ? computeDurableWorkspaceId(input) : undefined;
+      const git = (args: string[]) =>
+        spawnSync("git", args, {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+      // rootCommitSHA = ALL root commits, sorted asc, joined "," (a2a-cli/track algo).
+      const roots = git(["rev-list", "--max-parents=0", "HEAD"]);
+      if (roots.status !== 0) return undefined;
+      const rootCommitSHA = normalizeRootCommits(roots.stdout.split("\n"));
+      if (!rootCommitSHA) return undefined;
+      // worktreeRelPath = "" for the primary worktree, else basename(git-dir)
+      // for a linked one (git-dir !== git-common-dir).
+      const dir = git(["rev-parse", "--git-dir"]);
+      const common = git(["rev-parse", "--git-common-dir"]);
+      const dirPath = dir.status === 0 ? dir.stdout.trim() : "";
+      const commonPath = common.status === 0 ? common.stdout.trim() : "";
+      const worktreeRelPath =
+        dirPath && commonPath && dirPath !== commonPath
+          ? basename(dirPath)
+          : "";
+      return computeDurableWorkspaceId(rootCommitSHA, worktreeRelPath);
     } catch {
       return undefined;
     }
@@ -3483,7 +3489,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     cooldownMs: number,
   ): Promise<{ launched: boolean; detail: string }> => {
     const { request } = env;
-    const slug = `conductor-${request.workspaceId.replace(/^ws:sha256:/, "").slice(0, 12)}`;
+    const slug = `conductor-${request.workspaceId.replace(/^ws:/, "").slice(0, 12)}`;
 
     // Durable-id alignment guard (flagged for a2a-cli): warn on a mismatch but
     // proceed — the envelope's workspaceId is authoritative for the launch.

@@ -64,7 +64,7 @@ export type StalledItem = {
 /** The typed, validated payload of a `conductor-launch-request` envelope. */
 export type ConductorLaunchRequest = {
   kind: "conductor-launch-request";
-  /** Durable git-shared id: `ws:sha256:<hex>` (matchable via computeDurableWorkspaceId). */
+  /** Durable git-shared id: `ws:<hex>` (matchable via computeDurableWorkspaceId). */
   workspaceId: string;
   /** Ordered host preference (claude/codex/agy), normalized + filtered to known hosts. */
   hostPref: DelegateType[];
@@ -253,36 +253,38 @@ export function buildConductorTask(request: ConductorLaunchRequest): string {
 }
 
 /**
- * Canonicalize a git remote url / path so the SAME repo always hashes to the
- * same id regardless of clone scheme (ssh vs https), a trailing `.git`, a
- * trailing slash, or host/scheme case. A non-url path is lower-cased + de-
- * trailing-slashed only. Pure, exported for tests.
+ * Normalize the root-commit set into the canonical string a2a-cli/track hash:
+ * ALL root commits (`git rev-list --max-parents=0 HEAD`), trimmed, de-duped,
+ * sorted ascending, joined by ",". A mono-root repo collapses to its single
+ * SHA. Invariant across clone / fork / path / machine (unlike a remote url).
+ * Pure, exported for tests.
  */
-function canonicalizeWorkspaceInput(input: string): string {
-  let s = input.trim();
-  // scp-like ssh remote: git@github.com:owner/repo(.git) → github.com/owner/repo
-  s = s.replace(/^[^@/]+@([^:]+):/, "$1/");
-  // strip a url scheme (https:// / ssh:// / git://)
-  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
-  // strip a leading userinfo@ left on a scheme url
-  s = s.replace(/^[^@/]+@/, "");
-  // drop a trailing .git and any trailing slashes
-  s = s.replace(/\.git$/i, "").replace(/\/+$/, "");
-  return s.toLowerCase();
+export function normalizeRootCommits(shas: ReadonlyArray<string>): string {
+  return [...new Set(shas.map((s) => s.trim()).filter((s) => s.length > 0))]
+    .sort()
+    .join(",");
 }
 
 /**
- * Durable, git-shared workspace id: `ws:sha256:<hex>` over a CANONICALIZED input
- * (the git remote origin url when present, else the repo toplevel path). Built
- * to be matchable against the `workspaceId` the maintainer puts on the envelope
- * — but the maintainer's exact canonicalization is NOT yet pinned, so a mismatch
- * is expected until aligned (the handler logs it and falls back to an explicit
- * `--workspace`/match; see index.ts). Pure, exported for tests.
+ * Durable, git-shared workspace id — byte-identical to track + h2a 0.68's
+ * `durableWorkspaceId`:
+ *
+ *   workspaceId = "ws:" + sha256hex( rootCommitSHA + "\n" + worktreeRelPath )
+ *
+ * where `rootCommitSHA` is {@link normalizeRootCommits}' output and
+ * `worktreeRelPath` is "" for the primary worktree, else the basename of
+ * `git rev-parse --git-dir` (the `.git/worktrees/<name>` dir) for a linked
+ * worktree. Pinned vectors (shared with track): ("abc","") →
+ * ws:edeaaff3… ; ("abc","my-feature") → ws:81a25e53…. Pure, exported for tests.
  */
-export function computeDurableWorkspaceId(gitRemoteUrlOrToplevel: string): string {
-  const canonical = canonicalizeWorkspaceInput(gitRemoteUrlOrToplevel);
-  const hex = createHash("sha256").update(canonical, "utf8").digest("hex");
-  return `ws:sha256:${hex}`;
+export function computeDurableWorkspaceId(
+  rootCommitSHA: string,
+  worktreeRelPath: string,
+): string {
+  const hex = createHash("sha256")
+    .update(`${rootCommitSHA}\n${worktreeRelPath}`, "utf8")
+    .digest("hex");
+  return `ws:${hex}`;
 }
 
 // ---------------------------------------------------------------------------

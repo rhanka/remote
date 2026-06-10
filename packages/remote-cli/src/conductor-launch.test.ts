@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildConductorTask,
   computeDurableWorkspaceId,
+  normalizeRootCommits,
   detectAvailableHosts,
   freshestLaunchEnvelope,
   h2aReportsLiveConductor,
@@ -308,31 +309,42 @@ describe("buildConductorTask", () => {
 // ---------------------------------------------------------------------------
 
 describe("computeDurableWorkspaceId", () => {
-  it("produces a stable ws:sha256:<hex> id for the same input", () => {
-    const a = computeDurableWorkspaceId("git@github.com:rhanka/remote.git");
-    const b = computeDurableWorkspaceId("git@github.com:rhanka/remote.git");
+  it("produces a stable ws:<hex> id for the same input", () => {
+    const a = computeDurableWorkspaceId("abc", "");
+    const b = computeDurableWorkspaceId("abc", "");
     expect(a).toBe(b);
-    expect(a).toMatch(/^ws:sha256:[0-9a-f]{64}$/);
+    expect(a).toMatch(/^ws:[0-9a-f]{64}$/);
   });
 
-  it("differs for different inputs", () => {
-    expect(computeDurableWorkspaceId("a")).not.toBe(computeDurableWorkspaceId("b"));
-  });
-
-  it("normalizes a git remote url (trailing .git / slash / case) to the same id", () => {
-    const a = computeDurableWorkspaceId("https://github.com/rhanka/remote.git");
-    const b = computeDurableWorkspaceId("https://github.com/rhanka/remote/");
-    const c = computeDurableWorkspaceId("HTTPS://github.com/rhanka/remote");
-    expect(a).toBe(b);
-    expect(b).toBe(c);
-  });
-
-  it("matches a value the maintainer would compute from the same canonical input", () => {
-    // Deterministic: sha256 of the canonical "github.com/rhanka/remote".
-    const id = computeDurableWorkspaceId("git@github.com:rhanka/remote.git");
-    expect(id).toBe(
-      computeDurableWorkspaceId("https://github.com/rhanka/remote.git"),
+  // Vectors pinned WITH track + h2a 0.68 (a2a-cli) — these MUST stay byte-identical
+  // or conductor-launch-request envelopes will never match the local repo.
+  it("matches a2a-cli's pinned vectors exactly", () => {
+    expect(computeDurableWorkspaceId("abc", "")).toBe(
+      "ws:edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb",
     );
+    expect(computeDurableWorkspaceId("abc", "my-feature")).toBe(
+      "ws:81a25e53c1b1c56cc708a5fed4958388aeaef6c611b18e01d61c4a21a5e61820",
+    );
+  });
+
+  it("differs by root-commit and by worktree relpath", () => {
+    expect(computeDurableWorkspaceId("a", "")).not.toBe(
+      computeDurableWorkspaceId("b", ""),
+    );
+    expect(computeDurableWorkspaceId("abc", "")).not.toBe(
+      computeDurableWorkspaceId("abc", "wt"),
+    );
+  });
+});
+
+describe("normalizeRootCommits", () => {
+  it("collapses a mono-root repo to its single SHA", () => {
+    expect(normalizeRootCommits(["abc"])).toBe("abc");
+    expect(normalizeRootCommits([" abc \n"])).toBe("abc");
+  });
+
+  it("sorts ascending, de-dupes and drops blanks, joins with ','", () => {
+    expect(normalizeRootCommits(["c", "a", "b", "a", "  "])).toBe("a,b,c");
   });
 });
 
