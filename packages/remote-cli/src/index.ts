@@ -21,6 +21,7 @@ import {
   getDefaultTarget,
   getDefaultTools,
   getH2aConfig,
+  getJobMaxAgeHours,
   getMaxConcurrent,
   getTunnel,
   setDefaultRemote,
@@ -49,6 +50,7 @@ import {
   attachLocalSession,
   attachPodTmux,
   capturePane,
+  conductorRunning,
   fanoutLabels,
   findLocalSession,
   killLocalSession,
@@ -76,6 +78,7 @@ import {
   listJobs,
   listLocalForLs,
   loadRegistry,
+  tryClaimSlot,
   type RegistryEntry,
 } from "./registry.js";
 import {
@@ -86,11 +89,13 @@ import {
   canDelegateAtDepth,
   childDepthEnvValue,
   clampDepth,
+  clampRemoteDepthBudget,
+  conductorAdvisory,
   DEFAULT_MAX_CONCURRENT,
   DEPTH_ENV,
-  hasFreeSlot,
   inheritedDepthBudget,
   isDelegateType,
+  JOB_ID_ENV,
   jobDir,
   planNextStarts,
   readJobResult,
@@ -98,21 +103,25 @@ import {
   renderJobsTable,
   resolveJobCwd,
   runTrackMirror,
+  sweepStaleJobs,
   trackItemNewArgs,
   trackItemRealizeArgs,
   type DelegateType,
 } from "./delegate.js";
 import {
+  authenticateJobEnvelopes,
   buildDecisionReply,
   dropEnvelope,
   emitJobDone,
   envelopeFileName,
   isAwaitingDecision,
+  jobInstance,
   parentInstance,
   pendingDecisions,
   readInboxEnvelopes,
   renderPendingDecisions,
   repliedDecisionJobIds,
+  type ExpectedInstanceResolver,
 } from "./h2a-jobs.js";
 import { guardConvWriters } from "./conv-guard.js";
 import {
@@ -732,6 +741,9 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
         remoteId: session.id,
         role: "job",
         jobState: "running",
+        // Persist originCwd so reconcile reads result.json under the right dir
+        // (H2) regardless of the conductor's cwd.
+        ...(job.originCwd !== undefined ? { originCwd: job.originCwd } : {}),
       });
       mirrorNew();
       return {
@@ -768,8 +780,13 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   // Propagate the child's remaining spawn-depth budget through the env so a job
   // that itself runs `remote delegate` inherits a DECREMENTED budget (depth=0 →
   // refuse). tmux inherits the spawning process's env, so set it around spawn.
+  // ALSO stamp REMOTE_JOB_ID (H1): the spawned agent's claude SessionStart/End
+  // hooks read it to resolve THIS job (they only get claude's conversation uuid,
+  // not the job slug), so an interactive tmux job actually completes.
   const prevDepth = process.env[DEPTH_ENV];
+  const prevJobId = process.env[JOB_ID_ENV];
   process.env[DEPTH_ENV] = childDepthEnvValue(job.depthBudget ?? clampDepth(undefined));
+  process.env[JOB_ID_ENV] = job.id;
   let tmuxSession: string;
   try {
     if (headless) {
@@ -799,6 +816,8 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   } finally {
     if (prevDepth === undefined) delete process.env[DEPTH_ENV];
     else process.env[DEPTH_ENV] = prevDepth;
+    if (prevJobId === undefined) delete process.env[JOB_ID_ENV];
+    else process.env[JOB_ID_ENV] = prevJobId;
   }
 
   enroll({
@@ -811,6 +830,11 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
     tmuxSession,
     role: "job",
     jobState: "running",
+    // Persist originCwd (H2): result.json/output.log live under originCwd, read
+    // by reconcile/status/logs no matter where the conductor runs from.
+    originCwd,
+    ...(job.task !== undefined ? { task: job.task } : {}),
+    ...(job.callbackTo !== undefined ? { callbackTo: job.callbackTo } : {}),
   });
   mirrorNew();
   return {
@@ -2537,7 +2561,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option(
       "--max-depth <d>",
-      "spawn-depth budget granted to this job (clamp 1–3, default 1, à la Hermes). A job inherits a DECREMENTED budget via REMOTE_DELEGATE_DEPTH; at 0 a nested `delegate` refuses.",
+      "spawn-depth budget granted to this job (clamp 1–3, default 1, à la Hermes). A LOCAL job inherits a DECREMENTED budget via REMOTE_DELEGATE_DEPTH; at 0 a nested `delegate` refuses. With --remote the budget is clamped to 1 (no env channel reaches the Pod yet → a job-in-a-Pod does not re-delegate).",
     )
     .option(
       "--track <wpId>",
@@ -2605,6 +2629,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           Number.isFinite(cap) && cap > 0 ? cap : DEFAULT_MAX_CONCURRENT;
 
         const isRemote = opts.remote !== undefined && opts.remote !== false;
+        // REMOTE depth clamp: no env channel reaches the Pod (see
+        // clampRemoteDepthBudget), so a remote job can't enforce a budget > 1 →
+        // record AT MOST 1 (a job-in-a-Pod doesn't re-delegate). Local keeps 1–3.
+        const recordedDepthBudget = isRemote
+          ? clampRemoteDepthBudget(depthBudget)
+          : depthBudget;
         let remoteTarget: string | undefined;
         if (isRemote) {
           try {
@@ -2642,7 +2672,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             task,
             headless: opts.headless === true,
             originCwd: process.cwd(),
-            depthBudget,
+            depthBudget: recordedDepthBudget,
             ...(remoteTarget !== undefined ? { remoteTarget } : {}),
             ...(explicitCwd !== undefined ? { explicitCwd } : {}),
             ...(callbackTo !== undefined ? { callbackTo } : {}),
@@ -2652,8 +2682,36 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           // registry hiccup must not break the delegation
         }
 
-        // Free slot? Launch now (same path as the conductor). Else stay queued.
-        if (!hasFreeSlot(listJobs(), effectiveCap)) {
+        // S3 — ATOMICALLY claim a slot: the cap check + the enroll-as-running
+        // happen under ONE registry lock, so two concurrent `delegate`s can never
+        // both see the same free slot and overshoot the cap. A null claim means
+        // the cap is full → the job stays `pending` (queued) for the conductor.
+        const claimInput = {
+          id: jobId,
+          tool: jobType,
+          kind: (isRemote ? "remote" : "local-tmux") as RegistryEntry["kind"],
+          cwd: isRemote ? `job-${jobId}` : process.cwd(),
+          source: (isRemote ? "remote" : "run") as RegistryEntry["source"],
+          label: jobId,
+          role: "job" as const,
+          task,
+          headless: opts.headless === true,
+          originCwd: process.cwd(),
+          depthBudget: recordedDepthBudget,
+          ...(remoteTarget !== undefined ? { remoteTarget } : {}),
+          ...(explicitCwd !== undefined ? { explicitCwd } : {}),
+          ...(callbackTo !== undefined ? { callbackTo } : {}),
+          ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
+        };
+        let claimed: RegistryEntry | undefined;
+        try {
+          claimed = tryClaimSlot(claimInput, effectiveCap);
+        } catch {
+          // registry hiccup: fall through to an in-memory launch below
+          claimed = undefined;
+        }
+        if (!claimed && listJobs().some((e) => e.id === jobId)) {
+          // The entry exists but the cap is full → stay queued.
           process.stderr.write(
             `[remote] queued job ${jobId} (${jobType}${opts.headless ? " headless" : ""}${isRemote ? " remote" : ""}) — ` +
               `${effectiveCap} concurrent slot(s) busy. Start it with: remote jobs conduct\n`,
@@ -2661,17 +2719,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.stdout.write(`${jobId}\n`);
           return;
         }
-
-        const job = listJobs().find((e) => e.id === jobId);
-        if (!job) {
-          // Registry write failed AND we have a free slot — fall back to a
+        if (!claimed) {
+          // Registry write failed entirely (no entry at all) — fall back to a
           // throwaway in-memory entry so the launch still happens.
           process.stderr.write(
             `[remote] job ${jobId} not in registry after enroll — launching from an in-memory spec\n`,
           );
         }
         const launchEntry: RegistryEntry =
-          job ??
+          claimed ??
           ({
             id: jobId,
             tool: jobType,
@@ -2681,18 +2737,23 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             lastSeenAt: new Date().toISOString(),
             source: isRemote ? "remote" : "run",
             role: "job",
-            jobState: "pending",
+            jobState: "running",
             task,
             headless: opts.headless === true,
             originCwd: process.cwd(),
-            depthBudget,
+            depthBudget: recordedDepthBudget,
             ...(remoteTarget !== undefined ? { remoteTarget } : {}),
             ...(explicitCwd !== undefined ? { explicitCwd } : {}),
+            ...(callbackTo !== undefined ? { callbackTo } : {}),
             ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
           } satisfies RegistryEntry);
 
         const result = await startJob(launchEntry);
         if (!result.started) {
+          // The slot was claimed `running` (S3) but the launch failed — release
+          // it so it doesn't occupy a slot forever (conductor would otherwise
+          // only reclaim it on a later reconcile pass).
+          if (claimed) advanceJob(jobId, "failed");
           process.stderr.write(`[remote] failed to start job ${jobId}: ${result.error}\n`);
           process.exitCode = 1;
           return;
@@ -2717,6 +2778,27 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   const jobLive = (e: ReturnType<typeof listJobs>[number]): boolean =>
     isLive(e);
+
+  // S1 — resolve the `actor.instance` a job envelope MUST carry to be trusted,
+  // off the registry: `job.done`/`decision.requested` (ABOUT the job) must come
+  // FROM the job's own agent (jobInstance); `decision.reply` (FROM the parent)
+  // must come from the job's recorded parent (callbackTo). Unknown job → undefined
+  // → the envelope is rejected (fail closed). Used to drop forged cross-job
+  // envelopes from the shared RWX inbox before they reach the decision logic.
+  const expectedInstanceOf: ExpectedInstanceResolver = (jobId, type) => {
+    const job = loadRegistry().find((e) => e.id === jobId && e.role === "job");
+    if (!job) return undefined;
+    if (type === "decision.reply") return parentInstance(job);
+    return jobInstance(job);
+  };
+  /** Read the local inbox and AUTHENTICATE job envelopes (best-effort: [] on error). */
+  const readAuthedInbox = () => {
+    try {
+      return authenticateJobEnvelopes(readInboxEnvelopes(), expectedInstanceOf);
+    } catch {
+      return [];
+    }
+  };
 
   // Best-effort: realize the track mirror item when a job reaches a terminal
   // state. Skipped silently when the job carries no `trackWp` or track is absent.
@@ -2748,7 +2830,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       // its non-liveness must NOT be read as a crash. Leave it for the conductor.
       if (state === "pending" || state === "done" || state === "failed") continue;
       if (jobLive(job)) continue;
-      const result = readJobResult(process.cwd(), job.id);
+      // H2 — result.json was written under the job's ORIGIN cwd (HEADLESS_WRAPPER
+      // → jobDir(originCwd)); a conductor running from a DIFFERENT cwd must read
+      // it there, not at its own process.cwd() (which would always miss → force
+      // `failed` on a successful exit). Same fix at every readJobResult site.
+      const result = readJobResult(job.originCwd ?? process.cwd(), job.id);
       const advanced = advanceJob(job.id, result?.state ?? "failed");
       if (advanced) {
         emitJobDone(advanced, {
@@ -2771,7 +2857,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const live = await listRemoteSessions(url);
         const liveIds = new Set(live.map((s) => s.id));
         for (const t of reconcileRemoteJobs(remoteJobs, liveIds, (j) =>
-          readJobResult(process.cwd(), j.id),
+          readJobResult(j.originCwd ?? process.cwd(), j.id),
         )) {
           const advanced = advanceJob(t.id, t.to);
           // Drop the callback into the LOCAL inbox; `h2a bridge` carries it to
@@ -2785,6 +2871,24 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         // no remote configured / unreachable → leave remote jobs as-is
       }
     }
+    // M2 — SWEEP: a backstop for jobs the liveness reconcile above could NOT
+    // resolve (e.g. a remote job whose control-plane was unreachable, or a
+    // no-pid local entry isLive optimistically trusts). A `running` job that is
+    // NOT live, has NO result.json, and is older than the (generous, configurable)
+    // max age is failed so it stops occupying a concurrency slot forever.
+    const maxAgeMs = getJobMaxAgeHours() * 3600_000;
+    for (const id of sweepStaleJobs(listJobs(), {
+      isJobLive: jobLive,
+      hasResult: (j) =>
+        readJobResult(j.originCwd ?? process.cwd(), j.id) !== undefined,
+      maxAgeMs,
+    })) {
+      const advanced = advanceJob(id, "failed");
+      if (advanced) {
+        emitJobDone(advanced, { state: "failed" });
+        realizeTrackMirror(advanced);
+      }
+    }
     return listJobs();
   };
 
@@ -2794,8 +2898,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "List delegated jobs (id/type/state/age/cwd), live state reconciled against tmux (local) and the control-plane session list (remote).",
     )
     .action(async () => {
-      const rows = buildJobRows(await reconcileJobs(), jobLive);
+      const jobs = await reconcileJobs();
+      const rows = buildJobRows(jobs, jobLive);
       process.stdout.write(`${renderJobsTable(rows)}\n`);
+      // M3 — warn (don't self-heal) when queued jobs have no conductor draining.
+      const advisory = conductorAdvisory(jobs, conductorRunning());
+      if (advisory) process.stderr.write(`${advisory}\n`);
     });
 
   jobsCommand
@@ -2812,19 +2920,19 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       const live = jobLive(job);
-      const dir = jobDir(process.cwd(), id);
+      // H2 — the job's artifacts (result.json/output.log) live under its ORIGIN
+      // cwd, not the cwd `jobs status` happens to run from.
+      const dir = jobDir(job.originCwd ?? process.cwd(), id);
       // awaiting-decision is a DISPLAY state (an unanswered decision.requested
       // for this job in the local h2a inbox), surfaced over the persisted state
       // for a still-running job. Best-effort: a missing/unreadable inbox is no
       // decision pending. Reads the inbox once.
       let displayState: string = job.jobState ?? "pending";
       if ((displayState === "running" || displayState === "pending") && live) {
-        try {
-          if (isAwaitingDecision(id, readInboxEnvelopes())) {
-            displayState = "awaiting-decision";
-          }
-        } catch {
-          // no h2a store / unreadable → no decision pending
+        // Authenticate envelopes (S1): a forged decision.requested for this job
+        // from a neighbour pod must not flip the display state.
+        if (isAwaitingDecision(id, readAuthedInbox())) {
+          displayState = "awaiting-decision";
         }
       }
       const lines = [
@@ -2908,7 +3016,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.exitCode = 1;
         return;
       }
-      const logPath = join(jobDir(process.cwd(), id), "output.log");
+      // H2 — output.log lives under the job's ORIGIN cwd, not this process's cwd.
+      const logPath = join(jobDir(job.originCwd ?? process.cwd(), id), "output.log");
       if (existsSync(logPath)) {
         process.stdout.write(readFileSync(logPath, "utf8"));
         return;
@@ -2942,9 +3051,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "List unanswered `decision.requested` envelopes from delegated jobs (read from the local h2a inbox), with the asking job id and its question.",
     )
     .action(() => {
+      // Authenticate first (S1): a forged decision.requested (wrong actor) for a
+      // neighbour's job must not show up here, and a forged decision.reply must
+      // not silently mark a real request answered.
       let envelopes;
       try {
-        envelopes = readInboxEnvelopes();
+        envelopes = authenticateJobEnvelopes(
+          readInboxEnvelopes(),
+          expectedInstanceOf,
+        );
       } catch (error) {
         process.stderr.write(
           `[remote] cannot read the h2a inbox: ${(error instanceof Error ? error.message : String(error)).slice(0, 160)}\n`,
