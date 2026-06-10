@@ -129,6 +129,78 @@ Spawn + h2a transport mocked. No real cluster in tests.
 4. **P4** — conductor + concurrency cap (16) + queue + depth clamp + track mirroring (job graph as backlog).
 
 ## Open design forks (for double-review + user)
-1. **Non-interactive vs interactive+prompt** per type (headless `-p`/`exec` vs a primed interactive session the user can also attach). Recommend headless for true async, with `jobs attach` for inspection.
-2. **One workspace per remote job** (clean isolation, more PVC subPaths) vs **shared workspace + file-coordination** (Hermes-style, risk of clobber). Recommend per-job workspace by default, `--share-workspace` opt-in.
-3. **Conductor = this CLI process** vs **a dedicated `remote conduct` long-runner**. Recommend CLI-process conductor (no daemon), revisit if live rebalancing is needed.
+1. **Non-interactive vs interactive+prompt** per type. → headless, see review.
+2. **One workspace per remote job** vs shared. → differs local/remote, see review.
+3. **Conductor = CLI process vs daemon.** → neither: foreground-tmux watch, see review.
+
+---
+
+## Review outcomes — opus 4.8 adversarial review (2026-06-09) — REVISED PLAN
+
+The opus review found three blocking flaws in the first draft; they reshape the
+plan. (Codex 5.5-high review routed via h2a — folded in when it lands.)
+
+### Decisive corrections
+- **F1 — kill the interactive h2a decision-loop from the core.** A headless
+  `claude -p` / `codex exec` does NOT poll a file inbox nor block awaiting a
+  reply; `awaiting-decision` has no realistic producer. → **fire-and-report**:
+  a job that needs a decision **exits with `state:needs-decision` + the question
+  in its result**; the conductor **starts a NEW job** with the answer injected
+  into the task. No blocking, no inbox-read, no resume. The interactive feedback
+  loop (§5) is **demoted to P5 (exploratory)**.
+- **F2 — the queue needs a live driver.** A one-shot CLI can't start queued jobs
+  when a slot frees. A daemon violates the repo's no-service philosophy. →
+  **conductor = a foreground tmux watch loop** (`remote jobs conduct --watch`),
+  the SAME pattern as `h2a bridge --watch` / `watchRefreshLoop`: each pass
+  reconciles jobs vs cluster, consumes finished jobs, starts `pending` jobs under
+  the cap.
+- **F3 — "subPath = free isolation" is false.** Scaleway File Storage CSI =
+  **one volume attach per node** (`spec.ts:108`); N per-job workspaces = N
+  subdirs with quota/scheduling cost + collision with `workspace gc`. →
+  **default-16 concurrency is LOCAL-only**; **remote starts sequential (cap
+  1–2)** on a shared workspace until the File Storage quota/attach math is done.
+
+### Other required changes
+- **Extend `RegistryEntry` (role:"job"), do NOT add a second `jobs.json`.** A job
+  is almost a RegistryEntry already (id/tool/kind/cwd/convId/tmuxSession/pid/
+  endedAt); add `jobState`, `parent?`, `task`, `callbackTo?`. Reuses `listLive`,
+  the atomic-write, and the liveness guards — and means the **remote cluster
+  reconciliation** (kind:remote `isLive` is always true, `registry.ts:280`) is
+  written ONCE for both sessions and jobs (fixes F4).
+- **Run-once-exit wrapper, NOT drop-to-shell.** A job must redirect stdout/stderr
+  to `<dir>/output.log`, write `<dir>/result.json {state,exitCode}`, then **end
+  the session** — the opposite of the existing drop-to-shell wrapper.
+- **Security**: the `<task>` payload goes as a **single argv** (local, like
+  `startupArgs` today) or via the **`SESSION_STARTUP_ARGS` env channel** (remote,
+  the already-safe path used by `migrate`/`createRemoteSession`) — **never**
+  concatenated into a `bash -lc` string. `jobId`/`--name` pass `assertSafeName`
+  before becoming a filename / tmux slug / h2a dir.
+- **Local file-tree isolation**: 16 local jobs in the caller's cwd would clobber
+  the working tree (the single-writer guard only protects the `.jsonl`). →
+  default each local job to its **own git worktree** (repo skill
+  `using-git-worktrees`) or an explicit `--cwd`; never the shared caller cwd.
+- **Callback via claude lifecycle hook.** The repo already has claude
+  Stop/SessionEnd hooks (`enroll.ts`); branch the `job.done` signal on the hook
+  rather than parsing a tmux exit code — more reliable, and reduces the
+  lost-callback race (F5).
+- **agy headless unconfirmed** (R3): cross-type may ship as claude+codex headless
+  + agy interactive-only until an agy headless mode is verified.
+
+### Revised phasing
+- **P1 (do first — zero risky parts): LOCAL fire-and-report on the extended
+  registry.** `remote delegate <type> "<task>" [--cwd|worktree] [--name]` →
+  git-worktree isolation + `claude -p` / `codex exec` in a detached tmux
+  **run-once-exit** wrapper (stdout→`output.log`, write `result.json`, end
+  session); extend `RegistryEntry` (role:"job"); `remote jobs ls/status/logs/
+  attach`; task as argv, name via `assertSafeName`. **No h2a, no reactive cap.**
+  Delivers the real value: supervised, isolated, result-recoverable local
+  fan-out of N headless agents.
+- **P2 — REMOTE delegation** via `createRemoteSession({startupArgs})` (safe
+  channel) + cluster reconciliation (`listRemoteSessions` → dead pod = failed);
+  shared workspace, **sequential** (cap 1–2) until CSI quota is assessed.
+- **P3 — callback** (`job.done`) via claude Stop/SessionEnd hook + h2a transport,
+  only after choosing a reliable-delivery mechanism.
+- **P4 — conductor** `jobs conduct --watch` (foreground tmux) + concurrency cap
+  (16 local) + queue + optional track mirroring.
+- **P5 (exploratory) — interactive decision feedback loop** (the original §5),
+  only if a realistic headless-agent inbox-read/resume mechanism is found.
