@@ -78,7 +78,15 @@ On termination the wrapper drops an h2a envelope into the parent's inbox:
 `remote h2a bridge` already transports pod↔local. The conductor consumes these to
 advance the job graph and mark the track item done/failed.
 
-### 5. Feedback loop — decision request (h2a)
+### 5. Feedback loop — decision request (h2a) — **EXPERIMENTAL (YAGNI)**
+> **Status: EXPERIMENTAL.** Only `job.done` (via the claude SessionEnd hook +
+> the `jobs` reconcile loop) works WITHOUT the delegated agent's cooperation. The
+> `decision.requested` / `decision.reply` round-trip depends on the agent
+> CHOOSING to poll its h2a inbox (MCP `h2a_inbox`) and act on a reply — we build
+> and transport the channel but cannot force the agent to use it. The CLI treats
+> a `decision.reply` as **ADVISORY**: it is surfaced/proposed, never used to gate
+> a privileged action. The code stays in place; the feature is not load-bearing.
+
 When the delegated agent needs a decision it emits `type: "decision.requested"`
 (body: question + options) to the parent and the job goes **awaiting-decision**.
 The parent (conductor or a human via the conductor) replies with
@@ -214,3 +222,53 @@ plan. (Codex 5.5-high review routed via h2a — folded in when it lands.)
 - **P4 — conductor** `jobs conduct --watch` (foreground tmux) + concurrency cap
   (**16, local AND remote**) + queue + `--max-depth` (1–3) + track mirroring
   (job graph = backlog).
+
+---
+
+## Remediation — a2a-cli adversarial review (2026-06-09, post-P1–P4)
+
+A second adversarial review (a2a-cli) found real correctness/concurrency/trust
+bugs in the shipped P1–P4. Fixed here, by priority:
+
+- **H1 (P0, correctness) — interactive jobs never completed.** The claude
+  SessionEnd hook resolved the job by `session_id` (claude's conversation uuid),
+  but a job is enrolled under its SLUG → no match → the job stayed `running`
+  forever. Fix: `startJob` stamps `REMOTE_JOB_ID=<jobId>` into the local-tmux
+  session env; SessionStart links the conversation uuid onto the job (`convId`);
+  SessionEnd resolves via `REMOTE_JOB_ID` → `convId` → id (back-compat) and
+  advances the job by its slug. The hook still ALWAYS exits 0.
+- **H2 (P0) — `result.json` read at the wrong cwd.** Written under
+  `job.originCwd` but read via `process.cwd()`, so a conductor in another cwd
+  always missed it and forced `failed` on a clean exit. Fix: read with
+  `job.originCwd ?? process.cwd()` at all 4 sites (reconcile local + remote, `jobs
+  status`, `jobs logs`); `originCwd` is persisted on every job enroll.
+- **S2/S3 (P1, concurrency) — registry races.** `registry.json` is
+  read-modify-written by concurrent `delegate`/conductor/hook processes →
+  last-writer-wins lost enrolls; and the cap check (`hasFreeSlot`) was separate
+  from the enroll → overshoot. Fix: a **local file lock** (`withRegistryLock`,
+  exclusive lockfile with stale-takeover) wraps every mutation
+  (enroll/advanceJob/markEnded/touchEntry/prune), and **`tryClaimSlot`** does the
+  cap-check + enroll-as-running ATOMICALLY under that lock. The registry is
+  **LOCAL ONLY** (the CLI writes it; pods have no access), so a local lock is
+  sufficient — there is no cross-host writer to coordinate.
+- **S1 (P2, trust) — unauthenticated envelopes on the multi-tenant RWX inbox.**
+  Any pod could forge a `job.done`/`decision.*` for a neighbour's job. Fix: at
+  consumption, **reject** an envelope whose `actor.instance` ≠ the job's known
+  instance (`jobInstance` for job.done/decision.requested; the recorded parent for
+  decision.reply); `decision.reply` is **advisory** only. LIMIT: integrity by
+  convention, not signatures — a pod that knows the victim's jobId can still
+  compute a matching instance. Real trust needs signed envelopes (tracked
+  separately).
+- **M2 (P3, convergence) — sweep.** A `running` job that is NOT live, has NO
+  `result.json`, and is older than a generous configurable max age
+  (`REMOTE_JOB_MAX_AGE_HOURS`, default 24h) is swept → `failed` so it stops
+  holding a slot (covers a control-plane-unreachable remote job / optimistic
+  no-pid local liveness). Bounds awaiting-decision too (it's persisted `running`).
+- **M3 (P3) — no-conductor advisory.** `jobs ls` warns `N pending, no active
+  conductor` (detected via `pgrep` for `jobs conduct`); it does NOT self-heal.
+- **`--max-depth` remote clamp.** There is **no env channel** carrying the depth
+  budget into a Pod (`createRemoteSession` passes only `startupArgs`), so a remote
+  job cannot enforce a budget. Until that channel exists, a `--remote` job's
+  recorded budget is **clamped to ≤ 1** (a job-in-a-Pod does not re-delegate).
+  Local jobs keep the full 1–3 range via `REMOTE_DELEGATE_DEPTH`.
+- `--remote` concurrency safety now relies on the S2/S3 lock fix above.
