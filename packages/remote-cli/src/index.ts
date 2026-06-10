@@ -183,6 +183,7 @@ import {
 } from "./session-restore.js";
 import { run } from "./run.js";
 import { pluginAdd, pluginAddInstaller, pluginLs, pluginSync } from "./plugin.js";
+import { syncSkills } from "./skills-sync.js";
 import { smokeRemoteProfile } from "./smoke.js";
 import { migrateForward, migrateBack } from "./migrate.js";
 import {
@@ -2399,6 +2400,27 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const url = getConfiguredRemote(opts.remote);
       await ensureConnected(url);
       await pluginSync(url);
+    });
+
+  pluginCommand
+    .command("sync-skills")
+    .description(
+      "Copy the LOCAL Claude Code skills + plugin cache into live session Pod(s) so remote claude sessions get the same capabilities. " +
+        "Whitelist ONLY (relative to $HOME): .claude/skills, .claude/plugins/{installed_plugins.json,marketplaces,cache} — NEVER auth/settings/transcripts. " +
+        "tar -> kubectl exec -i -> untar (argv only, archive on stdin); idempotent (overwrites in place). Needs the configured tunnel.",
+    )
+    .option("--pod <name>", "sync a single session (by id or session-<id>)")
+    .option("--all", "sync every live session Pod")
+    .option("--dry-run", "print the tar/exec plan; transfer nothing")
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .action(async (opts: { pod?: string; all?: boolean; dryRun?: boolean; remote?: string }) => {
+      const url = getConfiguredRemote(opts.remote);
+      await ensureConnected(url);
+      const syncOpts: { pod?: string; all?: boolean; dryRun?: boolean } = {};
+      if (opts.pod !== undefined) syncOpts.pod = opts.pod;
+      if (opts.all !== undefined) syncOpts.all = opts.all;
+      if (opts.dryRun !== undefined) syncOpts.dryRun = opts.dryRun;
+      await syncSkills(url, syncOpts);
     });
 
   program
