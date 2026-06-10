@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  advanceJob,
+  canTransitionJob,
   enroll,
+  listJobs,
   listLive,
   loadRegistry,
   markEnded,
@@ -205,6 +208,78 @@ describe("registry", () => {
       const before = readFileSync(regPath, "utf8");
       expect(prune(48, { path: regPath, tmuxHasSession: () => true })).toBe(0);
       expect(readFileSync(regPath, "utf8")).toBe(before);
+    });
+  });
+
+  describe("delegated jobs (role:'job')", () => {
+    const jobInput = {
+      id: "job-1",
+      tool: "codex" as const,
+      kind: "local-tmux" as const,
+      cwd: "/home/u/src/projA/.remote/jobs/job-1/wt",
+      source: "run" as const,
+      tmuxSession: "remote-job-1",
+      role: "job" as const,
+      jobState: "running" as const,
+      task: "fix the flaky test",
+      parent: "boss",
+    };
+
+    it("round-trips the job fields through enroll/loadRegistry", () => {
+      enroll(jobInput, regPath);
+      const [loaded] = loadRegistry(regPath);
+      expect(loaded).toMatchObject({
+        id: "job-1",
+        role: "job",
+        jobState: "running",
+        task: "fix the flaky test",
+        parent: "boss",
+      });
+    });
+
+    it("listJobs returns only role:'job' entries", () => {
+      enroll(baseInput, regPath); // a session, not a job
+      enroll(jobInput, regPath);
+      const jobs = listJobs({ path: regPath });
+      expect(jobs.map((j) => j.id)).toEqual(["job-1"]);
+    });
+
+    it("a plain session keeps no job fields (back-compat)", () => {
+      enroll(baseInput, regPath);
+      const [loaded] = loadRegistry(regPath);
+      expect(loaded?.role).toBeUndefined();
+      expect(loaded?.jobState).toBeUndefined();
+    });
+
+    describe("advanceJob state machine", () => {
+      it("running -> done stamps endedAt and persists", () => {
+        enroll(jobInput, regPath);
+        const updated = advanceJob("job-1", "done", regPath);
+        expect(updated?.jobState).toBe("done");
+        expect(updated?.endedAt).toBeTruthy();
+        expect(loadRegistry(regPath)[0]?.jobState).toBe("done");
+      });
+
+      it("running -> failed is allowed; done -> running is not", () => {
+        enroll(jobInput, regPath);
+        expect(advanceJob("job-1", "failed", regPath)?.jobState).toBe("failed");
+        // failed is terminal: cannot go back to running
+        expect(advanceJob("job-1", "running", regPath)).toBeUndefined();
+      });
+
+      it("refuses to advance a non-job or unknown id", () => {
+        enroll(baseInput, regPath); // a session
+        expect(advanceJob("sess-1", "done", regPath)).toBeUndefined();
+        expect(advanceJob("nope", "done", regPath)).toBeUndefined();
+      });
+
+      it("canTransitionJob encodes the legal edges", () => {
+        expect(canTransitionJob("pending", "running")).toBe(true);
+        expect(canTransitionJob("running", "done")).toBe(true);
+        expect(canTransitionJob("running", "failed")).toBe(true);
+        expect(canTransitionJob("done", "failed")).toBe(false);
+        expect(canTransitionJob("pending", "done")).toBe(false);
+      });
     });
   });
 });

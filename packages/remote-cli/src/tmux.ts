@@ -38,6 +38,19 @@ printf '[remote] relaunch: %s   (or Ctrl-D to end this session)\\n' "$relaunch"
 exec /bin/bash -l`;
 
 /**
+ * Run-once-exit wrapper for HEADLESS delegated jobs — the OPPOSITE of
+ * LOCAL_WRAPPER's drop-to-shell. Redirects the CLI's stdout+stderr to an output
+ * log, writes a result.json with the final state + exit code, then lets the
+ * tmux session END (no `exec bash`). Invoked as
+ * `bash -lc HEADLESS_WRAPPER <resultJson> <outputLog> <cli> <args…>`:
+ * `$0`=result.json path, `$1`=output.log path, `$2`=cli, `$3…`=cli args.
+ */
+export const HEADLESS_WRAPPER = `result="$0"; log="$1"; cli="$2"; shift 2
+"$cli" "$@" >"$log" 2>&1; code=$?
+if [ "$code" -eq 0 ]; then state=done; else state=failed; fi
+printf '{"state":"%s","exitCode":%s}\\n' "$state" "$code" >"$result"`;
+
+/**
  * The `remote run …` line that recreates this exact local session — shown when
  * the CLI exits so the user can copy-paste it. Pure, exported for tests.
  */
@@ -268,6 +281,68 @@ export function startLocalSession(
     stdio: "ignore",
   });
   return { name, slug };
+}
+
+/**
+ * Start a HEADLESS delegated job in a detached local tmux session under the
+ * run-once-exit wrapper: the CLI runs, its output is captured to `outputLog`,
+ * a `resultJson` is written, then the session ENDS. The task lands as a single
+ * argv token inside `args` (no shell concat). Idempotent on slug like
+ * startLocalSession. Returns the session name + slug.
+ */
+export function startHeadlessSession(
+  profile: string,
+  command: string,
+  cwd: string,
+  args: ReadonlyArray<string>,
+  resultJson: string,
+  outputLog: string,
+  label: string,
+): StartLocalResult {
+  const slug = slugify(label);
+  const name = localSessionName(slug);
+  ensureScrollConfig();
+  if (findLocalSession(name)) return { name, slug };
+
+  const r = spawnSync(
+    TMUX,
+    [
+      "new-session",
+      "-d",
+      "-s",
+      name,
+      "-n",
+      profile,
+      "-c",
+      cwd,
+      "/bin/bash",
+      "-lc",
+      HEADLESS_WRAPPER,
+      resultJson,
+      outputLog,
+      command,
+      ...args,
+    ],
+    { stdio: "ignore" },
+  );
+  if (r.status !== 0) {
+    throw new Error(`tmux new-session failed (exit ${r.status ?? "?"})`);
+  }
+  spawnSync(TMUX, ["set-option", "-t", name, "@profile", profile], {
+    stdio: "ignore",
+  });
+  return { name, slug };
+}
+
+/** Last `lines` of a session's main pane (interactive job logs). "" if gone. */
+export function capturePane(name: string, lines = 200): string {
+  const r = spawnSync(
+    TMUX,
+    ["capture-pane", "-p", "-t", name, "-S", `-${lines}`],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || !r.stdout) return "";
+  return r.stdout;
 }
 
 /**

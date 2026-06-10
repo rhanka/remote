@@ -25,6 +25,15 @@ export type RegistryTool = "claude" | "codex" | "agy";
 export type RegistryKind = "local-tmux" | "local" | "remote";
 export type RegistrySource = "run" | "hook" | "scan" | "remote";
 
+/**
+ * Delegated-job extension (P1 of cross-type agent delegation). A job IS a
+ * RegistryEntry with `role: "job"` — same atomic-write, same liveness guards,
+ * same `listLive`. These fields are OPTIONAL so every existing entry stays a
+ * valid RegistryEntry (back-compat).
+ */
+export type RegistryRole = "job";
+export type JobState = "pending" | "running" | "done" | "failed";
+
 export type RegistryEntry = {
   /** Stable key: claude session uuid / codex rollout id / remoteId / tmux slug. */
   id: string;
@@ -44,6 +53,14 @@ export type RegistryEntry = {
   lastSeenAt: string;
   endedAt?: string;
   source: RegistrySource;
+  /** "job" marks a delegated agent (see `delegate.ts`); absent = a session. */
+  role?: RegistryRole;
+  /** Lifecycle of a delegated job (role "job" only). */
+  jobState?: JobState;
+  /** Parent job/session id that delegated this job. */
+  parent?: string;
+  /** The task the delegated agent was primed with. */
+  task?: string;
 };
 
 export type EnrollInput = {
@@ -57,6 +74,10 @@ export type EnrollInput = {
   remoteId?: string;
   tmuxSession?: string;
   pid?: number;
+  role?: RegistryRole;
+  jobState?: JobState;
+  parent?: string;
+  task?: string;
 };
 
 /** Injectable liveness probes (tests stay deterministic, no tmux/pid needed). */
@@ -153,10 +174,62 @@ export function enroll(
   if (tmuxSession !== undefined) entry.tmuxSession = tmuxSession;
   const pid = input.pid ?? prev?.pid;
   if (pid !== undefined) entry.pid = pid;
+  const role = input.role ?? prev?.role;
+  if (role !== undefined) entry.role = role;
+  const jobState = input.jobState ?? prev?.jobState;
+  if (jobState !== undefined) entry.jobState = jobState;
+  const parent = input.parent ?? prev?.parent;
+  if (parent !== undefined) entry.parent = parent;
+  const task = input.task ?? prev?.task;
+  if (task !== undefined) entry.task = task;
   if (idx >= 0) entries[idx] = entry;
   else entries.push(entry);
   saveRegistry(entries, path);
   return entry;
+}
+
+/**
+ * The legal job lifecycle transitions (P1 keeps it linear; P4 adds the queue's
+ * pending→running). A transition not listed here is rejected by `advanceJob`.
+ * Pure, exported for tests.
+ */
+const JOB_TRANSITIONS: Readonly<Record<JobState, ReadonlyArray<JobState>>> = {
+  pending: ["running", "failed"],
+  running: ["done", "failed"],
+  done: [],
+  failed: [],
+};
+
+export function canTransitionJob(from: JobState, to: JobState): boolean {
+  return JOB_TRANSITIONS[from].includes(to);
+}
+
+/**
+ * Move a job to `to`, persisting the new state (and stamping endedAt for the
+ * terminal states). Returns the updated entry, or undefined when the id is
+ * unknown / not a job / the transition is illegal. Reuses the atomic write.
+ */
+export function advanceJob(
+  id: string,
+  to: JobState,
+  path: string = resolveRegistryPath(),
+): RegistryEntry | undefined {
+  const entries = loadRegistry(path);
+  const entry = entries.find((e) => e.id === id);
+  if (!entry || entry.role !== "job") return undefined;
+  const from = entry.jobState ?? "pending";
+  if (from !== to && !canTransitionJob(from, to)) return undefined;
+  entry.jobState = to;
+  entry.lastSeenAt = new Date().toISOString();
+  if (to === "done" || to === "failed") entry.endedAt = entry.endedAt ?? entry.lastSeenAt;
+  saveRegistry(entries, path);
+  return entry;
+}
+
+/** Live job entries (role "job"), liveness reconciled like any other entry. */
+export function listJobs(opts: RegistryOpts = {}): RegistryEntry[] {
+  const path = opts.path ?? resolveRegistryPath();
+  return loadRegistry(path).filter((e) => e.role === "job");
 }
 
 /** Refresh lastSeenAt. Returns false when the id is unknown. */
