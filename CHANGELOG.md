@@ -5,6 +5,19 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.4 — 2026-06-10
+
+Headline: **durable workspace id aligned with h2a/track** — `conductor-launch`
+now computes the same `ws:<hex>` id the maintainer puts on the envelope.
+
+- `computeDurableWorkspaceId` switched from a remote-url hash to the
+  byte-identical h2a 0.68 / track algorithm:
+  `ws:` + sha256(`rootCommitSHA` + "\n" + `worktreeRelPath`), where
+  `rootCommitSHA` = all `git rev-list --max-parents=0 HEAD` roots sorted/joined
+  and `worktreeRelPath` = "" for the primary worktree else `basename(git-dir)`.
+  Invariant across clone/fork/path/machine. Pinned vectors shared with track
+  are asserted in tests; `/src/remote` → `ws:febb5c4c…`. 488 tests.
+
 ## v0.5.3 — 2026-06-10
 
 Headline: **remote fan-out** — launch a fleet of N concurrent remote sessions
