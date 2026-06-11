@@ -144,10 +144,15 @@ export type { K8sProvisionerOptions } from "./k8s/provisioner.js";
 export { KubernetesObjectApiClient } from "./k8s/object-api-client.js";
 export type { K8sClient, K8sResourceRef } from "./k8s/client.js";
 export {
+  BROWSER_SIDECAR_CONTAINER,
+  BROWSER_SIDECAR_ENTRYPOINT,
+  BROWSER_SIDECAR_IMAGE,
+  BROWSER_SIDECAR_PORT,
   DEFAULT_BUILDER_OPTIONS,
   JANITOR_IMAGE,
   JANITOR_TRASH_DIR,
   JANITOR_WORKSPACES_MOUNT,
+  buildBrowserSidecarContainer,
   buildSessionPodSpec,
   buildSessionPvcSpec,
   buildSessionAuthSecret,
@@ -156,6 +161,7 @@ export {
   credentialSecretKey,
   resourceNames,
   sessionLabels,
+  type K8sContainer,
   type K8sPodAffinityTerm,
   type K8sPodSpec,
   type K8sPvcAccessMode,

@@ -19,6 +19,7 @@
     "@sentropic/remote-protocol": "*"
   },
   "devDependencies": {
+    "@types/node": "^22.19.18",
     "tsup": "^8.5.1"
   }
 }

@@ -120,6 +120,10 @@ export class K8sSessionProvisioner implements SessionProvisioner {
     if (!descriptor.workspaceId) {
       await this.client.create(buildSessionPvcSpec(descriptor, opts));
     }
+    // WP7: opt-in headful-browser sidecar (noVNC) when the descriptor asks for
+    // it (`metadata.browser === true`). Default off — ~no session needs it and
+    // the X/Chromium stack is heavy.
+    const browser = descriptor.metadata?.["browser"] === true;
     await this.client.create(
       buildSessionPodSpec(
         descriptor,
@@ -128,6 +132,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
         options.workspaceSync ?? false,
         options.workspaceExport ?? false,
         options.sessionToken,
+        browser,
       ),
     );
 

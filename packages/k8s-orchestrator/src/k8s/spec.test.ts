@@ -2,6 +2,10 @@ import type { SessionDescriptor } from "@sentropic/remote-protocol";
 import { describe, expect, it } from "vitest";
 
 import {
+  BROWSER_SIDECAR_CONTAINER,
+  BROWSER_SIDECAR_ENTRYPOINT,
+  BROWSER_SIDECAR_IMAGE,
+  BROWSER_SIDECAR_PORT,
   DEFAULT_BUILDER_OPTIONS,
   JANITOR_IMAGE,
   JANITOR_TRASH_DIR,
@@ -100,7 +104,8 @@ describe("k8s spec builders", () => {
     );
     const volume = pod.spec.volumes[0]!;
     expect(
-      "persistentVolumeClaim" in volume && volume.persistentVolumeClaim.claimName,
+      "persistentVolumeClaim" in volume &&
+        volume.persistentVolumeClaim.claimName,
     ).toBe("remote-workspaces");
     // workspace mount: shared claim + subPath <workspaceId>
     const ws = pod.spec.containers[0]!.volumeMounts.find(
@@ -418,9 +423,7 @@ describe("workspace GC janitor spec", () => {
     });
     expect(script).toContain("-mmin -10080");
     expect(script).toContain(`mkdir -p ${JANITOR_TRASH_DIR}`);
-    expect(script).toContain(
-      `TRASH="${JANITOR_TRASH_DIR}/$d.$EPOCH.tar.gz"`,
-    );
+    expect(script).toContain(`TRASH="${JANITOR_TRASH_DIR}/$d.$EPOCH.tar.gz"`);
     // archive-then-delete gate: rm -rf only inside the tar-success branch
     expect(script).toContain(
       'if tar -czf "$TRASH" "$d" && [ -s "$TRASH" ]; then',
@@ -450,5 +453,87 @@ describe("workspace GC janitor spec", () => {
     expect(() =>
       buildWorkspaceGcScript({ olderThanDays: 1.5, apply: true, keep: [] }),
     ).toThrow(/olderThanDays/);
+  });
+});
+
+describe("headful-browser sidecar (WP7 noVNC, opt-in)", () => {
+  it("is ABSENT by default — only the session-agent container", () => {
+    const pod = buildSessionPodSpec(baseDescriptor);
+    expect(pod.spec.containers).toHaveLength(1);
+    expect(pod.spec.containers[0]!.name).toBe("session-agent");
+  });
+
+  it("is ABSENT when browser=false explicitly", () => {
+    const pod = buildSessionPodSpec(
+      baseDescriptor,
+      DEFAULT_BUILDER_OPTIONS,
+      [],
+      false,
+      false,
+      undefined,
+      false,
+    );
+    expect(pod.spec.containers).toHaveLength(1);
+  });
+
+  it("adds the sidecar when browser=true", () => {
+    const pod = buildSessionPodSpec(
+      baseDescriptor,
+      DEFAULT_BUILDER_OPTIONS,
+      [],
+      false,
+      false,
+      undefined,
+      true,
+    );
+    expect(pod.spec.containers).toHaveLength(2);
+    const sidecar = pod.spec.containers.find(
+      (c) => c.name === BROWSER_SIDECAR_CONTAINER,
+    );
+    expect(sidecar).toBeDefined();
+    expect(sidecar!.image).toBe(BROWSER_SIDECAR_IMAGE);
+    expect(sidecar!.command).toEqual([BROWSER_SIDECAR_ENTRYPOINT]);
+    // Capped resources so a desktop Chromium can't starve the agent.
+    expect(sidecar!.resources?.limits).toEqual({ cpu: "1", memory: "1Gi" });
+    // Port advertised via env (matches the bridge NOVNC_POD_PORT).
+    expect(sidecar!.env.find((e) => e.name === "NOVNC_PORT")?.value).toBe(
+      String(BROWSER_SIDECAR_PORT),
+    );
+    // NO token baked into the manifest (injected at runtime).
+    expect(sidecar!.env.some((e) => e.name === "NOVNC_TOKEN")).toBe(false);
+  });
+
+  it("shares the workspace volume with the agent (downloads visible)", () => {
+    const pod = buildSessionPodSpec(
+      baseDescriptor,
+      DEFAULT_BUILDER_OPTIONS,
+      [],
+      false,
+      false,
+      undefined,
+      true,
+    );
+    const sidecar = pod.spec.containers.find(
+      (c) => c.name === BROWSER_SIDECAR_CONTAINER,
+    )!;
+    const agentWsMount = pod.spec.containers[0]!.volumeMounts[0]!;
+    expect(sidecar.volumeMounts[0]!.name).toBe(agentWsMount.name);
+    expect(sidecar.volumeMounts[0]!.mountPath).toBe(agentWsMount.mountPath);
+  });
+
+  it("honours a custom browserSidecarImage override", () => {
+    const pod = buildSessionPodSpec(
+      baseDescriptor,
+      { ...DEFAULT_BUILDER_OPTIONS, browserSidecarImage: "my/browser:test" },
+      [],
+      false,
+      false,
+      undefined,
+      true,
+    );
+    const sidecar = pod.spec.containers.find(
+      (c) => c.name === BROWSER_SIDECAR_CONTAINER,
+    )!;
+    expect(sidecar.image).toBe("my/browser:test");
   });
 });
