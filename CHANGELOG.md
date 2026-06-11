@@ -5,6 +5,17 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.6 — 2026-06-10
+
+Headline: **the noVNC sidecar image ships in CI** — `sentropic-remote-browser`
+is now built/pushed alongside the control-plane and session-agent images.
+
+- CI `build-and-push` matrix gains a `browser` entry
+  (`ghcr.io/rhanka/sentropic-remote-browser`); the headful-browser Dockerfile's
+  `COPY` is fixed for the root build context (`context: .`).
+- The k8s sidecar (`BROWSER_SIDECAR_IMAGE`) is pinned to `:v0.5.6` — the first
+  tag whose CI actually publishes the browser image.
+
 ## v0.5.5 — 2026-06-10
 
 Headline: **headful browser-in-pod via noVNC** — complete a 2FA / login

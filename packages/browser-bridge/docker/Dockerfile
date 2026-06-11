@@ -43,7 +43,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /opt/browser \
     && ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
-COPY start-headful.sh /opt/browser/start-headful.sh
+# Root build context (matches the CI matrix `context: .`).
+COPY packages/browser-bridge/docker/start-headful.sh /opt/browser/start-headful.sh
 RUN chmod +x /opt/browser/start-headful.sh
 
 EXPOSE 6080

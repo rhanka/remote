@@ -24,6 +24,9 @@ jobs:
           - name: session-agent
             dockerfile: packages/session-agent/Dockerfile
             image: ghcr.io/rhanka/sentropic-remote-session-agent
+          - name: browser
+            dockerfile: packages/browser-bridge/docker/Dockerfile
+            image: ghcr.io/rhanka/sentropic-remote-browser
     steps:
       - uses: actions/checkout@v6
 
