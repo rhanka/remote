@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,6 +32,7 @@ import {
   getJobMaxAgeHours,
   getMaxConcurrent,
   getTunnel,
+  resolveConfigPath,
   setDefaultRemote,
   setDefaultTarget,
   setDefaultTools,
@@ -162,7 +170,13 @@ import {
   manualEnroll,
   readStdin,
 } from "./enroll.js";
-import { softRefreshSession } from "./soft-refresh.js";
+import { probePodCredHealth, softRefreshSession } from "./soft-refresh.js";
+import {
+  claudeExpiryAdvisory,
+  claudeTokenExpiry,
+  supervisorAdvisory,
+  SUPERVISOR_HEARTBEAT_FILE,
+} from "./cred-health.js";
 import { forwardSessionPort } from "./forward.js";
 import { buildBrowserOpenPlan } from "./browser.js";
 import {
@@ -611,6 +625,97 @@ export function parseWatchMinutes(raw: string): number {
   return minutes;
 }
 
+// ---------------------------------------------------------------------------
+// Slice 2 — creds SUPERVISOR heartbeat + advisories (additive, zero-risk).
+// ---------------------------------------------------------------------------
+
+/** The creds-supervisor heartbeat file under the remote-cli config dir. */
+function supervisorHeartbeatPath(): string {
+  // Same config dir the rest of remote-cli uses (honors REMOTE_CLI_CONFIG_HOME
+  // in tests). Reuses resolveConfigPath's directory.
+  return join(resolveConfigPath(), "..", SUPERVISOR_HEARTBEAT_FILE);
+}
+
+/** Touch the heartbeat file (best-effort): the `refresh --watch` loop calls it each pass. */
+function writeSupervisorHeartbeat(nowMs: number = Date.now()): void {
+  try {
+    const path = supervisorHeartbeatPath();
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, `${new Date(nowMs).toISOString()}\n`, "utf8");
+  } catch {
+    // best-effort: a heartbeat write failure must NEVER break the refresh pass.
+  }
+}
+
+/** The heartbeat file's mtime in ms, or undefined when absent/unreadable. */
+function readSupervisorHeartbeatMtime(): number | undefined {
+  try {
+    return statSync(supervisorHeartbeatPath()).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The supervisor-staleness advisory for the LS surfaces. Reads the heartbeat
+ * mtime and the configured watch interval (recorded alongside the heartbeat by
+ * the watch loop) and asks the pure `supervisorAdvisory`. We only warn when an
+ * interval is known (no interval ⇒ the user never started a watcher with a
+ * recorded cadence; a MISSING heartbeat still warns). Returns undefined when
+ * fresh / unknown-but-present.
+ */
+function supervisorStalenessAdvisory(now: number = Date.now()): string | undefined {
+  const mtime = readSupervisorHeartbeatMtime();
+  const intervalMs = readSupervisorIntervalMs();
+  // No heartbeat at all → loud MISSING warning regardless of interval.
+  if (mtime === undefined) return supervisorAdvisory(undefined, intervalMs ?? 0, now);
+  if (intervalMs === undefined) return undefined; // present but cadence unknown
+  return supervisorAdvisory(mtime, intervalMs, now);
+}
+
+/** Sidecar file recording the watch interval (ms) so `ls` can judge staleness. */
+function supervisorIntervalPath(): string {
+  return join(resolveConfigPath(), "..", "supervisor-interval-ms");
+}
+
+function writeSupervisorIntervalMs(intervalMs: number): void {
+  try {
+    const path = supervisorIntervalPath();
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, `${intervalMs}\n`, "utf8");
+  } catch {
+    // best-effort
+  }
+}
+
+function readSupervisorIntervalMs(): number | undefined {
+  try {
+    const n = Number(readFileSync(supervisorIntervalPath(), "utf8").trim());
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Detection-only advisory for the LOCAL claude OAuth token expiry. Reads the
+ * local `.claude/.credentials.json` and, when the token is expired / within the
+ * warn window, returns a loud "run claude locally" message. NO auto-action and
+ * NO change to what gets pushed — detection + advisory only (slice 2). Returns
+ * undefined when fresh / absent.
+ */
+function localClaudeExpiryAdvisory(now: number = Date.now()): string | undefined {
+  try {
+    const raw = readFileSync(
+      join(homedir(), ".claude", ".credentials.json"),
+      "utf8",
+    );
+    return claudeExpiryAdvisory(claudeTokenExpiry(raw, now));
+  } catch {
+    return undefined; // no local claude creds → nothing to warn about
+  }
+}
+
 type SoftRefreshAllOutcome = {
   sessionId: string;
   profile: string;
@@ -649,6 +754,13 @@ export async function softRefreshAllSessions(
   opts: { authRefresh?: boolean },
   hashes: Map<string, string>,
 ): Promise<{ failed: number }> {
+  // Slice 2: prove the watcher is alive THIS pass (heartbeat) + warn (detection
+  // only) when the local claude OAuth token is expiring — both before any work,
+  // so even a zero-session pass refreshes the heartbeat and surfaces the warning.
+  writeSupervisorHeartbeat();
+  const claudeWarn = localClaudeExpiryAdvisory();
+  if (claudeWarn) process.stderr.write(`${claudeWarn}\n`);
+
   const sessions = await listRemoteSessions(url);
   if (sessions.length === 0) {
     process.stderr.write("[remote] no live remote sessions to refresh\n");
@@ -678,6 +790,23 @@ export async function softRefreshAllSessions(
         ...(previous !== undefined ? { previousHash: previous } : {}),
       });
       hashes.set(s.id, result.hash);
+      // Slice 2: ADDITIONAL trigger — probe the cheap-to-check tools (gh/npm/
+      // docker) in this live Pod; a 401 pushes that tool's creds via the SAME
+      // mechanism. Best-effort: never fails the profile refresh outcome.
+      try {
+        const actions = await probePodCredHealth(s.id);
+        for (const a of actions) {
+          if (!a.health.ok) {
+            process.stderr.write(
+              `[remote]   ${s.id}: ${a.health.reason}${a.pushed ? " — pushed" : ""}\n`,
+            );
+          }
+        }
+      } catch (probeError) {
+        process.stderr.write(
+          `[remote]   ${s.id}: tool health probe skipped: ${String(probeError).slice(0, 120)}\n`,
+        );
+      }
       outcomes.push({
         sessionId: s.id,
         profile,
@@ -714,6 +843,10 @@ async function softRefreshOneGated(
   opts: RefreshOpts,
   hashes: Map<string, string>,
 ): Promise<{ failed: number }> {
+  // Slice 2: heartbeat + claude-expiry detection on every gated pass too.
+  writeSupervisorHeartbeat();
+  const claudeWarn = localClaudeExpiryAdvisory();
+  if (claudeWarn) process.stderr.write(`${claudeWarn}\n`);
   try {
     const profileName =
       opts.profile ?? (await getRemoteSession(url, sessionId)).session.profile;
@@ -728,6 +861,21 @@ async function softRefreshOneGated(
       ...(previous !== undefined ? { previousHash: previous } : {}),
     });
     hashes.set(sessionId, result.hash);
+    // Slice 2: ADDITIONAL trigger — pod-side 401 probe→push for gh/npm/docker.
+    try {
+      const actions = await probePodCredHealth(sessionId);
+      for (const a of actions) {
+        if (!a.health.ok) {
+          process.stderr.write(
+            `[remote]   ${sessionId}: ${a.health.reason}${a.pushed ? " — pushed" : ""}\n`,
+          );
+        }
+      }
+    } catch (probeError) {
+      process.stderr.write(
+        `[remote]   ${sessionId}: tool health probe skipped: ${String(probeError).slice(0, 120)}\n`,
+      );
+    }
     process.stderr.write(
       `[remote] ${sessionId} (${profile}) ${result.changed ? "refreshed" : "unchanged"}\n`,
     );
@@ -3402,6 +3550,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       // M3 — warn (don't self-heal) when queued jobs have no conductor draining.
       const advisory = conductorAdvisory(jobs, conductorRunning());
       if (advisory) process.stderr.write(`${advisory}\n`);
+      // Slice 2 — creds reliability advisories (detection only, never act).
+      const supWarn = supervisorStalenessAdvisory();
+      if (supWarn) process.stderr.write(`${supWarn}\n`);
+      const claudeWarn = localClaudeExpiryAdvisory();
+      if (claudeWarn) process.stderr.write(`${claudeWarn}\n`);
     });
 
   jobsCommand
@@ -4469,6 +4622,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           await ensureConnected(url);
           const hashes = new Map<string, string>();
           if (watchMinutes !== undefined) {
+            // Slice 2: record the cadence so `ls`/`jobs ls` can judge heartbeat
+            // staleness (older than 2× interval ⇒ the watcher likely stopped).
+            writeSupervisorIntervalMs(watchMinutes * 60_000);
             // Re-ensure the tunnel EACH pass: after a control-plane redeploy
             // (or laptop sleep) the port-forward dies and every pass would
             // otherwise fail with "fetch failed". ensureConnected is idempotent
@@ -4493,6 +4649,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
         if (watchMinutes !== undefined) {
           // --watch implies --soft (gated: unchanged creds never respawn).
+          writeSupervisorIntervalMs(watchMinutes * 60_000);
           await ensureConnected(url);
           const hashes = new Map<string, string>();
           process.exitCode = await watchRefreshLoop(watchMinutes, () =>
@@ -4571,6 +4728,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           `  ${w(projectName(s), 20)} ${w(s.workspaceId ?? "-", 13)} ${w(s.profile, 7)} ${w(s.id, 15)} ${s.target}\n`,
         );
       }
+      // Slice 2 — creds reliability advisories: warn (detection only) when the
+      // creds supervisor isn't running / its heartbeat is stale, or the local
+      // claude OAuth token is expiring. These Pods are exactly what drifts to 401.
+      const supWarn = supervisorStalenessAdvisory();
+      if (supWarn) process.stderr.write(`${supWarn}\n`);
+      const claudeWarn = localClaudeExpiryAdvisory();
+      if (claudeWarn) process.stderr.write(`${claudeWarn}\n`);
     });
 
   program

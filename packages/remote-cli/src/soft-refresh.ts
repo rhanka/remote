@@ -26,7 +26,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { collectProfileAuth } from "./auth-bundle.js";
+import { collectToolAuth } from "./auth-tools.js";
 import { getTunnel, type TunnelConfig } from "./config.js";
+import {
+  buildHealthProbeCommand,
+  isProbeableTool,
+  parseHealthResult,
+  type HealthResult,
+  type ProbeableTool,
+} from "./cred-health.js";
 
 /** Secret data key for a HOME-relative cred path (matches the orchestrator). */
 function credentialSecretKey(rel: string): string {
@@ -76,6 +84,25 @@ function execPod(
     [...base, pod, "-c", "session-agent", "--", "bash", "-lc", script],
     input,
   );
+}
+
+/**
+ * Exec a tool's argv DIRECTLY in the session-agent container — NO `bash -lc`
+ * string-concat (the argv comes from `buildHealthProbeCommand`, static tokens
+ * only). Returns the exit code + stdout; NEVER throws (a non-zero exit IS the
+ * 401 signal we want to read). Used by the additive pod-side health probe.
+ */
+function execPodArgv(
+  tunnel: TunnelConfig,
+  pod: string,
+  argv: ReadonlyArray<string>,
+): { status: number; stdout: string } {
+  const r = spawnSync(
+    "kubectl",
+    ["-n", tunnel.namespace, "exec", pod, "-c", "session-agent", "--", ...argv],
+    { encoding: "utf8", env: kubeEnv(tunnel) },
+  );
+  return { status: r.status ?? 1, stdout: r.stdout ?? "" };
 }
 
 /** `<cli> --resume <id>` per profile. */
@@ -388,4 +415,157 @@ function respawnPane(
       : `[remote] creds pushed but no tmux 'main' to respawn — restart the CLI in the Pod manually\n`,
   );
   return respawned;
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 — POD-SIDE 401 health probe → push-on-fail (ADDITIVE; gh/npm/docker).
+//
+// An EXTRA trigger, NOT a new mechanism: each watch pass, for each live pod, we
+// run a cheap read-only probe (cred-health.buildHealthProbeCommand) for the
+// covered tools; when one reports ok:false we RE-BUNDLE that tool's local creds
+// (collectToolAuth — the established tool bundling) and materialize them into
+// the Pod + patch the Secret using the IDENTICAL primitives the profile push
+// uses (base64 -d > $HOME/<rel>; kubectl patch secret merge). It does NOT touch
+// the profile push/hash path (softRefreshSession / hashAuthBundle /
+// CREDS_HASH_FILE) and never implements a different overwrite rule — it pushes
+// the LOCAL file to the Pod exactly as the current code does.
+// ---------------------------------------------------------------------------
+
+/** Result of a per-pod, per-tool probe→push pass. */
+export type ToolHealthAction = {
+  readonly tool: ProbeableTool;
+  readonly health: HealthResult;
+  /** true when ok:false drove a re-bundle+push of this tool's creds. */
+  readonly pushed: boolean;
+  /** HOME-relative files materialized into the Pod (empty when not pushed / none local). */
+  readonly filesPushed: ReadonlyArray<string>;
+  readonly secretKeysPatched: ReadonlyArray<string>;
+};
+
+/**
+ * Injectable seams so the executor is unit-testable WITHOUT shelling out to
+ * kubectl or reading ~/. Production defaults wire the real plumbing.
+ */
+export type ToolHealthDeps = {
+  /** Run the argv-safe probe in the Pod (default: execPodArgv against the tunnel). */
+  exec: (argv: ReadonlyArray<string>) => { status: number; stdout: string };
+  /** Re-bundle the LOCAL creds for the tools (default: collectToolAuth). */
+  collect: (
+    tools: ReadonlyArray<string>,
+  ) => Promise<{ bundle: Record<string, string>; bundled: string[] }>;
+  /** Materialize one base64 file into the Pod's $HOME (default: execPod base64 -d). */
+  materialize: (rel: string, base64: string) => void;
+  /** Patch one Secret data key with a base64 value (default: kubectl patch). */
+  patchSecretKey: (key: string, base64: string) => void;
+  stderr?: { write: (s: string) => unknown };
+};
+
+/**
+ * Probe ONE covered tool in a live Pod and, if it's unauthenticated, push the
+ * tool's LOCAL creds (re-bundle + materialize + Secret patch — the same
+ * mechanism as today, an extra trigger). Pure-ish: all IO is injected via
+ * `deps`. Returns what happened (probe result + whether/what was pushed).
+ * Exported for tests.
+ */
+export async function probeAndPushToolHealth(
+  tool: ProbeableTool,
+  deps: ToolHealthDeps,
+): Promise<ToolHealthAction> {
+  const stderr = deps.stderr ?? { write: () => true };
+  const probe = deps.exec(buildHealthProbeCommand(tool));
+  const health = parseHealthResult(tool, probe.status, probe.stdout);
+  if (health.ok) {
+    return { tool, health, pushed: false, filesPushed: [], secretKeysPatched: [] };
+  }
+  // ok:false → re-bundle + push this tool's LOCAL creds (same path as today).
+  // Tool/status only — NEVER a secret value.
+  stderr.write(`[remote] pod 401: ${health.reason} — pushing fresh ${tool} creds\n`);
+  const { bundle } = await deps.collect([tool]);
+  const rels = Object.keys(bundle);
+  const filesPushed: string[] = [];
+  const secretKeysPatched: string[] = [];
+  for (const rel of rels) {
+    deps.materialize(rel, bundle[rel]!);
+    filesPushed.push(rel);
+    const key = credentialSecretKey(rel);
+    deps.patchSecretKey(key, bundle[rel]!);
+    secretKeysPatched.push(key);
+  }
+  if (filesPushed.length === 0) {
+    stderr.write(
+      `[remote] no local ${tool} creds to push — run \`${tool} login\` locally\n`,
+    );
+  }
+  return { tool, health, pushed: filesPushed.length > 0, filesPushed, secretKeysPatched };
+}
+
+/**
+ * Production wiring for `probeAndPushToolHealth` against a configured tunnel +
+ * live pod. Builds the default `ToolHealthDeps` (real kubectl exec / patch /
+ * collectToolAuth) and probes EACH covered tool, pushing on a 401. Best-effort:
+ * a probe/push error for one tool is logged and the others continue. Returns the
+ * per-tool actions. NOT pure (does IO); the pure decision lives in
+ * `probeAndPushToolHealth` + cred-health. Used by the watch loop.
+ */
+export async function probePodCredHealth(
+  sessionId: string,
+  tools: ReadonlyArray<string> = ["gh", "npm", "docker"],
+  options: { stderr?: NodeJS.WriteStream } = {},
+): Promise<ToolHealthAction[]> {
+  const stderr = options.stderr ?? process.stderr;
+  const tunnel = getTunnel();
+  if (!tunnel) throw new Error("pod cred health probe needs a tunnel configured");
+  const pod = `session-${sessionId}`;
+  const secret = `${pod}-auth`;
+
+  const runDir = join(
+    process.env.XDG_RUNTIME_DIR ??
+      join(homedir(), ".config", "sentropic", "remote-cli"),
+    "sentropic-remote-run",
+  );
+
+  const deps: ToolHealthDeps = {
+    exec: (argv) => execPodArgv(tunnel, pod, argv),
+    collect: (t) => collectToolAuth(t),
+    materialize: (rel, base64) => {
+      execPod(
+        tunnel,
+        pod,
+        `mkdir -p "$(dirname "$HOME/${rel}")" && base64 -d > "$HOME/${rel}" && chmod 600 "$HOME/${rel}"`,
+        base64,
+      );
+    },
+    patchSecretKey: (key, base64) => {
+      mkdirSync(runDir, { recursive: true });
+      const patchFile = join(runDir, `tool-patch-${process.pid}-${key}.json`);
+      try {
+        writeFileSync(patchFile, JSON.stringify({ data: { [key]: base64 } }), "utf8");
+        kubectl(tunnel, [
+          "patch",
+          "secret",
+          secret,
+          "--type",
+          "merge",
+          "--patch-file",
+          patchFile,
+        ]);
+      } finally {
+        rmSync(patchFile, { force: true });
+      }
+    },
+    stderr,
+  };
+
+  const actions: ToolHealthAction[] = [];
+  for (const tool of tools) {
+    if (!isProbeableTool(tool)) continue;
+    try {
+      actions.push(await probeAndPushToolHealth(tool, deps));
+    } catch (error) {
+      stderr.write(
+        `[remote] ${pod}: ${tool} health probe/push errored: ${String(error).slice(0, 120)}\n`,
+      );
+    }
+  }
+  return actions;
 }

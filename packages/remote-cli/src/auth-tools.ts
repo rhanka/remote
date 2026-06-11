@@ -44,6 +44,12 @@ const TOOL_AUTH: Readonly<Record<string, ToolSpec>> = {
     files: [".azure/azureProfile.json", ".azure/msal_token_cache.json"],
     loginHint: "az login",
   },
+  // Slice 2 COVERAGE: ride the same opt-in bundling. npm's per-registry
+  // `_authToken` lives in ~/.npmrc; docker's per-registry `auth` lives in
+  // ~/.docker/config.json. Same ToolSpec shape (present = first file exists),
+  // no behavior change to how bundling works.
+  npm: { files: [".npmrc"], loginHint: "npm login" },
+  docker: { files: [".docker/config.json"], loginHint: "docker login" },
 };
 
 export const KNOWN_TOOLS = Object.keys(TOOL_AUTH);
