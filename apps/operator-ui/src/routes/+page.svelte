@@ -246,7 +246,7 @@
 </script>
 
 <svelte:head>
-  <title>sentropic remote — operator</title>
+  <title>sentropic remote · operator</title>
 </svelte:head>
 
 <ThemeProvider>
@@ -254,9 +254,9 @@
     <AppHeader>
       {#snippet logo()}
         <Flex direction="column" gap={0}>
-          <Typography variant="h5" as="span" weight="semibold">sentropic remote</Typography>
+          <Typography variant="h5" as="h1" weight="semibold">sentropic remote</Typography>
           <Typography variant="caption" tone="secondary" as="span">
-            operator console — list, create, attach
+            operator console · list, create, attach
           </Typography>
         </Flex>
       {/snippet}
