@@ -5,6 +5,31 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.5 — 2026-06-10
+
+Headline: **headful browser-in-pod via noVNC** — complete a 2FA / login
+challenge on an authenticated site, by hand, inside a remote session Pod.
+
+- **`remote browser open <sessionId>`** `[--local-port] [--policy] [--ttl]
+  [--view-only]` — prints the two-step flow: `remote forward <id> 6080` then a
+  token-gated noVNC URL. Interactive by default (you drive the 2FA);
+  `--view-only` for read-only.
+- **Opt-in sidecar** (`sentropic-remote-browser` image: Xvfb + headful Chromium
+  + x11vnc + websockify + noVNC), added as a 2nd Pod container only when the
+  session descriptor sets `metadata.browser` — not baked into every session
+  image. Resource-capped (1 CPU / 1Gi), shares the Pod network namespace
+  (binds the port `remote forward` reaches) and the workspace volume.
+- **Auth**: a per-session 128-bit noVNC token, injected at runtime
+  (`NOVNC_TOKEN`, websockify `--token-plugin`) — never in the image/manifest;
+  a token-less forwarded URL is refused.
+- **`uat-exposure-policy`** enforced: `operator-only` (operator), `session-private`
+  (operator/owner + token, anonymous denied), `public-expiring` (any + token +
+  finite TTL). Real `browser.*` protocol messages replace the stub. 494 cli +
+  46 browser-bridge tests.
+- Needs live-cluster validation (build/push the browser image; e2e
+  sidecar→forward→noVNC→2FA) and a control-plane field to set `metadata.browser`
+  on session create — tracked as follow-ups.
+
 ## v0.5.4 — 2026-06-10
 
 Headline: **durable workspace id aligned with h2a/track** — `conductor-launch`
