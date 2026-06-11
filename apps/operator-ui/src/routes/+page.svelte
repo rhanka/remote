@@ -20,6 +20,28 @@
     deleteWorkspace,
     type WorkspaceSummary,
   } from "../lib/api.js";
+  import {
+    ThemeProvider,
+    AppHeader,
+    Container,
+    Grid,
+    Flex,
+    Stack,
+    Card,
+    Badge,
+    Tag,
+    Button,
+    IconButton,
+    Tooltip,
+    Input,
+    Select,
+    Form,
+    FormGroup,
+    Alert,
+    EmptyState,
+    Typography,
+    Divider,
+  } from "@sentropic/design-system-svelte";
 
   let apiBase = $state("http://localhost:8080");
   let sessions = $state<SessionDescriptor[]>([]);
@@ -227,163 +249,190 @@
   <title>sentropic remote — operator</title>
 </svelte:head>
 
-<main class="shell">
-  <header class="topbar">
-    <div>
-      <h1>sentropic remote</h1>
-      <p>operator console — list, create, attach</p>
-    </div>
-    <label class="api">
-      <span>control-plane</span>
-      <input type="url" bind:value={apiBase} spellcheck="false" />
-    </label>
-  </header>
-
-  <section class="layout">
-    <nav class="sessions" aria-label="Sessions">
-      <h2>Sessions</h2>
-      {#if listError}
-        <p class="error">{listError}</p>
-      {/if}
-      {#if sessions.length === 0}
-        <p class="muted">no session yet</p>
-      {/if}
-      {#each sessions as session (session.id)}
-        <article class:active={selectedSessionId === session.id}>
-          <button type="button" onclick={() => openSession(session.id)}>
-            <strong>{statusLabel(session)}</strong>
-            <span class="meta">
-              {session.profile} · {session.target} · {session.id}
-            </span>
-          </button>
-          <button
-            type="button"
-            class="stop"
-            onclick={() => handleStop(session.id)}
-            disabled={busy}
-            title="Stop session"
-          >
-            ✕
-          </button>
-        </article>
-      {/each}
-
-      <form class="create" onsubmit={(event) => { event.preventDefault(); void handleCreate(); }}>
-        <h3>New session</h3>
-        <label>
-          profile
-          <select bind:value={newProfile}>
-            {#each CLI_PROFILES as profile}
-              <option value={profile}>{profile}</option>
-            {/each}
-          </select>
-        </label>
-        <label>
-          target
-          <select bind:value={newTarget}>
-            {#each SESSION_TARGETS as target}
-              <option value={target}>{target}</option>
-            {/each}
-          </select>
-        </label>
-        <label>
-          display name
-          <input
-            type="text"
-            placeholder="optional"
-            bind:value={newDisplayName}
+<ThemeProvider>
+  <div class="shell">
+    <AppHeader>
+      {#snippet logo()}
+        <Flex direction="column" gap={0}>
+          <Typography variant="h5" as="span" weight="semibold">sentropic remote</Typography>
+          <Typography variant="caption" tone="secondary" as="span">
+            operator console — list, create, attach
+          </Typography>
+        </Flex>
+      {/snippet}
+      {#snippet actions()}
+        <div class="api-field">
+          <Input
+            type="url"
+            label="control-plane"
+            size="sm"
+            spellcheck="false"
+            bind:value={apiBase}
           />
-        </label>
-        <button type="submit" disabled={busy}>
-          {busy ? "..." : "Create + attach"}
-        </button>
-      </form>
+        </div>
+      {/snippet}
+    </AppHeader>
 
-      <h2 class="ws-title">Workspaces</h2>
-      {#if workspaceError}
-        <p class="error">{workspaceError}</p>
-      {/if}
-      {#if workspaces.length === 0}
-        <p class="muted">no workspace</p>
-      {/if}
-      {#each workspaces as ws (ws.id)}
-        <article>
-          <div class="ws-row">
-            <strong>{ws.displayName ?? ws.id}</strong>
-            <span class="meta">{ws.id}</span>
-            {#if ws.lock}
-              <span class="lock" title="held since {ws.lock.acquiredAt}">
-                🔒 {ws.lock.holder}
-              </span>
+    <Grid class="layout" columns={1} gap={0}>
+      <Container as="nav" size="full" padding aria-label="Sessions" class="sidebar">
+        <Stack gap={4}>
+          <Stack gap={3}>
+            <Typography variant="h6" as="h2">Sessions</Typography>
+
+            {#if listError}
+              <Alert tone="error" title="Sessions error" message={listError} />
             {/if}
-          </div>
-          <button
-            type="button"
-            class="stop"
-            onclick={() => handleDeleteWorkspace(ws.id)}
-            disabled={busy}
-            title="Delete workspace"
-          >
-            ✕
-          </button>
-        </article>
-      {/each}
-      <form
-        class="create"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void handleCreateWorkspace();
-        }}
-      >
-        <label>
-          new workspace
-          <input type="text" placeholder="name (optional)" bind:value={newWorkspaceName} />
-        </label>
-        <button type="submit" disabled={busy}>
-          {busy ? "..." : "Create workspace"}
-        </button>
-      </form>
-    </nav>
 
-    <section class="terminal" aria-label="Terminal">
-      {#if selectedSessionId}
-        <div class="terminal-bar">
-          <span>{selectedSessionId}</span>
-          <button type="button" onclick={closeTerminal}>close</button>
-        </div>
-        <div class="xterm" bind:this={terminalContainer}></div>
-      {:else}
-        <div class="placeholder">
-          <p>pick a session on the left, or create one.</p>
-        </div>
-      {/if}
-    </section>
-  </section>
-</main>
+            {#if sessions.length === 0}
+              <EmptyState title="no session yet" message="Create one below to attach a terminal." />
+            {:else}
+              {#each sessions as session (session.id)}
+                <Card interactive class={selectedSessionId === session.id ? "row row--active" : "row"}>
+                  <Flex justify="between" align="start" gap={2}>
+                    <button
+                      type="button"
+                      class="row__open"
+                      onclick={() => openSession(session.id)}
+                    >
+                      <Typography variant="body-sm" as="span" weight="semibold">
+                        {statusLabel(session)}
+                      </Typography>
+                      <Flex gap={1} wrap align="center" class="row__meta">
+                        <Badge tone="info">{session.profile}</Badge>
+                        <Badge tone="neutral">{session.target}</Badge>
+                        <Typography variant="caption" tone="muted" as="span">{session.id}</Typography>
+                      </Flex>
+                    </button>
+                    <Tooltip content="Stop session">
+                      <IconButton
+                        aria-label={`Stop session ${session.id}`}
+                        variant="danger"
+                        size="sm"
+                        disabled={busy}
+                        onclick={() => handleStop(session.id)}
+                      >
+                        ✕
+                      </IconButton>
+                    </Tooltip>
+                  </Flex>
+                </Card>
+              {/each}
+            {/if}
+
+            <Card class="form-card">
+              <Form onsubmit={() => handleCreate()} submitting={busy}>
+                <FormGroup legend="New session">
+                  <Stack gap={3}>
+                    <Select label="profile" bind:value={newProfile}>
+                      {#each CLI_PROFILES as profile}
+                        <option value={profile}>{profile}</option>
+                      {/each}
+                    </Select>
+                    <Select label="target" bind:value={newTarget}>
+                      {#each SESSION_TARGETS as target}
+                        <option value={target}>{target}</option>
+                      {/each}
+                    </Select>
+                    <Input label="display name" placeholder="optional" bind:value={newDisplayName} />
+                    <Button type="submit" variant="primary" disabled={busy}>
+                      {busy ? "..." : "Create + attach"}
+                    </Button>
+                  </Stack>
+                </FormGroup>
+              </Form>
+            </Card>
+          </Stack>
+
+          <Divider />
+
+          <Stack gap={3}>
+            <Typography variant="h6" as="h2">Workspaces</Typography>
+
+            {#if workspaceError}
+              <Alert tone="error" title="Workspaces error" message={workspaceError} />
+            {/if}
+
+            {#if workspaces.length === 0}
+              <EmptyState title="no workspace" message="Create one below." />
+            {:else}
+              {#each workspaces as ws (ws.id)}
+                <Card class="row">
+                  <Flex justify="between" align="start" gap={2}>
+                    <Stack gap={1}>
+                      <Typography variant="body-sm" as="span" weight="semibold">
+                        {ws.displayName ?? ws.id}
+                      </Typography>
+                      <Typography variant="caption" tone="muted" as="span">{ws.id}</Typography>
+                      {#if ws.lock}
+                        <Tooltip content={`held since ${ws.lock.acquiredAt}`}>
+                          <Tag tone="warning" size="sm">🔒 {ws.lock.holder}</Tag>
+                        </Tooltip>
+                      {/if}
+                    </Stack>
+                    <Tooltip content="Delete workspace">
+                      <IconButton
+                        aria-label={`Delete workspace ${ws.id}`}
+                        variant="danger"
+                        size="sm"
+                        disabled={busy}
+                        onclick={() => handleDeleteWorkspace(ws.id)}
+                      >
+                        ✕
+                      </IconButton>
+                    </Tooltip>
+                  </Flex>
+                </Card>
+              {/each}
+            {/if}
+
+            <Card class="form-card">
+              <Form onsubmit={() => handleCreateWorkspace()} submitting={busy}>
+                <FormGroup legend="New workspace">
+                  <Stack gap={3}>
+                    <Input label="new workspace" placeholder="name (optional)" bind:value={newWorkspaceName} />
+                    <Button type="submit" variant="primary" disabled={busy}>
+                      {busy ? "..." : "Create workspace"}
+                    </Button>
+                  </Stack>
+                </FormGroup>
+              </Form>
+            </Card>
+          </Stack>
+        </Stack>
+      </Container>
+
+      <Container as="section" size="full" aria-label="Terminal" class="terminal-pane">
+        {#if selectedSessionId}
+          <Flex justify="between" align="center" class="terminal-bar">
+            <Typography variant="caption" as="span" tone="inverse">{selectedSessionId}</Typography>
+            <Button variant="ghost" size="sm" onclick={closeTerminal}>close</Button>
+          </Flex>
+          <!--
+            NEGOTIATED GAP: the xterm.js terminal emulator is a live canvas, not a
+            DS component. It mounts into this container via bind:this. No DS
+            equivalent exists; framed in DS Container + Flex header + tokens.
+          -->
+          <div class="xterm" bind:this={terminalContainer}></div>
+        {:else}
+          <div class="terminal-empty">
+            <EmptyState
+              title="No session attached"
+              message="Pick a session on the left, or create one."
+            />
+          </div>
+        {/if}
+      </Container>
+    </Grid>
+  </div>
+</ThemeProvider>
 
 <style>
-  .ws-title {
-    margin-top: 1.5rem;
-    border-top: 1px solid #e0e4e8;
-    padding-top: 1rem;
-  }
-  .ws-row {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-  .lock {
-    font-size: 0.75rem;
-    color: #b4690e;
-  }
+  /* Layout glue only — all colors/spacing via DS tokens, no hardcoded hex. */
   :global(html, body) {
     margin: 0;
     height: 100%;
-    background: #f4f6f8;
-    color: #1a232c;
-    font-family:
-      -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
-      sans-serif;
+    background: var(--st-semantic-surface-subtle);
+    color: var(--st-semantic-text-primary);
   }
 
   .shell {
@@ -392,168 +441,65 @@
     min-height: 100vh;
   }
 
-  .topbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 16px 24px;
-    border-bottom: 1px solid #d9dee3;
-    background: #ffffff;
+  .api-field {
+    width: 20rem;
+    max-width: 100%;
   }
 
-  .topbar h1 {
-    margin: 0;
-    font-size: 18px;
-  }
-
-  .topbar p {
-    margin: 0;
-    color: #5a6672;
-    font-size: 13px;
-  }
-
-  .api {
-    display: flex;
-    flex-direction: column;
-    font-size: 12px;
-    gap: 4px;
-  }
-  .api input {
-    width: 320px;
-    padding: 6px 8px;
-    border: 1px solid #c5ccd2;
-    border-radius: 4px;
-    font: inherit;
-  }
-
-  .layout {
-    display: grid;
-    grid-template-columns: 320px 1fr;
+  /* DS Grid renders a CSS grid; override its single column to sidebar + main. */
+  :global(.layout) {
+    grid-template-columns: 22rem 1fr;
+    align-items: stretch;
     min-height: 0;
   }
 
-  .sessions {
-    border-right: 1px solid #d9dee3;
-    padding: 16px;
+  :global(.sidebar) {
+    border-right: 1px solid var(--st-semantic-border-subtle);
     overflow-y: auto;
+  }
+
+  :global(.row__active),
+  :global(.row--active) {
+    box-shadow: 0 0 0 2px var(--st-semantic-border-interactive);
+  }
+
+  .row__open {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-  }
-
-  .sessions h2,
-  .sessions h3 {
-    margin: 0;
-    font-size: 14px;
-  }
-
-  .sessions article {
-    display: flex;
-    align-items: stretch;
-    gap: 8px;
-    border: 1px solid #d9dee3;
-    border-radius: 6px;
-    background: #ffffff;
-  }
-
-  .sessions article button {
-    flex: 1;
+    gap: var(--st-spacing-2, 0.5rem);
     background: transparent;
     border: 0;
-    padding: 10px 12px;
+    padding: 0;
     text-align: left;
     cursor: pointer;
-  }
-  .sessions article button strong {
-    display: block;
-    font-size: 13px;
-  }
-  .sessions article button .meta {
-    display: block;
-    color: #5a6672;
-    font-size: 11px;
-    margin-top: 4px;
-  }
-
-  .sessions article.active {
-    border-color: #2563eb;
-    box-shadow: 0 0 0 1px #2563eb33;
-  }
-
-  .sessions .stop {
-    flex: 0;
-    border-left: 1px solid #d9dee3;
-    background: transparent;
-    padding: 0 12px;
-    cursor: pointer;
-    color: #b6373b;
-  }
-
-  .sessions .error {
-    color: #b6373b;
-    font-size: 12px;
-  }
-
-  .sessions .muted {
-    color: #5a6672;
-    font-size: 13px;
-  }
-
-  .sessions form.create {
-    margin-top: 12px;
-    padding: 12px;
-    border: 1px dashed #c5ccd2;
-    border-radius: 6px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    background: #fdfdff;
-  }
-
-  .sessions form.create label {
-    display: flex;
-    flex-direction: column;
-    font-size: 12px;
-    gap: 4px;
-  }
-  .sessions form.create select,
-  .sessions form.create input {
-    padding: 6px 8px;
-    border: 1px solid #c5ccd2;
-    border-radius: 4px;
+    color: inherit;
     font: inherit;
   }
 
-  .terminal {
+  :global(.terminal-pane) {
     display: grid;
     grid-template-rows: auto 1fr;
-    background: #0e151c;
-    color: #d7e1ea;
     min-width: 0;
+    background: var(--st-semantic-surface-inverse);
+    color: var(--st-semantic-text-inverse);
   }
-  .terminal-bar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 10px 12px;
-    border-bottom: 1px solid #2c3946;
-    color: #9fb0bf;
-    font-size: 12px;
+
+  :global(.terminal-bar) {
+    padding: var(--st-spacing-3, 0.75rem) var(--st-spacing-4, 1rem);
+    border-bottom: 1px solid var(--st-semantic-border-strong);
   }
-  .terminal-bar button {
-    background: transparent;
-    color: inherit;
-    border: 1px solid #2c3946;
-    padding: 4px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-  }
+
   .xterm {
     height: 100%;
     width: 100%;
+    min-height: 0;
   }
-  .placeholder {
-    padding: 32px;
-    color: #6f7d89;
+
+  .terminal-empty {
+    display: grid;
+    place-items: center;
+    height: 100%;
   }
 </style>
