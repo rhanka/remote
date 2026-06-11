@@ -609,6 +609,25 @@ type SoftRefreshAllOutcome = {
 };
 
 /**
+ * Unattended refresh passes (--all / --watch) must not abort on a flaky local
+ * `auth status` preflight: the creds file local CLIs keep fresh is pushed
+ * as-is, which is strictly better than letting the Pod's tokens expire.
+ */
+async function preflightOrWarn(profile: CliProfile): Promise<void> {
+  try {
+    const fresh = await ensureProfileAuthFresh(profile);
+    if (fresh.checked) {
+      process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `[remote] auth preflight failed (${detail.slice(0, 120)}) — pushing current creds anyway\n`,
+    );
+  }
+}
+
+/**
  * Soft-refresh EVERY live remote session (profile carried by each session).
  * Per-session errors don't stop the pass; ends with a recap (ok / unchanged /
  * failed) and returns the failure count. `hashes` carries the previous pass's
@@ -640,10 +659,7 @@ export async function softRefreshAllSessions(
     }
     try {
       if (opts.authRefresh !== false && !preflighted.has(profile)) {
-        const fresh = await ensureProfileAuthFresh(profile);
-        if (fresh.checked) {
-          process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
-        }
+        await preflightOrWarn(profile);
         preflighted.add(profile);
       }
       const previous = hashes.get(s.id);
@@ -694,10 +710,7 @@ async function softRefreshOneGated(
     const profile = coerceCliProfileName(profileName);
     if (!profile) throw new Error(`Unknown profile "${profileName}"`);
     if (opts.authRefresh !== false) {
-      const fresh = await ensureProfileAuthFresh(profile);
-      if (fresh.checked) {
-        process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
-      }
+      await preflightOrWarn(profile);
     }
     const previous = hashes.get(sessionId);
     const result = await softRefreshSession(sessionId, profile, {

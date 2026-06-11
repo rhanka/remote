@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { authHeaders } from "./config.js";
@@ -61,6 +61,37 @@ async function isGitRepo(cwd: string): Promise<boolean> {
  * honors .gitignore precisely AND includes uncommitted working-tree files.
  * Outside a git repo, falls back to tar with a coarse exclude list.
  */
+/**
+ * Approximate .gitignore in the non-git tar fallback: each plain pattern of
+ * the ROOT .gitignore becomes a tar --exclude. Comments and `!` negations are
+ * skipped; a trailing `/` is dropped (tar excludes match path components at
+ * any depth, like unanchored gitignore dir patterns); a leading `/` anchors
+ * the pattern to the archive root (`./`). Patterns that would drop migrated
+ * session state (`.remote`, `.claude`) are ignored — the conversation under
+ * .remote/sessions must always travel with the workspace.
+ */
+function rootGitignoreExcludes(cwd: string): string[] {
+  let raw: string;
+  try {
+    raw = readFileSync(join(cwd, ".gitignore"), "utf8");
+  } catch {
+    return [];
+  }
+  const excludes: string[] = [];
+  for (const line of raw.split("\n")) {
+    const pattern = line.trim();
+    if (!pattern || pattern.startsWith("#") || pattern.startsWith("!")) continue;
+    const cleaned = pattern.replace(/\/+$/, "");
+    if (!cleaned) continue;
+    const bare = cleaned.replace(/^\/+/, "");
+    if (bare === ".remote" || bare === ".claude") continue;
+    excludes.push(
+      `--exclude=${cleaned.startsWith("/") ? `./${bare}` : cleaned}`,
+    );
+  }
+  return excludes;
+}
+
 export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
   const git = await isGitRepo(cwd);
   let archive: Buffer;
@@ -133,6 +164,7 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
         "-",
         "--exclude=./.git",
         "--exclude=./node_modules",
+        ...rootGitignoreExcludes(cwd),
         ".",
       ],
       cwd,

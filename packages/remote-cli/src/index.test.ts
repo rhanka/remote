@@ -718,6 +718,31 @@ describe("main", () => {
       expect(out).toContain("1 failed");
     });
 
+    it("degrades a failing auth preflight to a warning and still pushes", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      listRemoteSessions.mockResolvedValue(sessions.slice(0, 2));
+      ensureProfileAuthFresh.mockRejectedValue(
+        new Error("status check timed out"),
+      );
+      softRefreshSession.mockResolvedValue({
+        changed: true,
+        hash: "h",
+        filesPushed: [],
+        secretKeysPatched: [],
+        convId: undefined,
+        respawned: true,
+      });
+
+      const exitCode = await main(["node", "remote", "refresh", "--soft", "--all"]);
+
+      expect(exitCode).toBe(0);
+      expect(softRefreshSession).toHaveBeenCalledTimes(2);
+      const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+      expect(out).toContain("auth preflight failed");
+      expect(out).toContain("pushing current creds anyway");
+      expect(out).toContain("0 failed");
+    });
+
     it("--all rejects an explicit session id", async () => {
       getDefaultRemote.mockReturnValue("http://localhost:8080");
       await expect(
