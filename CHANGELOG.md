@@ -5,6 +5,29 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.8 — 2026-06-11
+
+Headline: **rate-limited jobs auto-recover instead of stalling** — reliability
+slice 1 (headless local), the first piece of the `remote supervise` loop.
+
+- New job state **`throttled`** (`running → throttled → running | failed`): a
+  headless local job that finishes on a transient provider rate-limit
+  (`Server is temporarily limiting requests`, `429`, `overloaded`, codex
+  `rate limit reached`, …) is no longer mis-marked `failed` — it's `throttled`
+  and auto-resumed.
+- **Detection** (`throttle-signatures.ts`, pure + tested): per-tool signatures,
+  tail-only scan, requires the provider-error *shape* (not a bare keyword) so
+  the model quoting "rate limit" mid-answer is a negative.
+- **Backoff resume**: full-jitter (60 s → 30 min, copied from the WS transport),
+  6 attempts → `failed (rate-limited)`. Resumes the same job in-place
+  (`claude -p --continue` / `codex exec resume --last`), argv-safe.
+- **AIMD circuit-breaker**: rate-limits are account-wide, so when ≥2 jobs throttle
+  within 10 min the conductor halves the admission cap (restores +1 per clean
+  pass); throttled jobs keep their slot. `jobs ls` shows `throttled (retry in Xm)`.
+- Scoped to headless local; interactive (`send-keys` behind an attached-pane
+  guard) and remote (kubectl-exec detect + session-agent `session.throttled`
+  event) are phase 2, marked with TODOs. 551 cli tests.
+
 ## v0.5.7 — 2026-06-10
 
 Headline: **operator-ui is now 100% @sentropic/design-system-svelte** — every
