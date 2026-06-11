@@ -41,7 +41,27 @@ export type RegistrySource = "run" | "hook" | "scan" | "remote";
  * valid RegistryEntry (back-compat).
  */
 export type RegistryRole = "job";
-export type JobState = "pending" | "running" | "done" | "failed";
+export type JobState = "pending" | "running" | "throttled" | "done" | "failed";
+
+/**
+ * Rate-limit ("throttled") bookkeeping for a HEADLESS LOCAL job whose agent CLI
+ * hit a TRANSIENT provider rate-limit (reliability slice 1). A throttled job
+ * KEEPS its concurrency slot (the limit is account-wide; admitting a replacement
+ * just burns the same quota) and is auto-resumed by the conductor on
+ * `nextRetryAt` with exponential backoff, up to a hard attempt cap. All fields
+ * are written under `withRegistryLock`; the whole object is optional so every
+ * existing entry stays a valid RegistryEntry (back-compat).
+ */
+export type ThrottleInfo = {
+  /** How many times this job has entered `throttled` (drives the backoff). */
+  attempts: number;
+  /** ISO ts of the FIRST throttle (for age / history windows). */
+  firstAt: string;
+  /** ISO ts the conductor may resume the job at (now + jitteredDelay(attempts)). */
+  nextRetryAt: string;
+  /** The signature tag that classified the last throttle (e.g. claude:rate-limited). */
+  lastSignature?: string;
+};
 
 export type RegistryEntry = {
   /** Stable key: claude session uuid / codex rollout id / remoteId / tmux slug. */
@@ -92,6 +112,8 @@ export type RegistryEntry = {
   depthBudget?: number;
   /** Track workpackage id to mirror this job under (`track item new --parent`). */
   trackWp?: string;
+  /** Rate-limit backoff/resume bookkeeping (HEADLESS LOCAL only; reliability slice 1). */
+  throttle?: ThrottleInfo;
 };
 
 export type EnrollInput = {
@@ -116,6 +138,7 @@ export type EnrollInput = {
   explicitCwd?: string;
   depthBudget?: number;
   trackWp?: string;
+  throttle?: ThrottleInfo;
 };
 
 /** Injectable liveness probes (tests stay deterministic, no tmux/pid needed). */
@@ -355,6 +378,8 @@ function applyEnroll(entries: RegistryEntry[], input: EnrollInput): RegistryEntr
   if (depthBudget !== undefined) entry.depthBudget = depthBudget;
   const trackWp = input.trackWp ?? prev?.trackWp;
   if (trackWp !== undefined) entry.trackWp = trackWp;
+  const throttle = input.throttle ?? prev?.throttle;
+  if (throttle !== undefined) entry.throttle = throttle;
   if (idx >= 0) entries[idx] = entry;
   else entries.push(entry);
   return entry;
@@ -376,14 +401,16 @@ export function tryClaimSlot(
 ): RegistryEntry | undefined {
   return withRegistryLock(path, (entries) => {
     if (cap <= 0) return { entries, result: undefined, save: false };
+    // A `throttled` job KEEPS its slot (the rate-limit is account-wide; admitting
+    // a replacement just burns the same quota), so it counts toward the cap too.
     const running = entries.filter(
-      (e) => e.role === "job" && (e.jobState ?? "pending") === "running",
+      (e) => e.role === "job" && occupiesSlot(e.jobState ?? "pending"),
     ).length;
     // The job being claimed may already exist as `pending` (delegate enrolled it
     // first); don't double-count it against itself.
     const self = entries.find((e) => e.id === input.id);
     const selfRunning =
-      self?.role === "job" && (self.jobState ?? "pending") === "running" ? 1 : 0;
+      self?.role === "job" && occupiesSlot(self.jobState ?? "pending") ? 1 : 0;
     if (running - selfRunning >= cap) {
       return { entries, result: undefined, save: false };
     }
@@ -399,13 +426,30 @@ export function tryClaimSlot(
  */
 const JOB_TRANSITIONS: Readonly<Record<JobState, ReadonlyArray<JobState>>> = {
   pending: ["running", "failed"],
-  running: ["done", "failed"],
+  // A HEADLESS LOCAL job that finished on a transient rate-limit goes
+  // running→throttled (reliability slice 1); it is NOT terminal.
+  running: ["throttled", "done", "failed"],
+  // The conductor resumes a throttled job (→running) on its backoff schedule, or
+  // gives up after the attempt cap (→failed). A reconcile that sees fresh success
+  // before the resumed run is re-observed may also settle it →done directly.
+  throttled: ["running", "done", "failed"],
   done: [],
   failed: [],
 };
 
 export function canTransitionJob(from: JobState, to: JobState): boolean {
   return JOB_TRANSITIONS[from].includes(to);
+}
+
+/**
+ * Does a job in `state` OCCUPY a concurrency slot? `running` does, and so does
+ * `throttled` — a throttled job is mid-flight (it KEEPS its slot rather than
+ * letting the conductor admit a replacement that would immediately throttle on
+ * the same account-wide limit). `pending`/`done`/`failed` do not. Pure, exported
+ * for the cap/admission logic in delegate.ts and its tests.
+ */
+export function occupiesSlot(state: JobState): boolean {
+  return state === "running" || state === "throttled";
 }
 
 /**

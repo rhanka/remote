@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  aimdEffectiveCap,
+  AIMD_TRIP_THRESHOLD,
+  AIMD_WINDOW_MS,
   assertSafeName,
+  backoffCeilingMs,
   buildDelegateArgs,
   buildJobRows,
   buildRemoteDelegate,
+  buildThrottleResumeArgs,
   canDelegateAtDepth,
   childDepthEnvValue,
   clampDepth,
@@ -15,8 +20,11 @@ import {
   hasFreeSlot,
   inheritedDepthBudget,
   isDelegateType,
+  isThrottleResumeDue,
+  jitteredBackoffMs,
   jobDir,
   planNextStarts,
+  planThrottleStep,
   readJobResult,
   reconcileJobState,
   reconcileRemoteJobs,
@@ -25,6 +33,10 @@ import {
   resolveTrackBin,
   runTrackMirror,
   sweepStaleJobs,
+  THROTTLE_BACKOFF_BASE_MS,
+  THROTTLE_BACKOFF_CAP_MS,
+  THROTTLE_MAX_ATTEMPTS,
+  throttleRetryLabel,
   trackItemNewArgs,
   trackItemRealizeArgs,
 } from "./delegate.js";
@@ -179,6 +191,13 @@ describe("reconcileJobState (display state vs liveness)", () => {
       reconcileJobState({ jobState: "running", endedAt: "2026-01-01" }, true),
     ).toBe("failed");
   });
+
+  it("a throttled job keeps `throttled` even though its session is gone", () => {
+    // It deliberately finished its run and is awaiting the backoff resume — not
+    // a crash. (Reliability slice 1.)
+    expect(reconcileJobState({ jobState: "throttled" }, false)).toBe("throttled");
+    expect(reconcileJobState({ jobState: "throttled" }, true)).toBe("throttled");
+  });
 });
 
 function jobEntry(over: Partial<RegistryEntry>): RegistryEntry {
@@ -205,8 +224,8 @@ describe("buildJobRows / renderJobsTable (jobs ls rendering)", () => {
     ];
     const rows = buildJobRows(jobs, (e) => e.id === "a", now);
     expect(rows).toEqual([
-      { id: "a", type: "claude", state: "running", age: "1s", cwd: jobs[0]!.cwd },
-      { id: "b", type: "codex", state: "failed", age: expect.any(String), cwd: jobs[1]!.cwd },
+      { id: "a", type: "claude", state: "running", age: "1s", cwd: jobs[0]!.cwd, note: "" },
+      { id: "b", type: "codex", state: "failed", age: expect.any(String), cwd: jobs[1]!.cwd, note: "" },
     ]);
   });
 
@@ -619,5 +638,259 @@ describe("clampRemoteDepthBudget (remote depth clamp)", () => {
     expect(clampRemoteDepthBudget(2)).toBe(1);
     expect(clampRemoteDepthBudget(1)).toBe(1);
     expect(clampRemoteDepthBudget(0)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reliability slice 1 — rate-limit "throttled" resume + backoff + AIMD breaker
+// ---------------------------------------------------------------------------
+
+describe("buildThrottleResumeArgs (per-type continue command, safe argv)", () => {
+  it("claude resumes with -p --continue and the task as the last token", () => {
+    expect(buildThrottleResumeArgs("claude", "ship it")).toEqual({
+      command: "claude",
+      args: ["-p", "--continue", "ship it"],
+    });
+  });
+
+  it("codex resumes with exec resume --last and the task token", () => {
+    expect(buildThrottleResumeArgs("codex", "ship it")).toEqual({
+      command: "codex",
+      args: ["exec", "resume", "--last", "ship it"],
+    });
+  });
+
+  it("a task with shell metacharacters stays ONE argv element (no injection)", () => {
+    const evil = '"; rm -rf / #';
+    const { args } = buildThrottleResumeArgs("claude", evil);
+    expect(args[args.length - 1]).toBe(evil);
+    expect(args).toHaveLength(3);
+  });
+
+  it("agy headless resume is rejected (phase 2)", () => {
+    expect(() => buildThrottleResumeArgs("agy", "x")).toThrow(/headless|phase 2/i);
+  });
+});
+
+describe("jitteredBackoffMs / backoffCeilingMs (resume schedule)", () => {
+  it("the ceiling is monotonic non-decreasing in attempt and capped", () => {
+    let prev = 0;
+    for (let a = 0; a <= 12; a++) {
+      const c = backoffCeilingMs(a);
+      expect(c).toBeGreaterThanOrEqual(prev);
+      expect(c).toBeLessThanOrEqual(THROTTLE_BACKOFF_CAP_MS);
+      prev = c;
+    }
+    // far out, it sits at the cap
+    expect(backoffCeilingMs(20)).toBe(THROTTLE_BACKOFF_CAP_MS);
+  });
+
+  it("attempt 0 ceiling is the base; doubles each attempt until the cap", () => {
+    expect(backoffCeilingMs(0)).toBe(THROTTLE_BACKOFF_BASE_MS);
+    expect(backoffCeilingMs(1)).toBe(THROTTLE_BACKOFF_BASE_MS * 2);
+    expect(backoffCeilingMs(2)).toBe(THROTTLE_BACKOFF_BASE_MS * 4);
+  });
+
+  it("jittered delay is bounded by the ceiling for any random draw", () => {
+    for (const r of [0, 0.25, 0.5, 0.999]) {
+      for (let a = 0; a <= 8; a++) {
+        const d = jitteredBackoffMs(a, THROTTLE_BACKOFF_BASE_MS, THROTTLE_BACKOFF_CAP_MS, () => r);
+        expect(d).toBeGreaterThanOrEqual(0);
+        expect(d).toBeLessThanOrEqual(backoffCeilingMs(a));
+      }
+    }
+  });
+
+  it("rand=0 → 0 delay; rand≈1 → ~ceiling", () => {
+    expect(jitteredBackoffMs(3, 1000, 100000, () => 0)).toBe(0);
+    expect(jitteredBackoffMs(3, 1000, 100000, () => 1)).toBeCloseTo(8000, 5);
+  });
+
+  it("a negative attempt is treated as 0 (no blow-up)", () => {
+    expect(backoffCeilingMs(-5)).toBe(THROTTLE_BACKOFF_BASE_MS);
+  });
+});
+
+describe("planThrottleStep (attempt accounting + 6-attempt cap)", () => {
+  const now = Date.parse("2026-06-11T12:00:00.000Z");
+
+  it("first throttle: attempts=1, firstAt=now, nextRetryAt=now+delay, signature kept", () => {
+    const step = planThrottleStep({
+      prior: undefined,
+      nowMs: now,
+      delayMs: 60_000,
+      signature: "claude:rate-limited",
+    });
+    expect(step).toEqual({
+      action: "throttle",
+      attempts: 1,
+      firstAt: new Date(now).toISOString(),
+      nextRetryAt: new Date(now + 60_000).toISOString(),
+      signature: "claude:rate-limited",
+    });
+  });
+
+  it("subsequent throttle bumps attempts and preserves firstAt", () => {
+    const firstAt = new Date(now - 5 * 60_000).toISOString();
+    const step = planThrottleStep({
+      prior: { attempts: 2, firstAt },
+      nowMs: now,
+      delayMs: 120_000,
+    });
+    expect(step).toMatchObject({ action: "throttle", attempts: 3, firstAt });
+  });
+
+  it("fails after the 6-attempt cap with reason rate-limited", () => {
+    const step = planThrottleStep({
+      prior: { attempts: THROTTLE_MAX_ATTEMPTS, firstAt: new Date(now).toISOString() },
+      nowMs: now,
+      delayMs: 60_000,
+    });
+    expect(step).toEqual({ action: "fail", reason: "rate-limited" });
+  });
+
+  it("the attempt cap is 6", () => {
+    expect(THROTTLE_MAX_ATTEMPTS).toBe(6);
+    // attempts 0..5 still retry; 6 fails.
+    for (let a = 0; a < THROTTLE_MAX_ATTEMPTS; a++) {
+      const s = planThrottleStep({
+        prior: { attempts: a, firstAt: new Date(now).toISOString() },
+        nowMs: now,
+        delayMs: 1,
+      });
+      expect(s.action).toBe("throttle");
+    }
+  });
+});
+
+describe("isThrottleResumeDue / throttleRetryLabel", () => {
+  const now = Date.parse("2026-06-11T12:00:00.000Z");
+
+  it("due when now >= nextRetryAt", () => {
+    expect(isThrottleResumeDue({ nextRetryAt: new Date(now - 1).toISOString() }, now)).toBe(true);
+    expect(isThrottleResumeDue({ nextRetryAt: new Date(now).toISOString() }, now)).toBe(true);
+  });
+
+  it("not due when nextRetryAt is in the future", () => {
+    expect(isThrottleResumeDue({ nextRetryAt: new Date(now + 60_000).toISOString() }, now)).toBe(
+      false,
+    );
+  });
+
+  it("a missing/unparseable nextRetryAt is treated as due (never strand a job)", () => {
+    expect(isThrottleResumeDue(undefined, now)).toBe(true);
+    expect(isThrottleResumeDue({}, now)).toBe(true);
+    expect(isThrottleResumeDue({ nextRetryAt: "not-a-date" }, now)).toBe(true);
+  });
+
+  it("retry label rounds up minutes, 'retry now' when past/absent", () => {
+    expect(throttleRetryLabel({ nextRetryAt: new Date(now + 150_000).toISOString() }, now)).toBe(
+      "retry in 3m",
+    );
+    expect(throttleRetryLabel({ nextRetryAt: new Date(now - 5).toISOString() }, now)).toBe(
+      "retry now",
+    );
+    expect(throttleRetryLabel(undefined, now)).toBe("retry now");
+  });
+});
+
+describe("aimdEffectiveCap (account-wide rate-limit circuit breaker)", () => {
+  const now = Date.parse("2026-06-11T12:00:00.000Z");
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+
+  it("first pass with no throttles starts fully open at the configured cap", () => {
+    expect(aimdEffectiveCap(16, [], now)).toBe(16);
+  });
+
+  it("halves when >=2 throttles fall within the 10-min window", () => {
+    const throttles = [ago(60_000), ago(120_000)]; // 2 within window
+    expect(aimdEffectiveCap(16, throttles, now, 16)).toBe(8);
+  });
+
+  it("a single throttle in the window does NOT trip the breaker (additive)", () => {
+    expect(aimdEffectiveCap(16, [ago(60_000)], now, 16)).toBe(16); // already at cap
+    expect(aimdEffectiveCap(16, [ago(60_000)], now, 8)).toBe(9); // +1 restore
+  });
+
+  it("restores +1 per clean pass up to the configured cap", () => {
+    expect(aimdEffectiveCap(16, [], now, 4)).toBe(5);
+    expect(aimdEffectiveCap(16, [], now, 15)).toBe(16);
+    expect(aimdEffectiveCap(16, [], now, 16)).toBe(16); // never above cap
+  });
+
+  it("never goes below 1 even under repeated halving", () => {
+    const burst = [ago(1000), ago(2000), ago(3000)];
+    expect(aimdEffectiveCap(16, burst, now, 2)).toBe(1);
+    expect(aimdEffectiveCap(16, burst, now, 1)).toBe(1); // floor at 1
+  });
+
+  it("throttles OUTSIDE the 10-min window don't count", () => {
+    const old = [ago(AIMD_WINDOW_MS + 1000), ago(AIMD_WINDOW_MS + 2000)];
+    expect(aimdEffectiveCap(16, old, now, 16)).toBe(16); // none in window → additive
+  });
+
+  it("counts events at numeric (ms) timestamps too", () => {
+    expect(aimdEffectiveCap(16, [now - 1000, now - 2000], now, 16)).toBe(8);
+  });
+
+  it("a degenerate configured cap <= 0 admits nothing", () => {
+    expect(aimdEffectiveCap(0, [], now)).toBe(0);
+    expect(aimdEffectiveCap(-3, [], now)).toBe(0);
+  });
+
+  it("the trip threshold is 2 and the window is 10 minutes", () => {
+    expect(AIMD_TRIP_THRESHOLD).toBe(2);
+    expect(AIMD_WINDOW_MS).toBe(10 * 60_000);
+  });
+});
+
+describe("throttled row rendering (jobs ls)", () => {
+  const now = Date.parse("2026-06-11T12:00:00.000Z");
+  const throttledJob = (over: Partial<RegistryEntry> = {}): RegistryEntry => ({
+    id: "t1",
+    tool: "claude",
+    kind: "local-tmux",
+    cwd: "/repo/.remote/jobs/t1/wt",
+    enrolledAt: new Date(now - 5000).toISOString(),
+    lastSeenAt: new Date(now).toISOString(),
+    source: "run",
+    role: "job",
+    jobState: "throttled",
+    throttle: {
+      attempts: 2,
+      firstAt: new Date(now - 120_000).toISOString(),
+      nextRetryAt: new Date(now + 180_000).toISOString(),
+      lastSignature: "claude:rate-limited",
+    },
+    ...over,
+  });
+
+  it("a throttled row carries a 'retry in Xm (try n/6)' note", () => {
+    const rows = buildJobRows([throttledJob()], () => false, now);
+    expect(rows[0]!.state).toBe("throttled");
+    expect(rows[0]!.note).toBe("retry in 3m (try 2/6)");
+  });
+
+  it("renderJobsTable adds a NOTE column only when a row needs it", () => {
+    const table = renderJobsTable(buildJobRows([throttledJob()], () => false, now));
+    expect(table.split("\n")[0]).toMatch(/NOTE/);
+    expect(table).toContain("throttled");
+    expect(table).toContain("retry in 3m");
+  });
+
+  it("no NOTE column when no row has a note (back-compat with running-only tables)", () => {
+    const running: RegistryEntry = {
+      id: "r1",
+      tool: "claude",
+      kind: "local-tmux",
+      cwd: "/repo",
+      enrolledAt: new Date(now - 5000).toISOString(),
+      lastSeenAt: new Date(now).toISOString(),
+      source: "run",
+      role: "job",
+      jobState: "running",
+    };
+    const table = renderJobsTable(buildJobRows([running], () => true, now));
+    expect(table.split("\n")[0]).toMatch(/^ID\s+TYPE\s+STATE\s+AGE\s+CWD$/);
   });
 });

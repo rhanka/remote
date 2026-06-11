@@ -28,6 +28,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { JobState, RegistryEntry, RegistryTool } from "./registry.js";
+import { occupiesSlot } from "./registry.js";
 import { humanAge } from "./migrate-candidates.js";
 
 export type DelegateType = RegistryTool; // claude | codex | agy
@@ -83,6 +84,239 @@ export function buildDelegateArgs(
         "agy has no confirmed headless mode — run it interactively (drop --headless)",
       );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reliability slice 1 — rate-limit "throttled" RESUME (HEADLESS LOCAL only).
+//
+// When a HEADLESS LOCAL job finished on a transient provider rate-limit, the
+// conductor RELAUNCHES the SAME job in its `runCwd` with the tool's CONTINUE
+// flag so it picks up its prior conversation instead of starting over. The
+// continue flag is derived from the job's type; the task still rides as a single
+// trailing argv token (NEVER `bash -lc` string-concat — same safe channel as
+// `buildDelegateArgs`). PURE arg derivation, exported for tests.
+// ---------------------------------------------------------------------------
+
+/** Hard cap on auto-resume attempts before a throttled job is failed `rate-limited`. */
+export const THROTTLE_MAX_ATTEMPTS = 6;
+/** Backoff base (ms) for the resume schedule. */
+export const THROTTLE_BACKOFF_BASE_MS = 60_000; // 60s
+/** Backoff cap (ms) for the resume schedule. */
+export const THROTTLE_BACKOFF_CAP_MS = 30 * 60_000; // 30 min
+
+/**
+ * The EXACT argv to RESUME a throttled HEADLESS job, by type. The job continues
+ * its prior conversation (rather than re-running from scratch) and re-prints to
+ * the same log, so a fresh success settles it `done`:
+ *  - claude: `-p --continue <task>` (print mode, continue the last conversation).
+ *  - codex:  `exec resume --last <task>` (resume the most recent rollout).
+ *  - agy:    no confirmed headless mode → throws (same as buildDelegateArgs).
+ *
+ * The task stays a single trailing token (no shell concat). Pure, exported for
+ * tests.
+ *
+ * TODO(phase-2, interactive): an INTERACTIVE throttled tmux job would instead be
+ * nudged via `send-keys` (guarded by an attached-pane check so we never type
+ * into a pane the user is driving). Not in this slice.
+ */
+export function buildThrottleResumeArgs(
+  type: DelegateType,
+  task: string,
+): { command: string; args: string[] } {
+  const command = DELEGATE_BIN[type];
+  switch (type) {
+    case "claude":
+      return { command, args: ["-p", "--continue", task] };
+    case "codex":
+      return { command, args: ["exec", "resume", "--last", task] };
+    case "agy":
+      throw new Error(
+        "agy has no confirmed headless resume mode — interactive resume is phase 2",
+      );
+  }
+}
+
+/**
+ * Full-jitter exponential backoff delay for the throttle RESUME schedule —
+ * copied from the session-agent's `websocket-transport.ts` `jitteredDelay`
+ * (same formula, kept local so this module stays pure/dependency-free).
+ * Returns a random value in [0, min(cap, base * 2^attempt)]. `attempt` is
+ * 0-based (the FIRST throttle passes attempt 0). `rand` is injectable so tests
+ * pin the jitter. Pure, exported for tests.
+ */
+export function jitteredBackoffMs(
+  attempt: number,
+  baseMs: number = THROTTLE_BACKOFF_BASE_MS,
+  capMs: number = THROTTLE_BACKOFF_CAP_MS,
+  rand: () => number = Math.random,
+): number {
+  const ceiling = Math.min(capMs, baseMs * Math.pow(2, Math.max(0, attempt)));
+  return rand() * ceiling;
+}
+
+/**
+ * The CEILING of the full-jitter window for a given attempt: `min(cap, base *
+ * 2^attempt)`. Monotonic non-decreasing in `attempt`, capped at `capMs`. The
+ * jittered delay is always in `[0, ceiling]`. Pure, exported so tests can assert
+ * the schedule is monotonic + bounded without depending on the random draw.
+ */
+export function backoffCeilingMs(
+  attempt: number,
+  baseMs: number = THROTTLE_BACKOFF_BASE_MS,
+  capMs: number = THROTTLE_BACKOFF_CAP_MS,
+): number {
+  return Math.min(capMs, baseMs * Math.pow(2, Math.max(0, attempt)));
+}
+
+// ---------------------------------------------------------------------------
+// Reliability slice 1 — AIMD circuit breaker for ADMITTING pending jobs.
+//
+// A provider rate-limit is ACCOUNT-WIDE: if jobs are already throttling, starting
+// MORE pending jobs just burns the same quota and they throttle too. So we
+// MULTIPLICATIVELY DECREASE the effective admission cap when a burst of throttles
+// is observed (≥2 jobs entered `throttled` within the last 10 min → halve), and
+// ADDITIVELY INCREASE it (+1) on every clean pass (no new throttle), restoring up
+// to the configured cap. Classic AIMD. PURE: given (configuredCap,
+// throttleHistory, now[, lastCap]) it returns the effective cap; the conductor
+// keeps `lastCap` across passes. Exported for tests.
+//
+// `throttled` jobs KEEP their slot (registry.occupiesSlot), so this only governs
+// admitting NEW `pending` work — it never evicts a throttled job.
+// ---------------------------------------------------------------------------
+
+/** Window over which throttle events are counted for the breaker (10 min). */
+export const AIMD_WINDOW_MS = 10 * 60_000;
+/** ≥ this many throttles in the window trips the multiplicative decrease. */
+export const AIMD_TRIP_THRESHOLD = 2;
+
+/**
+ * The effective admission cap under AIMD. Pure.
+ *
+ *  - Count throttle events with `firstAt`/`at` within `[now - AIMD_WINDOW_MS, now]`.
+ *  - If that count ≥ AIMD_TRIP_THRESHOLD → HALVE the previous effective cap
+ *    (`Math.floor`), floored at 1 (never admit zero — a single slot keeps the
+ *    queue making progress so the breaker can observe recovery).
+ *  - Else (a clean pass) → ADDITIVELY restore +1, capped at `configuredCap`.
+ *  - Always clamped to `[1, configuredCap]` (never below 1, never above the
+ *    configured cap). A `configuredCap <= 0` returns 0 (a degenerate config
+ *    admits nothing — mirrors planNextStarts).
+ *
+ * `lastCap` is the effective cap from the PREVIOUS pass (defaults to
+ * `configuredCap` on the first pass — we start fully open). `recentThrottles` is
+ * the list of throttle-event timestamps (ISO or ms) the conductor tracks.
+ */
+export function aimdEffectiveCap(
+  configuredCap: number,
+  recentThrottles: ReadonlyArray<string | number>,
+  now: number = Date.now(),
+  lastCap?: number,
+): number {
+  if (configuredCap <= 0) return 0;
+  const prev =
+    lastCap === undefined
+      ? configuredCap
+      : Math.min(configuredCap, Math.max(1, Math.trunc(lastCap)));
+  const windowStart = now - AIMD_WINDOW_MS;
+  const inWindow = recentThrottles.filter((t) => {
+    const ms = typeof t === "number" ? t : Date.parse(t);
+    return Number.isFinite(ms) && ms >= windowStart && ms <= now;
+  }).length;
+  let next: number;
+  if (inWindow >= AIMD_TRIP_THRESHOLD) {
+    next = Math.max(1, Math.floor(prev / 2)); // multiplicative decrease
+  } else {
+    next = prev + 1; // additive increase
+  }
+  // Clamp to [1, configuredCap].
+  if (next < 1) next = 1;
+  if (next > configuredCap) next = configuredCap;
+  return next;
+}
+
+/** The next throttle bookkeeping for a job that just (re-)threw a rate-limit. */
+export type ThrottleStep =
+  | {
+      /** Mark/keep the job `throttled`; the conductor resumes it on `nextRetryAt`. */
+      action: "throttle";
+      attempts: number;
+      firstAt: string;
+      nextRetryAt: string;
+      signature?: string;
+    }
+  | {
+      /** The attempt cap is spent → fail the job with the rate-limited reason. */
+      action: "fail";
+      reason: "rate-limited";
+    };
+
+/**
+ * Decide what to do with a HEADLESS LOCAL job whose latest finished run was
+ * classified as a transient rate-limit. PURE — no clock/registry/IO; the caller
+ * passes `now`, the prior `throttle` bookkeeping (undefined on the first hit),
+ * the matched `signature`, and a `delay` (a jittered backoff in ms, computed via
+ * `jitteredBackoffMs`).
+ *
+ *  - First/next throttle while `attempts < maxAttempts`: bump `attempts`,
+ *    preserve `firstAt`, schedule `nextRetryAt = now + delay`.
+ *  - When the NEXT attempt would exceed `maxAttempts` (i.e. prior attempts already
+ *    == maxAttempts): give up → `{action:"fail", reason:"rate-limited"}`.
+ *
+ * Exported for tests.
+ */
+export function planThrottleStep(opts: {
+  prior: { attempts: number; firstAt: string } | undefined;
+  nowMs: number;
+  delayMs: number;
+  signature?: string;
+  maxAttempts?: number;
+}): ThrottleStep {
+  const max = opts.maxAttempts ?? THROTTLE_MAX_ATTEMPTS;
+  const priorAttempts = opts.prior?.attempts ?? 0;
+  if (priorAttempts >= max) {
+    return { action: "fail", reason: "rate-limited" };
+  }
+  const nowIso = new Date(opts.nowMs).toISOString();
+  const attempts = priorAttempts + 1;
+  return {
+    action: "throttle",
+    attempts,
+    firstAt: opts.prior?.firstAt ?? nowIso,
+    nextRetryAt: new Date(opts.nowMs + opts.delayMs).toISOString(),
+    ...(opts.signature !== undefined ? { signature: opts.signature } : {}),
+  };
+}
+
+/**
+ * Is a `throttled` job DUE for resume right now (now >= nextRetryAt)? Pure,
+ * tolerant of a missing/unparseable `nextRetryAt` (treated as due — better to
+ * retry than to strand a job forever). Exported for tests.
+ */
+export function isThrottleResumeDue(
+  throttle: { nextRetryAt?: string } | undefined,
+  nowMs: number,
+): boolean {
+  const at = throttle?.nextRetryAt;
+  if (at === undefined) return true;
+  const ms = Date.parse(at);
+  if (!Number.isFinite(ms)) return true;
+  return nowMs >= ms;
+}
+
+/**
+ * Minutes-until-retry label for a `throttled` row (`jobs ls`), e.g. "retry in
+ * 3m" / "retry now". Pure, exported for tests. Rounds UP so "<1 min away" still
+ * reads as 1m rather than 0.
+ */
+export function throttleRetryLabel(
+  throttle: { nextRetryAt?: string } | undefined,
+  nowMs: number = Date.now(),
+): string {
+  const at = throttle?.nextRetryAt;
+  if (at === undefined) return "retry now";
+  const ms = Date.parse(at);
+  if (!Number.isFinite(ms) || ms <= nowMs) return "retry now";
+  const mins = Math.ceil((ms - nowMs) / 60_000);
+  return `retry in ${mins}m`;
 }
 
 /**
@@ -221,7 +455,9 @@ export function planNextStarts(
 ): string[] {
   if (cap <= 0) return [];
   const onlyJobs = jobs.filter((j) => j.role === "job");
-  const running = onlyJobs.filter((j) => (j.jobState ?? "pending") === "running").length;
+  // `running` AND `throttled` jobs occupy a slot (a throttled job keeps its slot
+  // — the rate-limit is account-wide; see registry.occupiesSlot).
+  const running = onlyJobs.filter((j) => occupiesSlot(j.jobState ?? "pending")).length;
   let free = cap - running;
   if (free <= 0) return [];
   const pending = onlyJobs
@@ -247,7 +483,7 @@ export function hasFreeSlot(
 ): boolean {
   if (cap <= 0) return false;
   const running = jobs.filter(
-    (j) => j.role === "job" && (j.jobState ?? "pending") === "running",
+    (j) => j.role === "job" && occupiesSlot(j.jobState ?? "pending"),
   ).length;
   return running < cap;
 }
@@ -466,6 +702,12 @@ export type JobRow = {
   state: JobState;
   age: string;
   cwd: string;
+  /**
+   * Extra per-state detail shown in the NOTE column — currently the throttle
+   * "retry in Xm" hint for `throttled` rows (empty otherwise). Reliability
+   * slice 1.
+   */
+  note: string;
 };
 
 /**
@@ -481,6 +723,11 @@ export function reconcileJobState(
 ): JobState {
   const persisted = entry.jobState ?? "pending";
   if (persisted === "done" || persisted === "failed") return persisted;
+  // A `throttled` job has DELIBERATELY finished its run (its tmux session is gone
+  // — not live) and is waiting for the conductor's backoff resume. Its
+  // non-liveness is expected, NOT a crash → keep `throttled` (the resume path /
+  // attempt cap drives it terminal). Reliability slice 1.
+  if (persisted === "throttled") return "throttled";
   if (entry.endedAt) return "failed";
   if (!live) return "failed";
   return persisted;
@@ -568,13 +815,24 @@ export function buildJobRows(
   isJobLive: (e: RegistryEntry) => boolean,
   nowMs: number = Date.now(),
 ): JobRow[] {
-  return jobs.map((e) => ({
-    id: e.id,
-    type: e.tool,
-    state: reconcileJobState(e, isJobLive(e)),
-    age: humanAge(Date.parse(e.enrolledAt), nowMs),
-    cwd: e.cwd,
-  }));
+  return jobs.map((e) => {
+    const state = reconcileJobState(e, isJobLive(e));
+    // A `throttled` row shows its backoff "retry in Xm" (derived from
+    // nextRetryAt) plus, when present, the matched signature. Reliability slice 1.
+    const note =
+      state === "throttled"
+        ? `${throttleRetryLabel(e.throttle, nowMs)}` +
+          (e.throttle?.attempts !== undefined ? ` (try ${e.throttle.attempts}/${THROTTLE_MAX_ATTEMPTS})` : "")
+        : "";
+    return {
+      id: e.id,
+      type: e.tool,
+      state,
+      age: humanAge(Date.parse(e.enrolledAt), nowMs),
+      cwd: e.cwd,
+      note,
+    };
+  });
 }
 
 /**
@@ -609,6 +867,9 @@ export function renderJobsTable(rows: ReadonlyArray<JobRow>): string {
     ["age", "AGE"],
     ["cwd", "CWD"],
   ];
+  // Only show the NOTE column when something needs it (a throttled "retry in Xm"
+  // hint) — keeps the common all-running table unchanged. Reliability slice 1.
+  if (rows.some((r) => r.note.length > 0)) cols.push(["note", "NOTE"]);
   const widths = cols.map(([key, title]) =>
     Math.max(title.length, ...rows.map((r) => String(r[key]).length)),
   );

@@ -11,6 +11,7 @@ import {
   listLive,
   loadRegistry,
   markEnded,
+  occupiesSlot,
   prune,
   touchEntry,
   tryClaimSlot,
@@ -281,6 +282,91 @@ describe("registry", () => {
         expect(canTransitionJob("running", "failed")).toBe(true);
         expect(canTransitionJob("done", "failed")).toBe(false);
         expect(canTransitionJob("pending", "done")).toBe(false);
+      });
+    });
+
+    // Reliability slice 1 — rate-limit "throttled" state (HEADLESS LOCAL).
+    describe("throttled state machine + throttle bookkeeping", () => {
+      it("running -> throttled -> running round-trips and is NOT terminal", () => {
+        enroll({ ...jobInput, id: "rl-1" }, regPath);
+        const t = advanceJob("rl-1", "throttled", regPath);
+        expect(t?.jobState).toBe("throttled");
+        expect(t?.endedAt).toBeUndefined(); // throttled is non-terminal
+        const r = advanceJob("rl-1", "running", regPath);
+        expect(r?.jobState).toBe("running");
+      });
+
+      it("throttled -> failed (cap spent) stamps endedAt", () => {
+        enroll({ ...jobInput, id: "rl-2", jobState: "throttled" }, regPath);
+        const f = advanceJob("rl-2", "failed", regPath);
+        expect(f?.jobState).toBe("failed");
+        expect(f?.endedAt).toBeTruthy();
+      });
+
+      it("throttled -> done settles a fresh success", () => {
+        enroll({ ...jobInput, id: "rl-3", jobState: "throttled" }, regPath);
+        expect(advanceJob("rl-3", "done", regPath)?.jobState).toBe("done");
+      });
+
+      it("rejects illegal edges into/out of throttled", () => {
+        // pending cannot jump straight to throttled (never launched).
+        enroll({ ...jobInput, id: "rl-4", jobState: "pending" }, regPath);
+        expect(advanceJob("rl-4", "throttled", regPath)).toBeUndefined();
+        // done is terminal — cannot re-enter throttled.
+        enroll({ ...jobInput, id: "rl-5", jobState: "done" }, regPath);
+        expect(advanceJob("rl-5", "throttled", regPath)).toBeUndefined();
+      });
+
+      it("canTransitionJob encodes the throttled edges", () => {
+        expect(canTransitionJob("running", "throttled")).toBe(true);
+        expect(canTransitionJob("throttled", "running")).toBe(true);
+        expect(canTransitionJob("throttled", "failed")).toBe(true);
+        expect(canTransitionJob("throttled", "done")).toBe(true);
+        expect(canTransitionJob("pending", "throttled")).toBe(false);
+        expect(canTransitionJob("done", "throttled")).toBe(false);
+      });
+
+      it("round-trips the throttle bookkeeping object through enroll", () => {
+        enroll(
+          {
+            ...jobInput,
+            id: "rl-6",
+            jobState: "throttled",
+            throttle: {
+              attempts: 3,
+              firstAt: "2026-06-11T12:00:00.000Z",
+              nextRetryAt: "2026-06-11T12:05:00.000Z",
+              lastSignature: "claude:rate-limited",
+            },
+          },
+          regPath,
+        );
+        const loaded = loadRegistry(regPath).find((e) => e.id === "rl-6");
+        expect(loaded?.throttle).toEqual({
+          attempts: 3,
+          firstAt: "2026-06-11T12:00:00.000Z",
+          nextRetryAt: "2026-06-11T12:05:00.000Z",
+          lastSignature: "claude:rate-limited",
+        });
+      });
+
+      it("occupiesSlot: running + throttled occupy a slot; others don't", () => {
+        expect(occupiesSlot("running")).toBe(true);
+        expect(occupiesSlot("throttled")).toBe(true);
+        expect(occupiesSlot("pending")).toBe(false);
+        expect(occupiesSlot("done")).toBe(false);
+        expect(occupiesSlot("failed")).toBe(false);
+      });
+
+      it("tryClaimSlot counts a throttled job against the cap (it keeps its slot)", () => {
+        enroll({ ...jobInput, id: "occ-1", jobState: "throttled" }, regPath);
+        // cap 1, one throttled job already occupies the slot → no claim.
+        const claimed = tryClaimSlot(
+          { id: "new", tool: "claude", kind: "local-tmux", cwd: "/r", source: "run", role: "job" },
+          1,
+          regPath,
+        );
+        expect(claimed).toBeUndefined();
       });
     });
 

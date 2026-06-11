@@ -80,13 +80,18 @@ import {
   listLocalForLs,
   loadRegistry,
   tryClaimSlot,
+  withRegistryLock,
+  resolveRegistryPath,
   type RegistryEntry,
+  type ThrottleInfo,
 } from "./registry.js";
 import {
+  aimdEffectiveCap,
   assertSafeName,
   buildDelegateArgs,
   buildJobRows,
   buildRemoteDelegate,
+  buildThrottleResumeArgs,
   canDelegateAtDepth,
   childDepthEnvValue,
   clampDepth,
@@ -96,10 +101,14 @@ import {
   DEPTH_ENV,
   inheritedDepthBudget,
   isDelegateType,
+  isThrottleResumeDue,
+  jitteredBackoffMs,
   JOB_ID_ENV,
   jobDir,
   planNextStarts,
+  planThrottleStep,
   readJobResult,
+  THROTTLE_MAX_ATTEMPTS,
   reconcileRemoteJobs,
   renderJobsTable,
   resolveJobCwd,
@@ -109,6 +118,7 @@ import {
   trackItemRealizeArgs,
   type DelegateType,
 } from "./delegate.js";
+import { detectThrottle, THROTTLE_TAIL_LINES } from "./throttle-signatures.js";
 import {
   DEFAULT_FANOUT_MAX,
   mapWithConcurrency,
@@ -1005,6 +1015,89 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
     target: "local",
     detail: `${runCwd}${isolated ? " [worktree]" : ""}`,
   };
+}
+
+/**
+ * Reliability slice 1 — RESUME a throttled HEADLESS LOCAL job. Relaunch the SAME
+ * job in the SAME `runCwd` it already ran in (its recorded `cwd` — NOT a fresh
+ * worktree, so it continues the prior conversation in place) with the tool's
+ * CONTINUE flag (`claude -p --continue` / `codex exec resume --last`, via the
+ * safe argv `buildThrottleResumeArgs` — never `bash -lc` concat), redirecting to
+ * the SAME result.json/output.log, then transition `throttled → running`. The
+ * throttle bookkeeping is PRESERVED so a re-throttle bumps `attempts` (the cap is
+ * enforced in reconcile). Never throws — a spawn error is returned as
+ * `{started:false}` so the conductor keeps going.
+ *
+ * SCOPE: headless local only. Interactive resume (send-keys) and remote resume
+ * (control-plane) are phase 2 — see the TODOs at the call site.
+ */
+export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
+  if (job.kind !== "local-tmux" || job.headless !== true) {
+    return { started: false, error: "throttle-resume is headless-local only (phase 1)" };
+  }
+  if (!tmuxAvailable()) {
+    return { started: false, error: "tmux is not installed locally" };
+  }
+  const task = job.task ?? "";
+  const originCwd = job.originCwd ?? process.cwd();
+  // The job's recorded `cwd` IS the runCwd it ran in (the worktree, or the
+  // explicit/origin dir). Resume in the SAME tree — continue, don't re-isolate.
+  const runCwd = job.cwd;
+  let argv: { command: string; args: string[] };
+  try {
+    argv = buildThrottleResumeArgs(job.tool, task);
+  } catch (err) {
+    return { started: false, error: (err as Error).message };
+  }
+
+  // Same env plumbing as startJob (depth budget + REMOTE_JOB_ID for the hooks).
+  const prevDepth = process.env[DEPTH_ENV];
+  const prevJobId = process.env[JOB_ID_ENV];
+  process.env[DEPTH_ENV] = childDepthEnvValue(job.depthBudget ?? clampDepth(undefined));
+  process.env[JOB_ID_ENV] = job.id;
+  let tmuxSession: string;
+  try {
+    const dir = jobDir(originCwd, job.id);
+    ({ name: tmuxSession } = startHeadlessSession(
+      job.tool,
+      argv.command,
+      runCwd,
+      argv.args,
+      join(dir, "result.json"),
+      join(dir, "output.log"),
+      job.id,
+    ));
+  } catch (err) {
+    return { started: false, error: (err as Error).message };
+  } finally {
+    if (prevDepth === undefined) delete process.env[DEPTH_ENV];
+    else process.env[DEPTH_ENV] = prevDepth;
+    if (prevJobId === undefined) delete process.env[JOB_ID_ENV];
+    else process.env[JOB_ID_ENV] = prevJobId;
+  }
+
+  // throttled → running, keeping the throttle bookkeeping (attempts/firstAt) so a
+  // re-throttle on the resumed run accumulates toward the cap. Atomic.
+  const advanced = advanceJob(job.id, "running");
+  if (!advanced) {
+    return { started: false, error: "could not transition throttled → running" };
+  }
+  enroll({
+    id: job.id,
+    tool: job.tool,
+    kind: "local-tmux",
+    cwd: runCwd,
+    source: "run",
+    label: job.id,
+    tmuxSession,
+    role: "job",
+    jobState: "running",
+    originCwd,
+    ...(job.task !== undefined ? { task: job.task } : {}),
+    ...(job.callbackTo !== undefined ? { callbackTo: job.callbackTo } : {}),
+    ...(job.throttle !== undefined ? { throttle: job.throttle } : {}),
+  });
+  return { started: true, target: "local", detail: `${runCwd} [resume]` };
 }
 
 function getConfiguredRemote(overrideUrl?: string): string {
@@ -3102,6 +3195,84 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     runTrackMirror(trackItemRealizeArgs({ id: job.id }), job.originCwd ?? process.cwd());
   };
 
+  // Reliability slice 1 — read the LAST ~60 lines of a HEADLESS job's output.log
+  // (under its ORIGIN cwd, like every other artifact). Best-effort: a missing /
+  // unreadable log returns "" (→ no throttle). Bounded read for the tail only.
+  const readJobLogTail = (job: RegistryEntry): string => {
+    try {
+      const logPath = join(jobDir(job.originCwd ?? process.cwd(), job.id), "output.log");
+      const full = readFileSync(logPath, "utf8");
+      const lines = full.split(/\r?\n/);
+      return lines.slice(Math.max(0, lines.length - THROTTLE_TAIL_LINES)).join("\n");
+    } catch {
+      return "";
+    }
+  };
+
+  /**
+   * Reliability slice 1 — classify a finished HEADLESS LOCAL job's tail and, on a
+   * transient provider rate-limit, record the throttle (running → `throttled`
+   * with attempt++/backoff `nextRetryAt`), OR fail it `rate-limited` once the
+   * 6-attempt cap is spent. Returns true when it HANDLED the job (so reconcile
+   * skips its normal terminal path), false when it was not a throttle.
+   *
+   * Mutates the registry under `withRegistryLock` (atomic transition + bookkeeping
+   * in one critical section). On the terminal cap-exceeded path it emits the
+   * best-effort `job.done` + realizes the track mirror, like the normal path.
+   */
+  const maybeRecordThrottle = (job: RegistryEntry): boolean => {
+    const verdict = detectThrottle(readJobLogTail(job), job.tool);
+    if (!verdict.throttled) return false;
+    const nowMs = Date.now();
+    const prior = job.throttle
+      ? { attempts: job.throttle.attempts, firstAt: job.throttle.firstAt }
+      : undefined;
+    const step = planThrottleStep({
+      prior,
+      nowMs,
+      // attempts is 0-based for the backoff (first throttle → attempt 0).
+      delayMs: jitteredBackoffMs(prior?.attempts ?? 0),
+      ...(verdict.signature !== undefined ? { signature: verdict.signature } : {}),
+    });
+    if (step.action === "fail") {
+      const advanced = advanceJob(job.id, "failed");
+      if (advanced) {
+        process.stderr.write(
+          `[remote] job ${job.id} (${job.tool}) failed: rate-limited ` +
+            `(gave up after ${job.throttle?.attempts ?? THROTTLE_MAX_ATTEMPTS} resume attempts)\n`,
+        );
+        emitJobDone(advanced, { state: "failed" });
+        realizeTrackMirror(advanced);
+      }
+      return true;
+    }
+    // running → throttled, persisting the backoff bookkeeping atomically.
+    const info: ThrottleInfo = {
+      attempts: step.attempts,
+      firstAt: step.firstAt,
+      nextRetryAt: step.nextRetryAt,
+      ...(step.signature !== undefined ? { lastSignature: step.signature } : {}),
+    };
+    const path = resolveRegistryPath();
+    const ok = withRegistryLock(path, (entries) => {
+      const e = entries.find((x) => x.id === job.id && x.role === "job");
+      if (!e || (e.jobState ?? "pending") !== "running") {
+        return { entries, result: false, save: false };
+      }
+      e.jobState = "throttled";
+      e.throttle = info;
+      e.lastSeenAt = new Date(nowMs).toISOString();
+      return { entries, result: true };
+    });
+    if (ok) {
+      process.stderr.write(
+        `[remote] job ${job.id} (${job.tool}) throttled (${verdict.signature ?? "rate-limited"}) — ` +
+          `attempt ${step.attempts}/${THROTTLE_MAX_ATTEMPTS}, resume at ${step.nextRetryAt}\n`,
+      );
+    }
+    return ok;
+  };
+
   // Persist the terminal state of jobs whose runtime has ended:
   //  - LOCAL: a HEADLESS job that wrote a result.json reconciles to its real
   //    done/failed; any other dead-but-still-"running" job (interactive
@@ -3122,14 +3293,46 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       if (job.kind === "remote") continue;
       const state = job.jobState ?? "pending";
       // A `pending` job is QUEUED, not launched: it has no tmux session yet, so
-      // its non-liveness must NOT be read as a crash. Leave it for the conductor.
-      if (state === "pending" || state === "done" || state === "failed") continue;
+      // its non-liveness must NOT be read as a crash. A `throttled` job has
+      // DELIBERATELY finished its run and is awaiting the conductor's backoff
+      // resume — its non-liveness is expected, NOT a crash. Both are owned by the
+      // conductor pass; skip them here (reliability slice 1).
+      if (
+        state === "pending" ||
+        state === "throttled" ||
+        state === "done" ||
+        state === "failed"
+      )
+        continue;
       if (jobLive(job)) continue;
       // H2 — result.json was written under the job's ORIGIN cwd (HEADLESS_WRAPPER
       // → jobDir(originCwd)); a conductor running from a DIFFERENT cwd must read
       // it there, not at its own process.cwd() (which would always miss → force
       // `failed` on a successful exit). Same fix at every readJobResult site.
       const result = readJobResult(job.originCwd ?? process.cwd(), job.id);
+
+      // Reliability slice 1 — RATE-LIMIT detection for HEADLESS LOCAL jobs. A
+      // headless job that finished with a NON-success result may have hit a
+      // transient provider rate-limit rather than a real failure. Read the tail
+      // of its output.log and classify; on a throttle, transition to `throttled`
+      // (keeping its slot) with backoff bookkeeping instead of failing it.
+      //
+      // TODO(phase-2): the same detection applies to INTERACTIVE tmux jobs (read
+      // the pane via capturePane, nudge via send-keys behind an attached-pane
+      // guard) and to REMOTE jobs (kubectl-exec/logs tail in reconcileRemoteJobs).
+      // Both are deliberately OUT of this slice.
+      if (
+        job.headless === true &&
+        job.kind === "local-tmux" &&
+        (result === undefined || result.state === "failed")
+      ) {
+        // handled === true when the job was moved to `throttled` (awaiting the
+        // backoff resume) OR failed with the rate-limited reason after the cap —
+        // either way reconcile must not re-fail/re-emit it.
+        const handled = maybeRecordThrottle(job);
+        if (handled) continue;
+      }
+
       const advanced = advanceJob(job.id, result?.state ?? "failed");
       if (advanced) {
         emitJobDone(advanced, {
@@ -3413,11 +3616,32 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
     });
 
+  // Reliability slice 1 — the AIMD effective cap CARRIES ACROSS passes (the
+  // conductor's `--watch` loop calls conductPass repeatedly). `undefined` on the
+  // first pass means "start fully open at the configured cap".
+  let aimdLastCap: number | undefined;
+
+  // Collect recent throttle-event timestamps from the registry for the AIMD
+  // breaker: each job that has a `throttle` record contributes its most recent
+  // throttle moment — `lastSeenAt` while it is still `throttled` (the instant it
+  // entered), else `throttle.firstAt`. The pure `aimdEffectiveCap` windows them.
+  const recentThrottleEvents = (jobs: ReadonlyArray<RegistryEntry>): string[] => {
+    const out: string[] = [];
+    for (const j of jobs) {
+      if (j.role !== "job" || !j.throttle) continue;
+      out.push((j.jobState ?? "pending") === "throttled" ? j.lastSeenAt : j.throttle.firstAt);
+    }
+    return out;
+  };
+
   // P4 — the CONDUCTOR. A single pass: (a) reconcile job state (consume finished
-  // jobs → frees a slot + emits job.done + realizes the track mirror), (b) start
-  // `pending` jobs while `running < cap`, via the SAME `startJob` path delegate
-  // uses. With `--watch <min>` it loops in the FOREGROUND (dedicated tmux
-  // window, like `h2a bridge --watch`), no daemon. SIGINT → clean exit 0.
+  // jobs → frees a slot + emits job.done + realizes the track mirror), (a') RESUME
+  // throttled jobs whose backoff elapsed (reliability slice 1), (b) start
+  // `pending` jobs while `running < effectiveCap`, via the SAME `startJob` path
+  // delegate uses. The effectiveCap is the AIMD breaker's output (halve on a
+  // throttle burst, restore +1 per clean pass). With `--watch <min>` it loops in
+  // the FOREGROUND (dedicated tmux window, like `h2a bridge --watch`), no daemon.
+  // SIGINT → clean exit 0.
   const conductPass = async (
     cap: number,
   ): Promise<{ started: number; finished: number }> => {
@@ -3425,15 +3649,58 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     const terminalBefore = before.filter(
       (j) => j.jobState === "done" || j.jobState === "failed",
     ).length;
-    // (a) reconcile (also emits job.done + realizes track mirror on terminal).
+    // (a) reconcile (also classifies throttles, emits job.done + realizes track
+    // mirror on terminal). After this, freshly-throttled jobs are `throttled`.
     const after = await reconcileJobs();
     const terminalAfter = after.filter(
       (j) => j.jobState === "done" || j.jobState === "failed",
     ).length;
     const finished = Math.max(0, terminalAfter - terminalBefore);
-    // (b) start pending jobs under the cap (oldest-first FIFO).
+
+    // (a') RESUME throttled jobs whose backoff window has elapsed (HEADLESS LOCAL
+    // only). A resumed job goes throttled → running and re-occupies its slot; if
+    // it throttles again, reconcile bumps `attempts` (cap enforced there).
+    const nowMs = Date.now();
+    let resumed = 0;
+    for (const job of after) {
+      if (job.role !== "job" || (job.jobState ?? "pending") !== "throttled") continue;
+      if (!isThrottleResumeDue(job.throttle, nowMs)) continue;
+      // TODO(phase-2): an interactive throttled job would resume via send-keys
+      // (attached-pane guard), and a remote one via the control-plane — both out
+      // of this slice; resumeThrottledJob refuses anything but headless-local.
+      const r = resumeThrottledJob(job);
+      if (r.started) {
+        resumed += 1;
+        process.stderr.write(
+          `[remote] conduct: resumed throttled ${job.id} (${job.tool}) in ${r.detail}\n`,
+        );
+      } else {
+        process.stderr.write(
+          `[remote] conduct: could not resume throttled ${job.id}: ${r.error}\n`,
+        );
+      }
+    }
+
+    // AIMD effective cap: a provider rate-limit is account-wide, so admit FEWER
+    // new pending jobs when throttles are bursting. Throttled/running jobs keep
+    // their slots regardless (occupiesSlot); this only governs NEW admissions.
+    const refreshed = listJobs();
+    const effectiveCap = aimdEffectiveCap(
+      cap,
+      recentThrottleEvents(refreshed),
+      nowMs,
+      aimdLastCap,
+    );
+    aimdLastCap = effectiveCap;
+    if (effectiveCap < cap) {
+      process.stderr.write(
+        `[remote] conduct: AIMD breaker — admitting up to ${effectiveCap}/${cap} (rate-limit pressure)\n`,
+      );
+    }
+
+    // (b) start pending jobs under the EFFECTIVE cap (oldest-first FIFO).
     let started = 0;
-    for (const id of planNextStarts(after, cap)) {
+    for (const id of planNextStarts(refreshed, effectiveCap)) {
       const job = listJobs().find((e) => e.id === id);
       if (!job) continue;
       const result = await startJob(job);
@@ -3451,7 +3718,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         );
       }
     }
-    return { started, finished };
+    // Count a resume as "started" work for the pass recap.
+    return { started: started + resumed, finished };
   };
 
   jobsCommand
