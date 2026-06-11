@@ -5,6 +5,26 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.7 — 2026-06-10
+
+Headline: **operator-ui is now 100% @sentropic/design-system-svelte** — every
+component and the layout come from the DS (or are flagged/negotiated), no more
+hand-rolled HTML controls or hardcoded colors.
+
+- `+page.svelte` restyled onto the DS: `ThemeProvider` + `AppHeader`,
+  `Grid`/`Container`/`Stack` layout, sessions/workspaces as `Card` + `Badge`/
+  `Tag` + `IconButton` (`Tooltip`), forms as `Form`/`FormGroup` + `Select` +
+  `Input` + `Button`, empty/error states as `EmptyState`/`Alert`. All behaviour
+  (state, handlers, xterm wiring, SSE) preserved verbatim.
+- DS audit (`sent-tech-design` skill) on the rendered console: our markup is
+  down to 2 minor findings (dark-mode declaration + motion guard, both
+  ThemeProvider-level). The em-dash + missing-H1 findings are fixed.
+- **Negotiated with the DS owner** (`claude:sentropic`, via h2a): the audit
+  surfaced 250 findings inside the DS's *own* shipped CSS (padding off-grid,
+  raw colors, pure black/white, type scale); plus 3 API gaps (clickable `Card`,
+  an action-row primitive, a terminal-embed convention) and no tree-shaking of
+  the component barrel (472 KB SSR). Tracked for the DS, not worked around.
+
 ## v0.5.6 — 2026-06-10
 
 Headline: **the noVNC sidecar image ships in CI** — `sentropic-remote-browser`
