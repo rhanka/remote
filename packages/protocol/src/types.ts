@@ -14,9 +14,13 @@ import type {
   browserNavigatedSchema,
   browserSensitiveActionRequestSchema,
   browserStartedSchema,
+  browserTransportSchema,
+  browserTwoFactorMethodSchema,
   browserTwoFactorRequestSchema,
   browserUserTakeoverChangedSchema,
   browserUserTakeoverRequestSchema,
+  browserUserTakeoverStateSchema,
+  uatExposurePolicySchema,
   uatRouteCreatedSchema,
   uatRouteExpiredSchema,
 } from "./schemas/browser.js";
@@ -125,6 +129,14 @@ export type TerminalInput = FromSchema<typeof terminalInputSchema>;
 export type TerminalOutput = FromSchema<typeof terminalOutputSchema>;
 export type TerminalResize = FromSchema<typeof terminalResizeSchema>;
 export type TerminalExited = FromSchema<typeof terminalExitedSchema>;
+export type BrowserTransport = FromSchema<typeof browserTransportSchema>;
+export type BrowserTwoFactorMethod = FromSchema<
+  typeof browserTwoFactorMethodSchema
+>;
+export type BrowserUserTakeoverState = FromSchema<
+  typeof browserUserTakeoverStateSchema
+>;
+export type UatExposurePolicy = FromSchema<typeof uatExposurePolicySchema>;
 export type BrowserStarted = FromSchema<typeof browserStartedSchema>;
 export type BrowserNavigated = FromSchema<typeof browserNavigatedSchema>;
 export type BrowserTwoFactorRequest = FromSchema<

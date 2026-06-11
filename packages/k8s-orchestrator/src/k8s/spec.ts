@@ -30,6 +30,22 @@ export type K8sPodAffinityTerm = {
   readonly topologyKey: string;
 };
 
+export type K8sContainer = {
+  readonly name: string;
+  readonly image: string;
+  readonly imagePullPolicy: "Always" | "IfNotPresent" | "Never";
+  readonly command?: ReadonlyArray<string>;
+  readonly env: ReadonlyArray<{
+    readonly name: string;
+    readonly value: string;
+  }>;
+  readonly volumeMounts: ReadonlyArray<K8sVolumeMount>;
+  readonly resources?: {
+    readonly requests?: ResourceQuantities;
+    readonly limits?: ResourceQuantities;
+  };
+};
+
 export type K8sPodSpec = {
   readonly apiVersion: "v1";
   readonly kind: "Pod";
@@ -50,21 +66,7 @@ export type K8sPodSpec = {
         }>;
       };
     };
-    readonly containers: ReadonlyArray<{
-      readonly name: string;
-      readonly image: string;
-      readonly imagePullPolicy: "Always" | "IfNotPresent" | "Never";
-      readonly command?: ReadonlyArray<string>;
-      readonly env: ReadonlyArray<{
-        readonly name: string;
-        readonly value: string;
-      }>;
-      readonly volumeMounts: ReadonlyArray<K8sVolumeMount>;
-      readonly resources?: {
-        readonly requests?: ResourceQuantities;
-        readonly limits?: ResourceQuantities;
-      };
-    }>;
+    readonly containers: ReadonlyArray<K8sContainer>;
     readonly volumes: ReadonlyArray<K8sVolume>;
   };
 };
@@ -117,6 +119,14 @@ export type SpecBuilderOptions = {
   /** Image for the ephemeral workspace-GC janitor pod (busybox-compatible
    * shell + find/stat/du/tar required). Defaults to JANITOR_IMAGE. */
   readonly janitorImage?: string;
+  /**
+   * Image for the opt-in headful-browser SIDECAR (WP7 noVNC: Xvfb + Chromium +
+   * x11vnc + websockify + noVNC). Only added to a Pod when a browser session is
+   * requested (buildSessionPodSpec `browser: true`). Defaults to
+   * BROWSER_SIDECAR_IMAGE. NOT baked into the session-agent image: the X stack
+   * is heavy and unused by ~all sessions, so it lives in its own image and is
+   * scheduled as an opt-in sidecar (separate lifecycle + resource budget). */
+  readonly browserSidecarImage?: string;
   readonly controlPlaneEndpoint: string;
   readonly home: string;
 };
@@ -143,6 +153,21 @@ export const JANITOR_IMAGE = "busybox:1.37.0";
 export const JANITOR_WORKSPACES_MOUNT = "/workspaces";
 /** On-volume trash dir: GC'd workspaces are tar'd here BEFORE rm — recoverable. */
 export const JANITOR_TRASH_DIR = ".trash";
+
+// --- Headful-browser sidecar (WP7 noVNC, opt-in) ----------------------------
+/** Sidecar container name. */
+export const BROWSER_SIDECAR_CONTAINER = "browser-headful";
+/** Default sidecar image (Xvfb + Chromium + x11vnc + websockify + noVNC). Pinned. */
+export const BROWSER_SIDECAR_IMAGE =
+  "ghcr.io/rhanka/sentropic-remote-browser:v0.5.4";
+/**
+ * Pod-local port the sidecar's websockify/noVNC listens on. `remote forward
+ * <id> 6080` exposes it to the user. Fixed (matches the bridge NOVNC_POD_PORT
+ * and the entrypoint). The sidecar shares the Pod network namespace, so the
+ * session-agent can probe localhost:6080 and the forward reaches it directly. */
+export const BROWSER_SIDECAR_PORT = 6080;
+/** Sidecar entrypoint inside the browser image (brings the X stack up). */
+export const BROWSER_SIDECAR_ENTRYPOINT = "/opt/browser/start-headful.sh";
 
 export const DEFAULT_BUILDER_OPTIONS: SpecBuilderOptions = {
   namespace: "sentropic-remote",
@@ -301,6 +326,46 @@ export function buildSessionAuthSecret(
   };
 }
 
+/**
+ * The opt-in headful-browser sidecar (WP7 noVNC). Brings up Xvfb + Chromium +
+ * x11vnc + websockify + noVNC inside the SAME Pod (shared network namespace, so
+ * it binds BROWSER_SIDECAR_PORT that `remote forward` reaches). Heavily
+ * resource-capped: a desktop Chromium is costly, and this is only ever up while
+ * a user is completing a login/2FA, so a 1 CPU / 1Gi limit keeps a runaway
+ * browser from starving the agent. It mounts the workspace volume so downloads/
+ * uploads land where the session sees them. Default geometry/display are
+ * reversible; the websockify token is injected at RUNTIME by the bridge (env
+ * NOVNC_TOKEN), never baked into the spec — so no secret ever lands in the
+ * Pod manifest. */
+export function buildBrowserSidecarContainer(
+  descriptor: SessionDescriptor,
+  options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
+  workspaceMounts: ReadonlyArray<K8sVolumeMount> = [],
+): K8sContainer {
+  return {
+    name: BROWSER_SIDECAR_CONTAINER,
+    image: options.browserSidecarImage ?? BROWSER_SIDECAR_IMAGE,
+    imagePullPolicy: options.imagePullPolicy ?? "Always",
+    command: [BROWSER_SIDECAR_ENTRYPOINT],
+    env: [
+      { name: "NOVNC_PORT", value: String(BROWSER_SIDECAR_PORT) },
+      { name: "DISPLAY", value: ":99" },
+      { name: "GEOMETRY", value: "1280x800x24" },
+      // Opt-in marker the entrypoint checks; the per-session noVNC token is
+      // injected at runtime by the bridge (NOVNC_TOKEN), NOT here.
+      { name: "SESSION_ID", value: descriptor.id },
+    ],
+    // Share the workspace so files downloaded in the browser are visible to the
+    // agent's CLI (and vice versa). Read-write — a login may download a creds
+    // file the user then moves into place.
+    volumeMounts: workspaceMounts,
+    resources: {
+      requests: { cpu: "250m", memory: "512Mi" },
+      limits: { cpu: "1", memory: "1Gi" },
+    },
+  };
+}
+
 export function buildSessionPodSpec(
   descriptor: SessionDescriptor,
   options: SpecBuilderOptions = DEFAULT_BUILDER_OPTIONS,
@@ -308,6 +373,8 @@ export function buildSessionPodSpec(
   workspaceSync = false,
   workspaceExport = false,
   sessionToken?: string,
+  /** Opt-in: add the headful-browser sidecar (WP7 noVNC). Default false. */
+  browser = false,
 ): K8sPodSpec {
   const names = resourceNames(descriptor);
   const limits = descriptor.resourceLimits;
@@ -536,6 +603,17 @@ export function buildSessionPodSpec(
               }
             : {}),
         },
+        // WP7 noVNC: opt-in headful-browser sidecar. Off unless `browser` is
+        // requested — the X/Chromium stack is heavy and ~no session needs it.
+        // Shares the workspace volume (the first volumeMount) so downloads are
+        // visible to the agent.
+        ...(browser
+          ? [
+              buildBrowserSidecarContainer(descriptor, options, [
+                volumeMounts[0]!,
+              ]),
+            ]
+          : []),
       ],
       volumes,
     },

@@ -154,6 +154,7 @@ import {
 } from "./enroll.js";
 import { softRefreshSession } from "./soft-refresh.js";
 import { forwardSessionPort } from "./forward.js";
+import { buildBrowserOpenPlan } from "./browser.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -2236,6 +2237,92 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           ...(local !== undefined ? { localPort: local } : {}),
           ...(opts.address !== undefined ? { address: opts.address } : {}),
         });
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // browser — WP7 noVNC headful browser-in-pod (2FA / authenticated sites)
+  // ---------------------------------------------------------------------------
+
+  const browserCommand = program
+    .command("browser")
+    .description(
+      "Open a headful browser running INSIDE a session Pod (noVNC) to complete a 2FA / login challenge visually.",
+    );
+
+  browserCommand
+    .command("open <sessionId>")
+    .description(
+      "Print the steps to open the headful browser view for a session: the " +
+        "`remote forward` command to run and the token-gated noVNC URL to open. " +
+        "Default exposure is session-private (owner only, token-gated) and interactive (you drive the 2FA).",
+    )
+    .option("--local-port <port>", "local port to bind the forward to")
+    .option(
+      "--policy <policy>",
+      "uat exposure policy: operator-only | session-private | public-expiring (default session-private)",
+    )
+    .option(
+      "--ttl <ms>",
+      "route TTL in ms (required for the public-expiring policy)",
+    )
+    .option("--view-only", "open a read-only mirror (cannot complete 2FA)")
+    .action(
+      (
+        sessionId: string,
+        opts: {
+          localPort?: string;
+          policy?: string;
+          ttl?: string;
+          viewOnly?: boolean;
+        },
+      ) => {
+        let localPort: number | undefined;
+        if (opts.localPort !== undefined) {
+          localPort = Number(opts.localPort);
+          if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535) {
+            process.stderr.write(
+              `[remote] invalid local port "${opts.localPort}"\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+        }
+        const policy = opts.policy;
+        if (
+          policy !== undefined &&
+          policy !== "operator-only" &&
+          policy !== "session-private" &&
+          policy !== "public-expiring"
+        ) {
+          process.stderr.write(
+            `[remote] invalid --policy "${policy}" (operator-only | session-private | public-expiring)\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        let ttlMs: number | undefined;
+        if (opts.ttl !== undefined) {
+          ttlMs = Number(opts.ttl);
+          if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+            process.stderr.write(`[remote] invalid --ttl "${opts.ttl}"\n`);
+            process.exitCode = 1;
+            return;
+          }
+        }
+        const plan = buildBrowserOpenPlan({
+          sessionId,
+          ...(policy !== undefined ? { exposurePolicy: policy } : {}),
+          ...(localPort !== undefined ? { localPort } : {}),
+          ...(ttlMs !== undefined ? { ttlMs } : {}),
+          ...(opts.viewOnly ? { interactive: false } : {}),
+        });
+        if (!plan.ok) {
+          process.stderr.write(`[remote] ${plan.reason}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        process.stdout.write(plan.instructions);
       },
     );
 
