@@ -146,6 +146,29 @@ const AUTH_VOLUME = "auth";
 const POD_CONTAINER = "session-agent";
 const AUTH_STAGING_DIR = "/run/auth-bundle";
 
+// --- session-agent resources (anti-eviction) --------------------------------
+// A session-agent with NO memory request lands in BestEffort QoS and is the
+// FIRST pod the kubelet evicts under node memory pressure (this already
+// OOM-evicted live sessions, exit 137 reason=Evicted). Giving it a memory
+// REQUEST promotes the pod to Burstable QoS, so it is protected up to that
+// request before the kubelet reclaims it. The limit caps a runaway claude/codex
+// (they can spike). All four are env-overridable (read at module load, same
+// `process.env.X ?? default` shape the rest of the repo uses) so node sizing can
+// be tuned without a rebuild; SESSION_AGENT_CPU_LIMIT is optional (unset = no
+// cpu limit, so a busy session can burst above its 250m request). Mirrors the
+// browser sidecar's inline requests/limits block.
+/** Memory REQUEST — the eviction-protection knob (Burstable, not BestEffort). */
+export const SESSION_AGENT_MEM_REQUEST =
+  process.env.SESSION_AGENT_MEM_REQUEST ?? "1Gi";
+/** Memory LIMIT — hard cap (claude/codex can spike). */
+export const SESSION_AGENT_MEM_LIMIT =
+  process.env.SESSION_AGENT_MEM_LIMIT ?? "4Gi";
+/** CPU REQUEST — scheduling floor; cpu is compressible so it is not about eviction. */
+export const SESSION_AGENT_CPU_REQUEST =
+  process.env.SESSION_AGENT_CPU_REQUEST ?? "250m";
+/** Optional CPU LIMIT. Unset = no cpu cap (let a busy session burst). */
+export const SESSION_AGENT_CPU_LIMIT = process.env.SESSION_AGENT_CPU_LIMIT;
+
 /** Default janitor image: tiny, has sh/find/stat/du/tar — everything the GC
  * script needs. Pinned (never :latest). */
 export const JANITOR_IMAGE = "busybox:1.37.0";
@@ -378,8 +401,18 @@ export function buildSessionPodSpec(
 ): K8sPodSpec {
   const names = resourceNames(descriptor);
   const limits = descriptor.resourceLimits;
-  const resourceLimits: ResourceQuantities = {};
-  const resourceRequests: ResourceQuantities = {};
+  // Baseline anti-eviction floor: ALWAYS request memory (so the pod is
+  // Burstable, never BestEffort) plus a cpu request, and cap memory. A
+  // per-session descriptor limit, when present, OVERRIDES the matching baseline
+  // (a "big-build" descriptor.resourceLimits still wins, both request+limit).
+  const resourceRequests: ResourceQuantities = {
+    cpu: SESSION_AGENT_CPU_REQUEST,
+    memory: SESSION_AGENT_MEM_REQUEST,
+  };
+  const resourceLimits: ResourceQuantities = {
+    ...(SESSION_AGENT_CPU_LIMIT ? { cpu: SESSION_AGENT_CPU_LIMIT } : {}),
+    memory: SESSION_AGENT_MEM_LIMIT,
+  };
   if (limits?.cpu) {
     Object.assign(resourceLimits, { cpu: limits.cpu });
     Object.assign(resourceRequests, { cpu: limits.cpu });

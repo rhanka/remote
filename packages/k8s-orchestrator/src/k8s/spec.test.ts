@@ -1,5 +1,5 @@
 import type { SessionDescriptor } from "@sentropic/remote-protocol";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   BROWSER_SIDECAR_CONTAINER,
@@ -10,6 +10,9 @@ import {
   JANITOR_IMAGE,
   JANITOR_TRASH_DIR,
   JANITOR_WORKSPACES_MOUNT,
+  SESSION_AGENT_CPU_REQUEST,
+  SESSION_AGENT_MEM_LIMIT,
+  SESSION_AGENT_MEM_REQUEST,
   buildSessionPodSpec,
   buildSessionPvcSpec,
   buildWorkspaceGcJanitorPodSpec,
@@ -33,6 +36,11 @@ const baseDescriptor: SessionDescriptor = {
 };
 
 describe("k8s spec builders", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
   it("produces stable names and labels for the session", () => {
     const names = resourceNames(baseDescriptor);
     expect(names.pod).toBe("session-sess-abcdef");
@@ -54,6 +62,40 @@ describe("k8s spec builders", () => {
       DEFAULT_BUILDER_OPTIONS.defaultWorkspaceSize,
     );
     expect(pvc.spec.storageClassName).toBeUndefined();
+  });
+
+  it("gives the session-agent a baseline memory request+limit (Burstable, anti-eviction)", () => {
+    const pod = buildSessionPodSpec(baseDescriptor);
+    const container = pod.spec.containers[0]!;
+    // memory REQUEST is the eviction-protection knob (no longer BestEffort).
+    expect(container.resources?.requests?.memory).toBe(SESSION_AGENT_MEM_REQUEST);
+    expect(container.resources?.requests?.memory).toBe("1Gi");
+    expect(container.resources?.requests?.cpu).toBe(SESSION_AGENT_CPU_REQUEST);
+    expect(container.resources?.requests?.cpu).toBe("250m");
+    // memory LIMIT caps a runaway claude/codex.
+    expect(container.resources?.limits?.memory).toBe(SESSION_AGENT_MEM_LIMIT);
+    expect(container.resources?.limits?.memory).toBe("4Gi");
+    // no cpu limit by default (SESSION_AGENT_CPU_LIMIT unset → burstable cpu).
+    expect(container.resources?.limits?.cpu).toBeUndefined();
+  });
+
+  it("honours SESSION_AGENT_* env overrides for the resources block", async () => {
+    // The consts are read at module load, so re-import a fresh copy with the
+    // env set (same `process.env.X ?? default` shape the rest of the repo uses).
+    vi.stubEnv("SESSION_AGENT_MEM_REQUEST", "2Gi");
+    vi.stubEnv("SESSION_AGENT_MEM_LIMIT", "8Gi");
+    vi.stubEnv("SESSION_AGENT_CPU_REQUEST", "500m");
+    vi.stubEnv("SESSION_AGENT_CPU_LIMIT", "2");
+    vi.resetModules();
+    const mod = await import("./spec.js");
+    expect(mod.SESSION_AGENT_MEM_REQUEST).toBe("2Gi");
+    expect(mod.SESSION_AGENT_MEM_LIMIT).toBe("8Gi");
+    expect(mod.SESSION_AGENT_CPU_REQUEST).toBe("500m");
+    expect(mod.SESSION_AGENT_CPU_LIMIT).toBe("2");
+    const container = mod.buildSessionPodSpec(baseDescriptor).spec.containers[0]!;
+    expect(container.resources?.requests).toEqual({ cpu: "500m", memory: "2Gi" });
+    // CPU limit now present because SESSION_AGENT_CPU_LIMIT was set.
+    expect(container.resources?.limits).toEqual({ cpu: "2", memory: "8Gi" });
   });
 
   it("respects descriptor resource limits and override options", () => {
