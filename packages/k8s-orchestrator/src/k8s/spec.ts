@@ -174,6 +174,23 @@ export const SESSION_AGENT_CPU_REQUEST =
 /** Optional CPU LIMIT. Unset = no cpu cap (let a busy session burst). */
 export const SESSION_AGENT_CPU_LIMIT = process.env.SESSION_AGENT_CPU_LIMIT;
 
+// ephemeral-storage (node LOCAL disk) — same low-request/high-limit shape as
+// memory, but the failure it guards is DiskPressure, not OOM. A pod with NO
+// ephemeral-storage REQUEST lets the scheduler overcommit the node's local
+// disk (the container image is never counted in the request — only the
+// writable layer + emptyDir + logs are), so the single RWX node hit
+// DiskPressure=True and the kubelet cascade-EVICTED every session pod at once.
+// A modest REQUEST makes the scheduler account for disk and stop packing past
+// the node's allocatable ephemeral floor; the generous LIMIT caps any one
+// session's writable layer/logs so a runaway is evicted ALONE instead of
+// taking the node (and every neighbour) down. Env-overridable for node sizing.
+/** ephemeral-storage REQUEST — modest scheduling floor (disk accounting, dense packing). */
+export const SESSION_AGENT_EPHEMERAL_REQUEST =
+  process.env.SESSION_AGENT_EPHEMERAL_REQUEST ?? "1Gi";
+/** ephemeral-storage LIMIT — generous per-pod cap; an over-runner is evicted alone. */
+export const SESSION_AGENT_EPHEMERAL_LIMIT =
+  process.env.SESSION_AGENT_EPHEMERAL_LIMIT ?? "8Gi";
+
 /** Default janitor image: tiny, has sh/find/stat/du/tar — everything the GC
  * script needs. Pinned (never :latest). */
 export const JANITOR_IMAGE = "busybox:1.37.0";
@@ -413,10 +430,16 @@ export function buildSessionPodSpec(
   const resourceRequests: ResourceQuantities = {
     cpu: SESSION_AGENT_CPU_REQUEST,
     memory: SESSION_AGENT_MEM_REQUEST,
+    // Disk accounting floor (anti-DiskPressure cascade): see
+    // SESSION_AGENT_EPHEMERAL_REQUEST. The descriptor's closed {cpu,memory}
+    // limit shape carries no ephemeral field, so there is nothing to override.
+    "ephemeral-storage": SESSION_AGENT_EPHEMERAL_REQUEST,
   };
   const resourceLimits: ResourceQuantities = {
     ...(SESSION_AGENT_CPU_LIMIT ? { cpu: SESSION_AGENT_CPU_LIMIT } : {}),
     memory: SESSION_AGENT_MEM_LIMIT,
+    // Per-pod disk ceiling: a session over this is evicted alone, not the node.
+    "ephemeral-storage": SESSION_AGENT_EPHEMERAL_LIMIT,
   };
   if (limits?.cpu) {
     Object.assign(resourceLimits, { cpu: limits.cpu });

@@ -11,6 +11,8 @@ import {
   JANITOR_TRASH_DIR,
   JANITOR_WORKSPACES_MOUNT,
   SESSION_AGENT_CPU_REQUEST,
+  SESSION_AGENT_EPHEMERAL_LIMIT,
+  SESSION_AGENT_EPHEMERAL_REQUEST,
   SESSION_AGENT_MEM_LIMIT,
   SESSION_AGENT_MEM_REQUEST,
   buildSessionPodSpec,
@@ -78,6 +80,17 @@ describe("k8s spec builders", () => {
     expect(container.resources?.limits?.memory).toBe("4Gi");
     // no cpu limit by default (SESSION_AGENT_CPU_LIMIT unset → burstable cpu).
     expect(container.resources?.limits?.cpu).toBeUndefined();
+    // ephemeral-storage REQUEST kept modest (disk accounting floor so the
+    // scheduler stops overcommitting the node's local disk → DiskPressure
+    // cascade) and a generous per-pod LIMIT (a runaway is evicted alone).
+    expect(container.resources?.requests?.["ephemeral-storage"]).toBe(
+      SESSION_AGENT_EPHEMERAL_REQUEST,
+    );
+    expect(container.resources?.requests?.["ephemeral-storage"]).toBe("1Gi");
+    expect(container.resources?.limits?.["ephemeral-storage"]).toBe(
+      SESSION_AGENT_EPHEMERAL_LIMIT,
+    );
+    expect(container.resources?.limits?.["ephemeral-storage"]).toBe("8Gi");
   });
 
   it("honours SESSION_AGENT_* env overrides for the resources block", async () => {
@@ -87,16 +100,28 @@ describe("k8s spec builders", () => {
     vi.stubEnv("SESSION_AGENT_MEM_LIMIT", "8Gi");
     vi.stubEnv("SESSION_AGENT_CPU_REQUEST", "500m");
     vi.stubEnv("SESSION_AGENT_CPU_LIMIT", "2");
+    vi.stubEnv("SESSION_AGENT_EPHEMERAL_REQUEST", "2Gi");
+    vi.stubEnv("SESSION_AGENT_EPHEMERAL_LIMIT", "16Gi");
     vi.resetModules();
     const mod = await import("./spec.js");
     expect(mod.SESSION_AGENT_MEM_REQUEST).toBe("2Gi");
     expect(mod.SESSION_AGENT_MEM_LIMIT).toBe("8Gi");
     expect(mod.SESSION_AGENT_CPU_REQUEST).toBe("500m");
     expect(mod.SESSION_AGENT_CPU_LIMIT).toBe("2");
+    expect(mod.SESSION_AGENT_EPHEMERAL_REQUEST).toBe("2Gi");
+    expect(mod.SESSION_AGENT_EPHEMERAL_LIMIT).toBe("16Gi");
     const container = mod.buildSessionPodSpec(baseDescriptor).spec.containers[0]!;
-    expect(container.resources?.requests).toEqual({ cpu: "500m", memory: "2Gi" });
+    expect(container.resources?.requests).toEqual({
+      cpu: "500m",
+      memory: "2Gi",
+      "ephemeral-storage": "2Gi",
+    });
     // CPU limit now present because SESSION_AGENT_CPU_LIMIT was set.
-    expect(container.resources?.limits).toEqual({ cpu: "2", memory: "8Gi" });
+    expect(container.resources?.limits).toEqual({
+      cpu: "2",
+      memory: "8Gi",
+      "ephemeral-storage": "16Gi",
+    });
   });
 
   it("respects descriptor resource limits and override options", () => {
