@@ -5,6 +5,28 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.9 — 2026-06-11
+
+Headline: **credentials stop silently logging out in pods** — reliability
+slice 2 (additive, the existing push/hash path is byte-identical).
+
+- **npm + docker coverage**: `~/.npmrc` and `~/.docker/config.json` join
+  `TOOL_AUTH` so their (hours-lived) tokens ride the existing bundling instead
+  of expiring unnoticed.
+- **Pod-side 401 probe → push-on-fail**: each `creds refresh --watch` pass runs
+  cheap health probes in live pods (`gh auth status`, `npm whoami`, docker
+  config check) and, when a covered tool reports unhealthy, re-pushes that
+  tool's bundle via the **exact existing** push — an extra trigger, not a new
+  overwrite path. Catches everything the local-change push missed.
+- **Watcher heartbeat advisory**: the watch loop stamps a heartbeat each pass;
+  `remote ls` / `jobs ls` show a loud warning when it's stale (>2× interval) —
+  "the watcher wasn't running" is no longer silent.
+- **claude token-expiry warning**: parses the local OAuth `expiresAt`; warns
+  (detection only) when it's within 15 min / expired, "run claude locally to
+  refresh".
+- Deferred behind dry-run (can be *worse* than today): the rotation-race
+  newest-wins/pull-back and claude auto-refresh. 587 cli tests.
+
 ## v0.5.8 — 2026-06-11
 
 Headline: **rate-limited jobs auto-recover instead of stalling** — reliability
