@@ -5,6 +5,25 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.12 — 2026-06-12
+
+Headline: **remote session UX & disk-eviction fixes** — tabs follow the agent,
+no more ghost local duplicates, and session pods get an ephemeral-storage floor.
+
+- **Tab/window name follows the agent** (bug: tabs showed a static launcher
+  name): tmux `set-titles on` + `set-titles-string #{?pane_title,#{pane_title},
+  #{window_name}}` so the agent's live OSC title (claude's conversation, codex's
+  cwd) reaches the GNOME tab — it was OFF by default, trapping the title inside
+  tmux. `allow-rename on`; `automatic-rename` left at its default (never touched).
+- **No more ghost local re-population** (bug: a session moved to remote kept
+  reappearing as a local tmux): `dropRemoteBackedLocals` drops a discovered
+  local session whose project identity is already owned by a REMOTE tab.
+- **Session pods get an ephemeral-storage request (1Gi) + limit (8Gi)**
+  (env-overridable) — a node hit DiskPressure and cascade-evicted every session
+  because none requested disk; now the scheduler accounts for it and a runaway
+  session is capped/evicted alone. Pairs with the memory request/limit from
+  v0.5.11. Needs a control-plane redeploy to apply to new pods. 646 cli tests.
+
 ## v0.5.11 — 2026-06-12
 
 Headline: **session pods stop OOM-killing** — the exit-137 evictions were a
