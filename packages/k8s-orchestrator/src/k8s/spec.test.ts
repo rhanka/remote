@@ -67,12 +67,13 @@ describe("k8s spec builders", () => {
   it("gives the session-agent a baseline memory request+limit (Burstable, anti-eviction)", () => {
     const pod = buildSessionPodSpec(baseDescriptor);
     const container = pod.spec.containers[0]!;
-    // memory REQUEST is the eviction-protection knob (no longer BestEffort).
+    // memory REQUEST kept LOW (dense packing, no node multiplication); just
+    // enough to leave BestEffort. The CEILING is what was too low (OOMKill).
     expect(container.resources?.requests?.memory).toBe(SESSION_AGENT_MEM_REQUEST);
-    expect(container.resources?.requests?.memory).toBe("1Gi");
+    expect(container.resources?.requests?.memory).toBe("256Mi");
     expect(container.resources?.requests?.cpu).toBe(SESSION_AGENT_CPU_REQUEST);
-    expect(container.resources?.requests?.cpu).toBe("250m");
-    // memory LIMIT caps a runaway claude/codex.
+    expect(container.resources?.requests?.cpu).toBe("100m");
+    // memory LIMIT generous so claude/codex can burst (2–6Gi) without OOMKill.
     expect(container.resources?.limits?.memory).toBe(SESSION_AGENT_MEM_LIMIT);
     expect(container.resources?.limits?.memory).toBe("4Gi");
     // no cpu limit by default (SESSION_AGENT_CPU_LIMIT unset → burstable cpu).

@@ -5,6 +5,18 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.11 — 2026-06-12
+
+Headline: **session pods stop OOM-killing** — the exit-137 evictions were a
+too-low memory *limit*, not a too-low request; decouple them.
+
+- Session-agent container gets a **low memory request (256Mi)** + a **generous
+  limit (4Gi)** — so many sessions pack onto one node (small reservation, no
+  node multiplication) while claude/codex can burst to 2–6Gi without OOMKill.
+  CPU request 100m, no cpu limit (burstable). All four env-overridable
+  (`SESSION_AGENT_MEM_REQUEST` / `MEM_LIMIT` / `CPU_REQUEST` / `CPU_LIMIT`).
+- Needs a control-plane redeploy to take effect on newly-created session pods.
+
 ## v0.5.10 — 2026-06-11
 
 Headline: **watch loops stop hammering dead pods & spamming** — fixes two

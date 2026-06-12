@@ -155,17 +155,22 @@ const AUTH_STAGING_DIR = "/run/auth-bundle";
 // (they can spike). All four are env-overridable (read at module load, same
 // `process.env.X ?? default` shape the rest of the repo uses) so node sizing can
 // be tuned without a rebuild; SESSION_AGENT_CPU_LIMIT is optional (unset = no
-// cpu limit, so a busy session can burst above its 250m request). Mirrors the
+// cpu limit, so a busy session can burst above its request). Mirrors the
 // browser sidecar's inline requests/limits block.
-/** Memory REQUEST — the eviction-protection knob (Burstable, not BestEffort). */
+//
+// Intent (product owner): keep the RESERVATION (request) small so many sessions
+// pack onto one node (no node multiplication), but the CEILING (limit) generous
+// so claude/codex can use 2–6Gi without OOMKilling (exit 137 was a too-low
+// limit, NOT a too-low request). Hence a LOW request + HIGH limit (decoupled).
+/** Memory REQUEST — kept LOW (dense packing, ≤512Mi); just enough to leave BestEffort. */
 export const SESSION_AGENT_MEM_REQUEST =
-  process.env.SESSION_AGENT_MEM_REQUEST ?? "1Gi";
-/** Memory LIMIT — hard cap (claude/codex can spike). */
+  process.env.SESSION_AGENT_MEM_REQUEST ?? "256Mi";
+/** Memory LIMIT — generous ceiling so a session can burst (no OOMKill). */
 export const SESSION_AGENT_MEM_LIMIT =
   process.env.SESSION_AGENT_MEM_LIMIT ?? "4Gi";
-/** CPU REQUEST — scheduling floor; cpu is compressible so it is not about eviction. */
+/** CPU REQUEST — small scheduling floor (compressible; not an eviction factor). */
 export const SESSION_AGENT_CPU_REQUEST =
-  process.env.SESSION_AGENT_CPU_REQUEST ?? "250m";
+  process.env.SESSION_AGENT_CPU_REQUEST ?? "100m";
 /** Optional CPU LIMIT. Unset = no cpu cap (let a busy session burst). */
 export const SESSION_AGENT_CPU_LIMIT = process.env.SESSION_AGENT_CPU_LIMIT;
 
