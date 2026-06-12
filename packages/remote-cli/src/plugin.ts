@@ -23,6 +23,21 @@
  * packages/session-agent/Dockerfile (left untouched here): until then a Pod
  * restart loses globally-installed plugins and `remote plugin sync` must be
  * re-run.
+ *
+ * DRIFT (remote supervise slice 3, ADDITIVE): a desired-state manifest
+ * (plugin-manifest.ts) + a sidecar pushed to each Pod (~/.remote-manifest.json /
+ * ~/.remote-manifest.sha256, gated EXACTLY like CREDS_HASH_FILE), a read-only
+ * `plugin sync --check` drift report, and a watch-pass reconcile that re-runs
+ * the EXISTING buildPodSyncScript on a hash mismatch (an extra TRIGGER, not a
+ * new push path). The plain `plugin add`/`plugin sync` push is UNCHANGED.
+ *
+ * TODO(slice 4 — converge-on-session-start, the BIGGEST remaining drift source):
+ * a freshly (re)created Pod boots with NO plugins until the next sync/watch pass,
+ * so its CLI launches WITHOUT track/h2a/etc. Closing that needs the session-agent
+ * startup path (packages/session-agent, the pane that launches `<cli>`) to run
+ * the sync + write the manifest sidecar BEFORE exec'ing the CLI — OUT OF SCOPE
+ * here (do not touch session-agent this slice). The watch-pass reconcile is the
+ * interim safety net.
  */
 
 import { spawnSync } from "node:child_process";
@@ -40,6 +55,19 @@ import {
   type PluginMcp,
   type TunnelConfig,
 } from "./config.js";
+import {
+  canonicalManifestJson,
+  checkExitCode,
+  diffManifest,
+  isDrift,
+  manifestHash,
+  parseNpmLsVersions,
+  parseRegisteredMcpServers,
+  renderManifest,
+  type DriftRow,
+  type PluginManifest,
+  type PodPluginState,
+} from "./plugin-manifest.js";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -543,22 +571,18 @@ function kubeEnv(tunnel: TunnelConfig): NodeJS.ProcessEnv {
 }
 
 /** Exec a bash -lc script in the session-agent container. Throws on non-zero. */
-function execPod(tunnel: TunnelConfig, pod: string, script: string): string {
+function execPod(
+  tunnel: TunnelConfig,
+  pod: string,
+  script: string,
+  input?: string,
+): string {
+  const base = ["-n", tunnel.namespace, "exec"];
+  if (input !== undefined) base.push("-i");
   const r = spawnSync(
     "kubectl",
-    [
-      "-n",
-      tunnel.namespace,
-      "exec",
-      pod,
-      "-c",
-      "session-agent",
-      "--",
-      "bash",
-      "-lc",
-      script,
-    ],
-    { encoding: "utf8", env: kubeEnv(tunnel) },
+    [...base, pod, "-c", "session-agent", "--", "bash", "-lc", script],
+    { encoding: "utf8", env: kubeEnv(tunnel), ...(input !== undefined ? { input } : {}) },
   );
   if (r.status !== 0) {
     throw new Error(
@@ -566,6 +590,236 @@ function execPod(tunnel: TunnelConfig, pod: string, script: string): string {
     );
   }
   return r.stdout;
+}
+
+/**
+ * Exec an ARGV directly in the session-agent container — NO `bash -lc`
+ * string-concat (mirrors soft-refresh.ts execPodArgv, the slice-2 argv-safe pod
+ * exec). NEVER throws: a non-zero exit is the SIGNAL (e.g. `npm ls -g` exits
+ * non-zero on extraneous/missing deps but still prints the JSON we parse).
+ * Returns the exit code + stdout. Used by the read-only drift probe.
+ */
+function execPodArgv(
+  tunnel: TunnelConfig,
+  pod: string,
+  argv: ReadonlyArray<string>,
+): { status: number; stdout: string } {
+  const r = spawnSync(
+    "kubectl",
+    ["-n", tunnel.namespace, "exec", pod, "-c", "session-agent", "--", ...argv],
+    { encoding: "utf8", env: kubeEnv(tunnel) },
+  );
+  return { status: r.status ?? 1, stdout: r.stdout ?? "" };
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3 — desired-state manifest sidecar + drift probe + reconcile (ADDITIVE).
+//
+// A NEW sidecar artifact, gated EXACTLY like CREDS_HASH_FILE (skip the write
+// when the Pod's recorded hash already matches). The reconcile TRIGGER re-runs
+// the EXISTING buildPodSyncScript — it is NOT a new push path. The probe is
+// read-only (argv-safe execPodArgv). The plain `plugin sync`/`plugin add` push
+// below is untouched.
+// ---------------------------------------------------------------------------
+
+/** HOME-relative manifest sidecar in the Pod (the desired-state JSON). */
+export const MANIFEST_FILE = ".remote-manifest.json";
+/** HOME-relative file recording the sha256 of the last pushed manifest. */
+export const MANIFEST_HASH_FILE = ".remote-manifest.sha256";
+
+/** Render the desired-state manifest for the configured plugins (no tracked skills today). */
+export function desiredManifest(): PluginManifest {
+  return renderManifest(getPlugins());
+}
+
+/**
+ * Push the desired-state manifest into a Pod as ~/.remote-manifest.json +
+ * ~/.remote-manifest.sha256, GATED exactly like CREDS_HASH_FILE: read the Pod's
+ * recorded hash first and SKIP the write when it already matches (so a steady
+ * Pod is a single `cat`, no churn). Mirrors soft-refresh's hash-sidecar pattern.
+ * Returns whether the sidecar was (re)written. Best-effort: caller logs errors.
+ */
+export function pushManifestSidecar(
+  tunnel: TunnelConfig,
+  pod: string,
+  manifest: PluginManifest,
+): { wrote: boolean; hash: string } {
+  const hash = manifestHash(manifest);
+  let podHash = "";
+  try {
+    podHash = execPod(
+      tunnel,
+      pod,
+      `cat "$HOME/${MANIFEST_HASH_FILE}" 2>/dev/null || true`,
+    ).trim();
+  } catch {
+    // Pod state unreadable — fall through and (re)write; the write surfaces errors.
+  }
+  if (podHash === hash) return { wrote: false, hash };
+  // Write the canonical JSON via stdin (argv-safe: no manifest content in the
+  // command string) then record the hash. SAFE_PKG/SAFE_NAME bound the JSON to
+  // tame chars; it still rides stdin so nothing is shell-interpolated.
+  execPod(
+    tunnel,
+    pod,
+    `cat > "$HOME/${MANIFEST_FILE}"`,
+    canonicalManifestJson(manifest),
+  );
+  execPod(tunnel, pod, `printf %s '${hash}' > "$HOME/${MANIFEST_HASH_FILE}"`);
+  return { wrote: true, hash };
+}
+
+/** The Pod's recorded manifest hash, or "" when absent/unreadable. */
+export function readPodManifestHash(tunnel: TunnelConfig, pod: string): string {
+  try {
+    return execPod(
+      tunnel,
+      pod,
+      `cat "$HOME/${MANIFEST_HASH_FILE}" 2>/dev/null || true`,
+    ).trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Injectable seams so the pod-state probe is unit-testable WITHOUT kubectl.
+ * `npmLs` runs the argv-safe `npm ls -g --json` and returns its stdout;
+ * `readMcpConfigs` returns the raw MCP config blobs the existing sync writes.
+ */
+export type PodProbeDeps = {
+  /** Run `npm ls -g --json <pkgs…>` in the Pod, return stdout (may be non-zero exit). */
+  npmLs: (pkgs: ReadonlyArray<string>) => string;
+  /** Read the Pod's MCP config blobs: Claude-style JSON bodies + codex TOML. */
+  readMcpConfigs: () => { json: string[]; toml: string };
+};
+
+/**
+ * Probe ONE Pod's actual plugin/MCP state into a `PodPluginState` (pure shape):
+ * installed versions for the desired pkgs (`npm ls -g --json` → parsed) + the
+ * registered MCP server names (claude/agy JSON + codex TOML → parsed). PURE-ish:
+ * all IO is injected via `deps` (tests never shell out). Exported for tests.
+ */
+export function probePodPluginState(
+  desiredPkgs: ReadonlyArray<string>,
+  deps: PodProbeDeps,
+): PodPluginState {
+  const pluginVersions = parseNpmLsVersions(deps.npmLs(desiredPkgs), desiredPkgs);
+  const { json, toml } = deps.readMcpConfigs();
+  const mcpRegistered = parseRegisteredMcpServers({ json, toml });
+  return { pluginVersions, mcpRegistered };
+}
+
+/** Production wiring of `PodProbeDeps` against a live Pod (real kubectl exec). */
+function podProbeDeps(tunnel: TunnelConfig, pod: string): PodProbeDeps {
+  return {
+    npmLs: (pkgs) =>
+      // `npm ls -g --json <pkg…>`: argv-safe (pkgs are SAFE_PKG-validated by the
+      // caller). npm exits non-zero on extraneous deps but still prints the JSON.
+      execPodArgv(tunnel, pod, ["npm", "ls", "-g", "--json", "--depth=0", ...pkgs])
+        .stdout,
+    readMcpConfigs: () => {
+      // One bash read of the three config bodies, each delimited by a marker so
+      // we can split them back apart. Static markers — no untrusted interpolation.
+      const out = execPod(
+        tunnel,
+        pod,
+        [
+          'echo "===CLAUDE==="',
+          'cat "$HOME/.claude.json" 2>/dev/null || true',
+          'echo "===AGY==="',
+          'cat "$HOME/.gemini/config/mcp_config.json" 2>/dev/null || true',
+          'echo "===CODEX==="',
+          'cat "$HOME/.codex/config.toml" 2>/dev/null || true',
+        ].join("; "),
+      );
+      const claude = sliceBetween(out, "===CLAUDE===", "===AGY===");
+      const agy = sliceBetween(out, "===AGY===", "===CODEX===");
+      const toml = sliceBetween(out, "===CODEX===", undefined);
+      return { json: [claude, agy], toml };
+    },
+  };
+}
+
+/** Extract the text between two markers (start-exclusive, end-exclusive). */
+function sliceBetween(text: string, start: string, end: string | undefined): string {
+  const s = text.indexOf(start);
+  if (s === -1) return "";
+  const from = s + start.length;
+  const e = end ? text.indexOf(end, from) : -1;
+  return (e === -1 ? text.slice(from) : text.slice(from, e)).replace(/^\n/, "").trim();
+}
+
+/**
+ * Watch-pass RECONCILE for ONE live Pod (an EXTRA trigger, NOT a new push path):
+ * compare the local desired-state hash with the Pod's recorded
+ * ~/.remote-manifest.sha256 (one `cat`); on a MISMATCH, re-run the EXISTING
+ * buildPodSyncScript for every plugin (the same mechanism `plugin sync` uses)
+ * and re-push the manifest sidecar. A match is a zero-work no-op. Mirrors the
+ * slice-2 probe→push advisory structure. Best-effort: a per-plugin failure is
+ * logged; the others proceed. Returns what happened. Used by the supervise pass.
+ */
+export function reconcilePodManifest(
+  tunnel: TunnelConfig,
+  pod: string,
+  profile: string,
+  manifest: PluginManifest,
+  plugins: ReadonlyArray<PluginEntry>,
+  stderr: { write: (s: string) => unknown } = process.stderr,
+): { reconciled: boolean; localHash: string; podHash: string; failures: number } {
+  const localHash = manifestHash(manifest);
+  const podHash = readPodManifestHash(tunnel, pod);
+  if (podHash === localHash) {
+    return { reconciled: false, localHash, podHash, failures: 0 };
+  }
+  // Drift detected (hash only — never a secret). Re-run the EXISTING sync script.
+  stderr.write(
+    `[remote] ${pod}: plugin/MCP drift (manifest ${podHash ? "mismatch" : "absent"}) — reconciling via plugin sync\n`,
+  );
+  let failures = 0;
+  for (const plugin of plugins) {
+    try {
+      const out = execPod(tunnel, pod, buildPodSyncScript(plugin, profile));
+      for (const line of out.trim().split("\n").filter(Boolean)) {
+        stderr.write(`    ${line}\n`);
+      }
+    } catch (error) {
+      failures++;
+      stderr.write(
+        `    ${plugin.pkg}@${plugin.version} reconcile FAILED: ${String(error).slice(0, 200)}\n`,
+      );
+    }
+  }
+  // Re-push the sidecar so the Pod's recorded hash converges to local.
+  try {
+    pushManifestSidecar(tunnel, pod, manifest);
+  } catch (error) {
+    stderr.write(
+      `    manifest sidecar re-push failed: ${String(error).slice(0, 120)}\n`,
+    );
+  }
+  return { reconciled: failures === 0, localHash, podHash, failures };
+}
+
+/**
+ * Production wiring used by the supervise/watch pass: reconcile manifest drift
+ * for ONE session via the configured tunnel. Thin — the decision + the reused
+ * buildPodSyncScript live in `reconcilePodManifest`. No-op (and no error) when
+ * no plugins are configured. Best-effort; never throws into the caller.
+ */
+export function reconcileSessionPlugins(
+  sessionId: string,
+  profile: string,
+  stderr: NodeJS.WriteStream = process.stderr,
+): { reconciled: boolean } {
+  const plugins = getPlugins();
+  if (plugins.length === 0) return { reconciled: false };
+  const tunnel = getTunnel();
+  if (!tunnel) return { reconciled: false };
+  const pod = `session-${sessionId}`;
+  const manifest = renderManifest(plugins);
+  const r = reconcilePodManifest(tunnel, pod, profile, manifest, plugins, stderr);
+  return { reconciled: r.reconciled };
 }
 
 // ---------------------------------------------------------------------------
@@ -655,8 +909,21 @@ export function pluginAddInstaller(
   return entry;
 }
 
-/** `remote plugin ls` — pkg / version / MCPs / where (local ok, remote ?). */
-export function pluginLs(stdout: NodeJS.WriteStream = process.stdout): void {
+/**
+ * `remote plugin ls` — pkg / version / MCPs / where (local ok/missing, remote).
+ *
+ * The REMOTE column is now REAL per-Pod drift status (slice 3), not the old
+ * guess-`?`: when a `url` is passed (the command is connected to the control-
+ * plane) we probe each live Pod via the same drift mechanism `--check` uses and
+ * summarize each plugin's worst per-Pod status across all Pods
+ * (ok / version-drift / missing). Without a url (offline) we still print `?`
+ * with the documented hint — the `?` only remains when we genuinely can't reach
+ * the cluster, never as guesswork when we can.
+ */
+export async function pluginLs(
+  stdout: NodeJS.WriteStream = process.stdout,
+  url?: string,
+): Promise<void> {
   const plugins = getPlugins();
   if (plugins.length === 0) {
     stdout.write("[remote] no plugins configured (remote plugin add <npmPkg>)\n");
@@ -668,6 +935,32 @@ export function pluginLs(stdout: NodeJS.WriteStream = process.stdout): void {
   } catch {
     root = undefined;
   }
+
+  // REAL per-Pod status (replaces the `?` guess) when connected: pkg -> worst
+  // status across all live Pods. Best-effort — any probe failure falls back to `?`.
+  let remoteByPkg: Map<string, string> | undefined;
+  const tunnel = getTunnel();
+  if (url && tunnel) {
+    try {
+      const manifest = renderManifest(plugins);
+      const desiredPkgs = manifest.plugins.map((p) => p.pkg);
+      const sessions = await listRemoteSessions(url);
+      const worst = new Map<string, string>();
+      for (const session of sessions) {
+        const pod = `session-${session.id}`;
+        const state = probePodPluginState(desiredPkgs, podProbeDeps(tunnel, pod));
+        for (const r of diffManifest(manifest, pod, state)) {
+          if (!r.item.startsWith("plugin:")) continue;
+          const pkg = r.item.slice("plugin:".length);
+          worst.set(pkg, worseStatus(worst.get(pkg), r.status));
+        }
+      }
+      if (sessions.length > 0) remoteByPkg = worst;
+    } catch {
+      remoteByPkg = undefined; // unreachable cluster → fall back to `?`
+    }
+  }
+
   const w = (s: string, n: number) => s.padEnd(n);
   stdout.write(
     `${w("PKG", 28)} ${w("VERSION", 9)} ${w("MCPS", 20)} ${w("LOCAL", 8)} REMOTE\n`,
@@ -676,13 +969,28 @@ export function pluginLs(stdout: NodeJS.WriteStream = process.stdout): void {
     const local =
       root && existsSync(join(root, p.pkg, "package.json")) ? "ok" : "missing";
     const mcps = p.mcp.map((m) => m.name).join(",") || "-";
+    const remote = remoteByPkg ? (remoteByPkg.get(p.pkg) ?? "ok") : "?";
     stdout.write(
-      `${w(p.pkg, 28)} ${w(p.version, 9)} ${w(mcps, 20)} ${w(local, 8)} ?\n`,
+      `${w(p.pkg, 28)} ${w(p.version, 9)} ${w(mcps, 20)} ${w(local, 8)} ${remote}\n`,
     );
   }
   stdout.write(
-    "\n(REMOTE \"?\": per-Pod state is not tracked — `remote plugin sync` installs/refreshes every live session.)\n",
+    remoteByPkg
+      ? "\n(REMOTE: real per-Pod status, worst across live sessions — `remote plugin sync --check` for the full per-Pod table.)\n"
+      : "\n(REMOTE \"?\": not connected to the control-plane — `remote plugin sync --check` (with the tunnel up) shows real per-Pod status.)\n",
   );
+}
+
+/** Severity-rank two drift statuses; returns the worse (missing > version-drift > ok). */
+function worseStatus(a: string | undefined, b: string): string {
+  const rank: Record<string, number> = {
+    ok: 0,
+    "mcp-unregistered": 1,
+    "version-drift": 2,
+    missing: 3,
+  };
+  if (a === undefined) return b;
+  return (rank[b] ?? 0) > (rank[a] ?? 0) ? b : a;
 }
 
 /**
@@ -710,6 +1018,7 @@ export async function pluginSync(
     stderr.write("[remote] no live remote sessions to sync\n");
     return;
   }
+  const manifest = renderManifest(plugins);
   let failures = 0;
   for (const session of sessions) {
     const pod = `session-${session.id}`;
@@ -727,9 +1036,97 @@ export async function pluginSync(
         );
       }
     }
+    // Additive: record the desired-state sidecar so drift detection (--check /
+    // the watch pass) has a hash to compare against. Best-effort — never fails
+    // the sync (a sidecar write error does not undo the converged plugins).
+    try {
+      pushManifestSidecar(tunnel, pod, manifest);
+    } catch (error) {
+      stderr.write(
+        `    manifest sidecar push skipped: ${String(error).slice(0, 120)}\n`,
+      );
+    }
   }
   stderr.write(
     `[remote] plugin sync done: ${sessions.length} session(s), ${plugins.length} plugin(s)${failures > 0 ? `, ${failures} failure(s)` : ""}\n`,
   );
   if (failures > 0) process.exitCode = 1;
+}
+
+/**
+ * `remote plugin sync --check` — a READ-ONLY drift report (converges NOTHING).
+ * For each live Pod it probes the actual installed state (npm ls -g --json for
+ * the desired pkgs + the registered MCP server names from the config files the
+ * existing sync writes) via the argv-safe pod exec, then the pure
+ * `diffManifest` rows it: ok / version-drift / missing / mcp-unregistered.
+ * Prints a table and EXITS 1 when ANY row is drift (via process.exitCode). This
+ * REPLACES the `plugin ls` `REMOTE ?` guesswork with REAL per-Pod status. Pure
+ * decisions live in plugin-manifest.ts; this is the thin probe + printer.
+ */
+export async function pluginSyncCheck(
+  url: string,
+  stdout: NodeJS.WriteStream = process.stdout,
+  stderr: NodeJS.WriteStream = process.stderr,
+): Promise<DriftRow[]> {
+  const plugins = getPlugins();
+  if (plugins.length === 0) {
+    stderr.write("[remote] no plugins configured (remote plugin add <npmPkg>)\n");
+    return [];
+  }
+  const tunnel = getTunnel();
+  if (!tunnel) {
+    throw new Error("plugin sync --check needs a tunnel configured (remote config tunnel …)");
+  }
+  const sessions = await listRemoteSessions(url);
+  if (sessions.length === 0) {
+    stderr.write("[remote] no live remote sessions to check\n");
+    return [];
+  }
+  const manifest = renderManifest(plugins);
+  const desiredPkgs = manifest.plugins.map((p) => p.pkg);
+  const allRows: DriftRow[] = [];
+  for (const session of sessions) {
+    const pod = `session-${session.id}`;
+    try {
+      const state = probePodPluginState(desiredPkgs, podProbeDeps(tunnel, pod));
+      allRows.push(...diffManifest(manifest, pod, state));
+    } catch (error) {
+      stderr.write(
+        `[remote] ${pod}: drift probe failed: ${String(error).slice(0, 200)}\n`,
+      );
+      // A probe failure is itself drift we can't clear — surface every desired
+      // item as a probe-failure row (status missing/unregistered conservatively).
+      for (const p of manifest.plugins) {
+        allRows.push({
+          pod,
+          item: `plugin:${p.pkg}`,
+          status: "missing",
+          detail: "probe failed",
+        });
+      }
+    }
+  }
+  printDriftTable(allRows, stdout);
+  const code = checkExitCode(allRows);
+  if (code !== 0) process.exitCode = code;
+  return allRows;
+}
+
+/** Render the drift rows as an aligned POD / ITEM / STATUS / DETAIL table. */
+function printDriftTable(rows: ReadonlyArray<DriftRow>, stdout: NodeJS.WriteStream): void {
+  const w = (s: string, n: number) => s.padEnd(n);
+  stdout.write(
+    `${w("POD", 22)} ${w("ITEM", 30)} ${w("STATUS", 18)} DETAIL\n`,
+  );
+  for (const r of rows) {
+    stdout.write(
+      `${w(r.pod, 22)} ${w(r.item, 30)} ${w(r.status, 18)} ${r.detail}\n`,
+    );
+  }
+  const drifted = rows.filter(isDrift).length;
+  stdout.write(
+    drifted === 0
+      ? `\n[remote] no drift — every live Pod matches the desired manifest.\n`
+      : `\n[remote] ${drifted} drift row(s) — run \`remote plugin sync\` to converge (exit 1).\n`,
+  );
 }

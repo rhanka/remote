@@ -214,7 +214,14 @@ import {
   type OnConflict,
 } from "./session-restore.js";
 import { run } from "./run.js";
-import { pluginAdd, pluginAddInstaller, pluginLs, pluginSync } from "./plugin.js";
+import {
+  pluginAdd,
+  pluginAddInstaller,
+  pluginLs,
+  pluginSync,
+  pluginSyncCheck,
+  reconcileSessionPlugins,
+} from "./plugin.js";
 import { syncSkills } from "./skills-sync.js";
 import { smokeRemoteProfile } from "./smoke.js";
 import { migrateForward, migrateBack } from "./migrate.js";
@@ -276,6 +283,8 @@ export {
   pluginAddInstaller,
   pluginLs,
   pluginSync,
+  pluginSyncCheck,
+  reconcileSessionPlugins,
   parseMcpSpec,
   parseMcpSpecs,
   detectMcpBins,
@@ -807,6 +816,16 @@ export async function softRefreshAllSessions(
           `[remote]   ${s.id}: tool health probe skipped: ${String(probeError).slice(0, 120)}\n`,
         );
       }
+      // Slice 3: ADDITIONAL trigger — compare the local desired-state manifest
+      // hash with the Pod's recorded sidecar; on drift, re-run the EXISTING
+      // buildPodSyncScript (an extra trigger, not a new push). Best-effort.
+      try {
+        reconcileSessionPlugins(s.id, profile);
+      } catch (driftError) {
+        process.stderr.write(
+          `[remote]   ${s.id}: plugin drift reconcile skipped: ${String(driftError).slice(0, 120)}\n`,
+        );
+      }
       outcomes.push({
         sessionId: s.id,
         profile,
@@ -874,6 +893,15 @@ async function softRefreshOneGated(
     } catch (probeError) {
       process.stderr.write(
         `[remote]   ${sessionId}: tool health probe skipped: ${String(probeError).slice(0, 120)}\n`,
+      );
+    }
+    // Slice 3: ADDITIONAL trigger — plugin/MCP drift reconcile (manifest hash
+    // mismatch → re-run the EXISTING buildPodSyncScript). Best-effort.
+    try {
+      reconcileSessionPlugins(sessionId, profile);
+    } catch (driftError) {
+      process.stderr.write(
+        `[remote]   ${sessionId}: plugin drift reconcile skipped: ${String(driftError).slice(0, 120)}\n`,
       );
     }
     process.stderr.write(
@@ -2883,21 +2911,42 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   pluginCommand
     .command("ls")
     .description(
-      "List configured plugins: pkg, version, MCP servers, and where they are installed (local ok / remote ?)",
+      "List configured plugins: pkg, version, MCP servers, and where they are installed (local ok/missing; REMOTE = real per-Pod drift status when connected, else ?)",
     )
-    .action(() => {
-      pluginLs();
+    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option("--no-remote-check", "skip the live per-Pod drift probe (offline; REMOTE shows ?)")
+    .action(async (opts: { remote?: string; remoteCheck?: boolean }) => {
+      // Real REMOTE status needs a connected control-plane + tunnel; offline it
+      // falls back to `?`. --no-remote-check forces the offline/fast path.
+      if (opts.remoteCheck === false) {
+        await pluginLs();
+        return;
+      }
+      let url: string | undefined;
+      try {
+        url = getConfiguredRemote(opts.remote);
+        await ensureConnected(url);
+      } catch {
+        url = undefined; // not configured / can't connect → `?` fallback
+      }
+      await pluginLs(process.stdout, url);
     });
 
   pluginCommand
     .command("sync")
     .description(
-      "Install every configured plugin into each live REMOTE session Pod (kubectl exec -> npm i -g) and register its MCP servers for the Pod's profile (claude/codex; others: TODO). Needs the configured tunnel.",
+      "Install every configured plugin into each live REMOTE session Pod (kubectl exec -> npm i -g) and register its MCP servers for the Pod's profile (claude/codex; others: TODO). " +
+        "--check: do NOT converge — print a per-Pod drift report (ok/version-drift/missing/mcp-unregistered) and exit 1 on any drift. Needs the configured tunnel.",
     )
     .option("--remote <url>", "control-plane URL (defaults to configured remote)")
-    .action(async (opts: { remote?: string }) => {
+    .option("--check", "read-only drift report (no convergence); exit 1 on any drift")
+    .action(async (opts: { remote?: string; check?: boolean }) => {
       const url = getConfiguredRemote(opts.remote);
       await ensureConnected(url);
+      if (opts.check) {
+        await pluginSyncCheck(url);
+        return;
+      }
       await pluginSync(url);
     });
 
