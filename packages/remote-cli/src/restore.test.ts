@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   discoverSessions,
+  dropRemoteBackedLocals,
   groupSessions,
   mergeDiscovered,
   readLastLayout,
   registrySessions,
+  sessionIdentitySlug,
   tabCommand,
   writeLastLayout,
   type DiscoveredSession,
@@ -136,6 +138,63 @@ describe("registry-first discovery", () => {
     const tabs = windows.flatMap((w) => w.tabs);
     expect(tabs.find((t) => t.label === "projA")?.origin).toBe("registry");
     expect(tabs.find((t) => t.label === "projB")?.origin).toBe("scan");
+  });
+});
+
+describe("dropRemoteBackedLocals (bug #3 — stop ghost local repop of remote sessions)", () => {
+  const local = (
+    project: string,
+    over: Partial<DiscoveredSession> = {},
+  ): DiscoveredSession => ({
+    project,
+    mtimeMs: Date.now(),
+    tool: "claude",
+    sid: `sid-${project}`,
+    cwd: `/home/u/src/${project}`,
+    ...over,
+  });
+
+  it("drops a local whose project is already a REMOTE tab (the ghost duplicate)", () => {
+    const locals = [local("surch"), local("dataviz")];
+    const remoteTabs = [{ label: "surch" }];
+    const { kept, dropped } = dropRemoteBackedLocals(locals, remoteTabs);
+    expect(kept.map((s) => s.project)).toEqual(["dataviz"]);
+    expect(dropped.map((s) => s.project)).toEqual(["surch"]);
+  });
+
+  it("matches by identity slug despite case/separator differences in the label", () => {
+    // local registry label "sentropic-remote" vs remote displayName "Sentropic Remote".
+    const locals = [local("remote", { label: "sentropic-remote" })];
+    const remoteTabs = [{ label: "Sentropic Remote" }];
+    const { kept, dropped } = dropRemoteBackedLocals(locals, remoteTabs);
+    expect(kept).toHaveLength(0);
+    expect(dropped).toHaveLength(1);
+  });
+
+  it("falls back to the project name when the local has no label", () => {
+    const locals = [local("surch")]; // no label
+    const { dropped } = dropRemoteBackedLocals(locals, [{ label: "surch" }]);
+    expect(dropped).toHaveLength(1);
+  });
+
+  it("keeps a fan-out member (#N) distinct from the remote base session", () => {
+    const locals = [local("surch", { label: "surch#2" })];
+    const { kept, dropped } = dropRemoteBackedLocals(locals, [{ label: "surch" }]);
+    expect(kept).toHaveLength(1);
+    expect(dropped).toHaveLength(0);
+  });
+
+  it("is a no-op (keeps everything) when there are no remote tabs", () => {
+    const locals = [local("surch"), local("dataviz")];
+    const { kept, dropped } = dropRemoteBackedLocals(locals, []);
+    expect(kept).toEqual(locals);
+    expect(dropped).toEqual([]);
+  });
+
+  it("sessionIdentitySlug normalizes case/separators and preserves #N", () => {
+    expect(sessionIdentitySlug("Sentropic Remote")).toBe("sentropic-remote");
+    expect(sessionIdentitySlug("sentropic_remote")).toBe("sentropic-remote");
+    expect(sessionIdentitySlug("surch#2")).toBe("surch#2");
   });
 });
 

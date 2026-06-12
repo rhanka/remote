@@ -176,6 +176,49 @@ export function mergeDiscovered(
   ];
 }
 
+/**
+ * Identity slug used to dedup a LOCAL discovered session against a REMOTE tab
+ * (bug #3). Both sides are reduced to lowercase alnum runs so "Sentropic
+ * Remote"/"sentropic-remote"/"sentropic_remote" collapse to one key. A `#N`
+ * fan-out suffix is kept distinct (it is a different session).
+ */
+export function sessionIdentitySlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9#]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Bug #3 — a session that was MOVED to a remote Pod keeps reappearing as a fresh
+ * LOCAL tmux because the local conversation files (claude .jsonl / codex
+ * rollout) and any stale local registry entry survive the move, so the local
+ * discovery still emits a tab for that project. Drop every local discovered
+ * session whose project/label identity is already covered by a REMOTE tab: the
+ * remote group owns it, and re-launching it locally would spawn a ghost
+ * duplicate. Match is by identity slug of the local `label` (else `project`)
+ * against the remote tab `label` — the remote tab's cwd is the Pod path (often
+ * absent locally) so cwd can't be the key; the friendly name is. Pure; the
+ * remote-backed locals are returned separately so the caller can report them.
+ */
+export function dropRemoteBackedLocals(
+  locals: DiscoveredSession[],
+  remoteTabs: ReadonlyArray<{ label: string }>,
+): { kept: DiscoveredSession[]; dropped: DiscoveredSession[] } {
+  if (remoteTabs.length === 0) return { kept: locals, dropped: [] };
+  const remoteKeys = new Set(
+    remoteTabs.map((t) => sessionIdentitySlug(t.label)),
+  );
+  const kept: DiscoveredSession[] = [];
+  const dropped: DiscoveredSession[] = [];
+  for (const s of locals) {
+    const key = sessionIdentitySlug(s.label ?? s.project);
+    if (remoteKeys.has(key)) dropped.push(s);
+    else kept.push(s);
+  }
+  return { kept, dropped };
+}
+
 function safeStat(p: string): { mtimeMs: number } | undefined {
   try {
     return statSync(p);
@@ -418,15 +461,31 @@ export function restore(
   const cfg = getLayoutConfig();
   const stderr = opts.stderr ?? process.stderr;
 
+  // Remote tabs resolved by the caller from `remote ls` (fill `remote: true`
+  // groups). Computed up-front so they can ALSO dedup the local discovery.
+  const remoteTabs = opts.remoteTabs ?? [];
+
   // Local windows (groups + shared) — REGISTRY-FIRST: live enrolled sessions
   // are the truth; the filesystem scan only completes uncovered projects.
   const scanned = discoverSessions(cfg.maxAgeHours * 3600 * 1000);
-  const sessions = mergeDiscovered(registrySessions(), scanned);
+  const allLocal = mergeDiscovered(registrySessions(), scanned);
+  // Bug #3: a session moved to a remote Pod must NOT also be re-launched as a
+  // ghost LOCAL tmux. Drop locals already covered by a remote tab.
+  const { kept: sessions, dropped: remoteBacked } = dropRemoteBackedLocals(
+    allLocal,
+    remoteTabs,
+  );
+  if (remoteBacked.length > 0) {
+    stderr.write(
+      `[remote] ${remoteBacked.length} session(s) déjà sur le contrôle distant — pas de relance locale: ${[
+        ...new Set(remoteBacked.map((s) => s.label ?? s.project)),
+      ].join(", ")}\n`,
+    );
+  }
   const { windows: localWindows, dropped } = groupSessions(sessions, cfg);
   const localByTitle = new Map(localWindows.map((w) => [w.title, w]));
 
   // Remote windows: each `remote: true` group is filled with the SCW tabs.
-  const remoteTabs = opts.remoteTabs ?? [];
   const remoteByTitle = new Map<string, LayoutWindow>();
   for (const g of cfg.groups) {
     if (!g.remote) continue;
