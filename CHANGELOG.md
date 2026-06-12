@@ -5,6 +5,25 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.10 — 2026-06-11
+
+Headline: **watch loops stop hammering dead pods & spamming** — fixes two
+regressions from slices 2/3 plus a long-standing dead-pod cascade.
+
+- **Dead/evicted pod guard** (`pod-liveness.ts`): the `creds refresh --watch`,
+  per-session refresh, and `h2a bridge --watch` loops now check pod phase
+  before `kubectl exec`; a non-`Running` pod (Failed/Evicted/NotFound) is
+  skipped once with a concise advisory and recorded `skipped-dead` — no more
+  per-pass `cannot exec into a completed pod` cascade (two pods had been
+  OOM-evicted, exit 137, and were re-probed every pass).
+- **Cred push spam fixed**: a tool is probed/pushed only when **local** creds
+  for it exist and are non-empty (`localCredsExistFor`) — a machine with no
+  npm/docker auth no longer loops "401 → push" forever.
+- **Drift reconcile spam fixed**: the every-pass "manifest absent → reconciling"
+  was caused by reconciling the *dead* pods (every exec threw → hash never
+  persisted); the dead-pod guard + an unconditional sidecar write after sync
+  make a converged live pod report no drift. 635 cli tests.
+
 ## v0.5.9 — 2026-06-11
 
 Headline: **credentials stop silently logging out in pods** — reliability
