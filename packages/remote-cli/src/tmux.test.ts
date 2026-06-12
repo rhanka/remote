@@ -12,6 +12,7 @@ import {
   buildTmuxGlobalOptions,
   fanoutLabels,
   localRelaunchCommand,
+  sessionAttachedCount,
   startH2aWindow,
 } from "./tmux.js";
 
@@ -269,5 +270,39 @@ describe("LOCAL_WRAPPER (real bash) — regression: cli runs with its args", () 
     const r = runWrapper("remote run codex /x", "true", []);
     expect(r.stdout).toContain("true exited (code 0)");
     expect(r.stdout).not.toContain("command not found");
+  });
+});
+
+describe("sessionAttachedCount (the detached-only HARD guard source)", () => {
+  beforeEach(() => spawnSyncMock.mockReset());
+
+  it("returns 0 for a detached session", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "0\n" });
+    expect(sessionAttachedCount("remote-a")).toBe(0);
+    // It must query #{session_attached} with an EXACT (=) target.
+    const call = spawnSyncMock.mock.calls[0]!;
+    expect(call[0]).toBe("tmux");
+    expect(call[1]).toEqual([
+      "display",
+      "-p",
+      "-t",
+      "=remote-a",
+      "#{session_attached}",
+    ]);
+  });
+
+  it("returns the client count for an attached session", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "2\n" });
+    expect(sessionAttachedCount("remote-a")).toBe(2);
+  });
+
+  it("returns undefined when the session/tmux is gone (conservative → treated as attached)", () => {
+    spawnSyncMock.mockReturnValue({ status: 1, stdout: "" });
+    expect(sessionAttachedCount("remote-gone")).toBeUndefined();
+  });
+
+  it("returns undefined on non-numeric output", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "??\n" });
+    expect(sessionAttachedCount("remote-a")).toBeUndefined();
   });
 });

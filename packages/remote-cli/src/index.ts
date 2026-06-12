@@ -67,6 +67,7 @@ import {
   localSessionIdle,
   localSessionName,
   relaunchInSession,
+  sessionAttachedCount,
   startH2aWindow,
   startHeadlessSession,
   startLocalSession,
@@ -81,6 +82,7 @@ import {
 import { getLayoutConfig } from "./config.js";
 import {
   advanceJob,
+  coerceRegistryTool,
   enroll,
   enrollFromRun,
   isLive,
@@ -127,6 +129,13 @@ import {
   type DelegateType,
 } from "./delegate.js";
 import { detectThrottle, THROTTLE_TAIL_LINES } from "./throttle-signatures.js";
+import {
+  interactiveResumeNudge,
+  planInteractiveResume,
+  type InteractiveResumePlan,
+  type InteractiveSession,
+  type InteractiveThrottleInfo,
+} from "./interactive-throttle.js";
 import {
   DEFAULT_FANOUT_MAX,
   mapWithConcurrency,
@@ -4318,6 +4327,205 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         `[remote] relaunched ${ok}/${plan.actions.length}${plan.skipped.length ? `, ${plan.skipped.length} skipped` : ""}\n`,
       );
     });
+
+  // ---------------------------------------------------------------------------
+  // Reliability slice 2 (throttle phase 2) — auto-resume RATE-LIMITED INTERACTIVE
+  // local tmux sessions, staggered + hands-off.
+  //
+  // INTERACTIVE `remote run` sessions (claude/codex/agy in a live pane) do NOT
+  // exit on a transient provider rate-limit — they STALL until a human pokes them.
+  // This passes the pure `planInteractiveResume` the per-session pane tail
+  // (detectThrottle source), `#{session_attached}` (the HARD detached-only guard),
+  // and a stall verdict (idle shell OR an unchanged tail since the previous pass),
+  // and nudges ONLY detached + stalled + due + under-cap sessions with a minimal
+  // "continue" send-keys — at most the AIMD cap per pass, oldest-throttle first.
+  //
+  // SAFETY: we NEVER send keys into an attached pane (a human is there). DEFAULT
+  // DRY-RUN — it just prints what it WOULD resume; `--apply` (or `--watch`) is the
+  // opt-in that actually nudges.
+  // ---------------------------------------------------------------------------
+
+  /** Interactive (claude/codex/agy) local-tmux sessions, optional slug filter. */
+  const listInteractiveThrottleSessions = (
+    filter: string | undefined,
+  ): Array<{ session: InteractiveSession; slug: string }> => {
+    const enrolledAtBySlug = new Map<string, string>();
+    for (const e of loadRegistry()) {
+      if (e.kind === "local-tmux") enrolledAtBySlug.set(e.id, e.enrolledAt);
+    }
+    const out: Array<{ session: InteractiveSession; slug: string }> = [];
+    for (const s of listLocalSessions()) {
+      if (filter && !s.slug.includes(filter)) continue;
+      const tool = coerceRegistryTool(s.profile);
+      if (!tool) continue; // shell/opencode/… aren't agent CLIs with a throttle shape
+      out.push({
+        slug: s.slug,
+        session: {
+          name: s.name,
+          type: tool,
+          startedAt: enrolledAtBySlug.get(s.slug) ?? Date.now(),
+        },
+      });
+    }
+    return out;
+  };
+
+  /** Re-read `#{session_attached}` and return true ONLY when it is exactly 0. */
+  const isDetachedNow = (name: string): boolean =>
+    sessionAttachedCount(name) === 0;
+
+  /**
+   * One supervision pass over interactive sessions. The `throttleState` and
+   * `prevTailHash` maps are owned by the caller so a `--watch` loop carries the
+   * backoff bookkeeping + the prior tails (for the unchanged-tail stall signal)
+   * across passes. `apply` gates the actual send-keys nudge. Returns the plan
+   * (caller prints) plus the count actually nudged.
+   */
+  const interactiveResumePass = (
+    filter: string | undefined,
+    cap: number,
+    apply: boolean,
+    throttleState: Map<string, InteractiveThrottleInfo>,
+    prevTailHash: Map<string, string>,
+  ): { plan: InteractiveResumePlan; nudged: number } => {
+    const found = listInteractiveThrottleSessions(filter);
+    const sessions = found.map((f) => f.session);
+    const attachedMap: Record<string, number | undefined> = {};
+    const paneTails: Record<string, string | undefined> = {};
+    const stalledMap: Record<string, boolean | undefined> = {};
+    const liveNames = new Set<string>();
+    for (const { session } of found) {
+      liveNames.add(session.name);
+      attachedMap[session.name] = sessionAttachedCount(session.name);
+      const tail = capturePane(session.name, THROTTLE_TAIL_LINES);
+      paneTails[session.name] = tail;
+      // Stall corroboration: an idle shell (CLI dropped to the wrapper's bash) is
+      // definitely stalled; otherwise compare the tail to the previous pass — an
+      // UNCHANGED tail (and we saw it before) means the agent isn't producing
+      // output, i.e. it is stuck on the rate-limit. A first sighting (no prior
+      // hash) is NOT corroborated (conservative: wait one pass before nudging).
+      const idle = localSessionIdle(session.name);
+      const prev = prevTailHash.get(session.name);
+      stalledMap[session.name] =
+        idle || (prev !== undefined && prev === tail);
+      prevTailHash.set(session.name, tail);
+    }
+    // Drop bookkeeping for sessions that are gone (don't leak across a fleet's life).
+    for (const key of [...throttleState.keys()])
+      if (!liveNames.has(key)) throttleState.delete(key);
+    for (const key of [...prevTailHash.keys()])
+      if (!liveNames.has(key)) prevTailHash.delete(key);
+
+    const throttleStateObj: Record<string, InteractiveThrottleInfo | undefined> = {};
+    for (const [k, v] of throttleState) throttleStateObj[k] = v;
+
+    const plan = planInteractiveResume({
+      sessions,
+      now: Date.now(),
+      throttleState: throttleStateObj,
+      attachedMap,
+      paneTails,
+      stalledMap,
+      cap,
+    });
+
+    let nudged = 0;
+    if (apply) {
+      for (const r of plan.toResume) {
+        // DOUBLE-CHECK the attached guard at the moment of action (the pure plan
+        // already excluded attached panes, but re-read in case a human just
+        // attached between capture and nudge — belt and braces on a live pane).
+        if (!isDetachedNow(r.name)) {
+          process.stderr.write(
+            `[remote] ${r.name} (${r.type}) just got attached — skipping the nudge\n`,
+          );
+          continue;
+        }
+        const ok = relaunchInSession(r.name, interactiveResumeNudge(r.type));
+        if (ok) {
+          nudged += 1;
+          throttleState.set(r.name, r.next);
+          process.stderr.write(
+            `[remote] nudged ${r.name} (${r.type}) — continue (attempt ${r.next.attempts})\n`,
+          );
+        } else {
+          process.stderr.write(`[remote] FAILED to nudge ${r.name}\n`);
+        }
+      }
+    }
+    return { plan, nudged };
+  };
+
+  program
+    .command("resume-throttled [filter]")
+    .description(
+      "Auto-resume RATE-LIMITED INTERACTIVE local tmux sessions (claude/codex/agy). Detects the provider's transient rate-limit in each pane, and nudges ONLY a DETACHED, stalled session back to life (a minimal `continue`) — staggered (AIMD cap, oldest-first, backoff). NEVER touches a pane a human is attached to. DRY-RUN by default; --apply to actually nudge, or --watch to loop. [filter] = only sessions whose slug contains it.",
+    )
+    .option("--apply", "actually send the resume nudge (default: dry-run, just print what it WOULD do)")
+    .option(
+      "--watch <minutes>",
+      "loop in the FOREGROUND every <minutes> (implies --apply); Ctrl-C to stop. Run it in a dedicated tmux window",
+    )
+    .option(
+      "--max-concurrent <n>",
+      "AIMD cap: max sessions nudged per pass (default: config maxConcurrent / REMOTE_MAX_CONCURRENT / 16)",
+    )
+    .action(
+      async (
+        filter: string | undefined,
+        opts: { apply?: boolean; watch?: string; maxConcurrent?: string },
+      ) => {
+        if (!tmuxAvailable()) {
+          process.stderr.write("[remote] tmux is not installed locally\n");
+          process.exitCode = 1;
+          return;
+        }
+        const capRaw =
+          opts.maxConcurrent !== undefined
+            ? Number.parseInt(opts.maxConcurrent, 10)
+            : getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT;
+        const cap =
+          Number.isFinite(capRaw) && capRaw > 0 ? capRaw : DEFAULT_MAX_CONCURRENT;
+        const minutes =
+          opts.watch === undefined ? undefined : parseWatchMinutes(opts.watch);
+        // --watch implies --apply (a dry-run loop would be pointless).
+        const apply = opts.apply === true || minutes !== undefined;
+        const throttleState = new Map<string, InteractiveThrottleInfo>();
+        const prevTailHash = new Map<string, string>();
+
+        const runOnce = () => {
+          const { plan, nudged } = interactiveResumePass(
+            filter,
+            cap,
+            apply,
+            throttleState,
+            prevTailHash,
+          );
+          for (const line of plan.advisories) process.stderr.write(`${line}\n`);
+          if (!apply) {
+            process.stderr.write(
+              `[remote] DRY-RUN — would resume ${plan.toResume.length} session(s) ` +
+                `(${plan.throttled.length} throttled, cap ${cap}). Pass --apply to nudge them.\n`,
+            );
+          } else {
+            process.stderr.write(
+              `[remote] resume-throttled: nudged ${nudged}/${plan.toResume.length} ` +
+                `(${plan.throttled.length} throttled, cap ${cap})\n`,
+            );
+          }
+          return { failed: 0 };
+        };
+
+        if (minutes === undefined) {
+          runOnce();
+          return;
+        }
+        process.stderr.write(
+          `[remote] resume-throttled watching (cap ${cap}, every ${minutes} min) — Ctrl-C to stop\n`,
+        );
+        process.exitCode = await watchRefreshLoop(minutes, async () => runOnce());
+      },
+    );
 
   // ---------------------------------------------------------------------------
   // h2a — bridge the local agent network (~/h2a-workspace/.h2a) with session Pods
