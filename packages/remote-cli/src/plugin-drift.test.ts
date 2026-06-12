@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { PluginEntry } from "./config.js";
-import { probePodPluginState, type PodProbeDeps } from "./plugin.js";
-import { diffManifest, renderManifest } from "./plugin-manifest.js";
+import {
+  probePodPluginState,
+  pushManifestSidecarVia,
+  reconcilePodManifestVia,
+  type ManifestPodIo,
+  type PodProbeDeps,
+} from "./plugin.js";
+import {
+  canonicalManifestJson,
+  diffManifest,
+  manifestHash,
+  renderManifest,
+} from "./plugin-manifest.js";
 
 /**
  * Executor-seam tests for the slice-3 drift probe. The IO (npm ls / config
@@ -80,5 +91,103 @@ describe("probePodPluginState — injected IO, no shelling out", () => {
       "mcp-unregistered",
     );
     expect(rows.find((r) => r.item === "plugin:p")?.status).toBe("ok");
+  });
+});
+
+/**
+ * Manifest-gate persistence tests (slice-3 regression fix): a converged Pod must
+ * NOT re-sync; an absent/mismatched hash must resync ONCE and then converge (the
+ * sidecar persists so the next pass is a zero-work no-op). All Pod IO is a
+ * stateful fake — these never shell out.
+ */
+
+type FakePodIo = ManifestPodIo & {
+  syncs: number;
+  writes: number;
+  stored: { json: string; hash: string };
+};
+
+/** A fake Pod whose recorded manifest hash is whatever the last writeSidecar set. */
+function fakePodIo(initialHash = ""): FakePodIo {
+  const io: FakePodIo = {
+    syncs: 0,
+    writes: 0,
+    stored: { json: "", hash: initialHash },
+    readHash: () => io.stored.hash,
+    writeSidecar: (json: string, hash: string) => {
+      io.writes += 1;
+      io.stored = { json, hash };
+    },
+    runSync: () => {
+      io.syncs += 1;
+      return "synced";
+    },
+  };
+  return io;
+}
+
+describe("manifest gate — converged Pod does NOT re-sync (slice-3 fix)", () => {
+  const plugins = [plugin("@sentropic/track", "0.2.0", "track")];
+  const manifest = renderManifest(plugins);
+  const localHash = manifestHash(manifest);
+  const silent = { write: () => true };
+
+  it("matching hash → no resync, no write (zero-work no-op)", () => {
+    const io = fakePodIo(localHash);
+    const r = reconcilePodManifestVia(io, "session-a", manifest, plugins, silent);
+    expect(r.reconciled).toBe(false);
+    expect(io.syncs).toBe(0);
+    expect(io.writes).toBe(0);
+  });
+
+  it("absent hash → resync ONCE, then the NEXT pass converges (no resync)", () => {
+    const io = fakePodIo(""); // brand-new / Pod-restart: no sidecar yet
+    const first = reconcilePodManifestVia(io, "session-b", manifest, plugins, silent);
+    expect(first.reconciled).toBe(true);
+    expect(io.syncs).toBe(1);
+    expect(io.writes).toBe(1);
+    // The sidecar now records the local hash, byte-for-byte the canonical JSON.
+    expect(io.stored.hash).toBe(localHash);
+    expect(io.stored.json).toBe(canonicalManifestJson(manifest));
+
+    // SECOND pass: the persisted hash matches → no resync, no extra write.
+    const second = reconcilePodManifestVia(io, "session-b", manifest, plugins, silent);
+    expect(second.reconciled).toBe(false);
+    expect(io.syncs).toBe(1); // unchanged — did NOT re-run sync
+    expect(io.writes).toBe(1); // unchanged — did NOT re-write
+  });
+
+  it("mismatched (stale) hash → resync once, then converges", () => {
+    const io = fakePodIo("stale-hash-from-an-older-manifest");
+    reconcilePodManifestVia(io, "session-c", manifest, plugins, silent);
+    expect(io.syncs).toBe(1);
+    expect(io.stored.hash).toBe(localHash);
+    // converged
+    const again = reconcilePodManifestVia(io, "session-c", manifest, plugins, silent);
+    expect(again.reconciled).toBe(false);
+    expect(io.syncs).toBe(1);
+  });
+
+  it("sidecar still persists when a plugin sync FAILS (so drift can't loop forever)", () => {
+    const io = fakePodIo("");
+    io.runSync = () => {
+      throw new Error("npm i -g blew up");
+    };
+    const r = reconcilePodManifestVia(io, "session-d", manifest, plugins, silent);
+    expect(r.failures).toBe(1);
+    // Even with a failed sync, the hash is recorded → next pass won't re-report
+    // "manifest absent" forever (the dead-pod guard handles truly-dead Pods).
+    expect(io.stored.hash).toBe(localHash);
+  });
+
+  it("pushManifestSidecarVia gates exactly like CREDS_HASH_FILE (match → no write)", () => {
+    const io = fakePodIo(localHash);
+    const r = pushManifestSidecarVia(io, manifest);
+    expect(r.wrote).toBe(false);
+    expect(io.writes).toBe(0);
+    // absent hash → writes once
+    const io2 = fakePodIo("");
+    expect(pushManifestSidecarVia(io2, manifest).wrote).toBe(true);
+    expect(io2.stored.hash).toBe(localHash);
   });
 });

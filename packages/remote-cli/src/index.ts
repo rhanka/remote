@@ -171,6 +171,7 @@ import {
   readStdin,
 } from "./enroll.js";
 import { probePodCredHealth, softRefreshSession } from "./soft-refresh.js";
+import { checkPodLiveness, deadPodAdvisory } from "./pod-liveness.js";
 import {
   claudeExpiryAdvisory,
   claudeTokenExpiry,
@@ -728,7 +729,7 @@ function localClaudeExpiryAdvisory(now: number = Date.now()): string | undefined
 type SoftRefreshAllOutcome = {
   sessionId: string;
   profile: string;
-  status: "ok" | "unchanged" | "failed";
+  status: "ok" | "unchanged" | "failed" | "skipped-dead";
   detail?: string;
 };
 
@@ -787,6 +788,24 @@ export async function softRefreshAllSessions(
         detail: `unknown profile "${s.profile}"`,
       });
       continue;
+    }
+    // DEAD-POD GUARD: an Evicted/OOM/completed Pod (phase != Running) can't be
+    // exec'd into — every push/probe/reconcile below would log a per-pass error.
+    // Check the phase ONCE and SKIP with a single concise advisory. Running Pods
+    // proceed exactly as before (one extra cheap `kubectl get pod` per pass).
+    const tunnel = getTunnel();
+    if (tunnel) {
+      const liveness = checkPodLiveness(tunnel, `session-${s.id}`);
+      if (!liveness.executable) {
+        process.stderr.write(`${deadPodAdvisory(s.id, liveness.phase)}\n`);
+        outcomes.push({
+          sessionId: s.id,
+          profile,
+          status: "skipped-dead",
+          detail: `pod ${liveness.phase || "gone"}`,
+        });
+        continue;
+      }
     }
     try {
       if (opts.authRefresh !== false && !preflighted.has(profile)) {
@@ -871,6 +890,16 @@ async function softRefreshOneGated(
       opts.profile ?? (await getRemoteSession(url, sessionId)).session.profile;
     const profile = coerceCliProfileName(profileName);
     if (!profile) throw new Error(`Unknown profile "${profileName}"`);
+    // DEAD-POD GUARD: skip a non-Running (Evicted/OOM/completed) Pod with a
+    // single advisory instead of hammering exec each pass. Running = unchanged.
+    const liveTunnel = getTunnel();
+    if (liveTunnel) {
+      const liveness = checkPodLiveness(liveTunnel, `session-${sessionId}`);
+      if (!liveness.executable) {
+        process.stderr.write(`${deadPodAdvisory(sessionId, liveness.phase)}\n`);
+        return { failed: 0 };
+      }
+    }
     if (opts.authRefresh !== false) {
       await preflightOrWarn(profile);
     }
@@ -4349,7 +4378,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return { failed: 0 };
         }
         let failed = 0;
+        const bridgeTunnel = getTunnel();
         for (const s of sessions) {
+          // DEAD-POD GUARD: a non-Running (Evicted/OOM/completed) Pod can't be
+          // exec'd — skip it with a single advisory instead of a per-pass
+          // `cannot exec into a completed pod` error. Running Pods bridge as before.
+          if (bridgeTunnel) {
+            const liveness = checkPodLiveness(bridgeTunnel, `session-${s.id}`);
+            if (!liveness.executable) {
+              process.stderr.write(`${deadPodAdvisory(s.id, liveness.phase)}\n`);
+              continue;
+            }
+          }
           try {
             const r = await bridgeSession(s.id, { profile: s.profile });
             if (r.failed > 0) failed += 1;

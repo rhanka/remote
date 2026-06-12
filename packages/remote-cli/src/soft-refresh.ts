@@ -26,7 +26,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { collectProfileAuth } from "./auth-bundle.js";
-import { collectToolAuth } from "./auth-tools.js";
+import { collectToolAuth, localCredsExistFor } from "./auth-tools.js";
 import { getTunnel, type TunnelConfig } from "./config.js";
 import {
   buildHealthProbeCommand,
@@ -559,6 +559,12 @@ export async function probePodCredHealth(
   const actions: ToolHealthAction[] = [];
   for (const tool of tools) {
     if (!isProbeableTool(tool)) continue;
+    // GUARD (slice-2 regression fix): only probe/push a tool when the LOCAL
+    // machine actually has non-empty creds for it. With no local creds, pushing
+    // is pointless — the Pod's probe stays 401 and the next pass repeats the same
+    // useless push forever. No local creds → skip ENTIRELY (no probe, no push, no
+    // log). Tools WITH valid local creds are byte-identical to before.
+    if (!localCredsExistFor(tool)) continue;
     try {
       actions.push(await probeAndPushToolHealth(tool, deps));
     } catch (error) {

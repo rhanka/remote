@@ -11,7 +11,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -79,6 +79,42 @@ export function detectToolAuth(home: string = homedir()): ToolAuthStatus[] {
     const present = existsSync(join(home, spec.files[0]!));
     return { tool, present, loginHint: spec.loginHint };
   });
+}
+
+/**
+ * Does the LOCAL machine actually HAVE creds to push for `tool`? True only when
+ * at least one of the tool's HOME-relative files exists AND is non-empty (a
+ * zero-byte `~/.npmrc` or `~/.docker/config.json` carries no auth). For `gh` we
+ * also accept a token resolvable via `gh auth token` (the keyring case), since
+ * `collectToolAuth` regenerates a file-based hosts.yml from it.
+ *
+ * The slice-2 pod-side 401 probe→push uses this as a GUARD: when the local side
+ * has nothing to give for a tool, pushing is pointless (the Pod's probe stays
+ * 401 → infinite useless push), so the probe is skipped ENTIRELY for that tool
+ * — no probe, no push, no log. An unknown tool is "no local creds". PURE-ish
+ * (only stats files / runs `gh auth token`); exported for tests via `home`.
+ */
+export function localCredsExistFor(
+  tool: string,
+  home: string = homedir(),
+): boolean {
+  const spec = TOOL_AUTH[tool];
+  if (!spec) return false;
+  for (const rel of spec.files) {
+    try {
+      if (statSync(join(home, rel)).size > 0) return true;
+    } catch {
+      // missing/unreadable → not a usable local cred
+    }
+  }
+  // gh may keep its token in the OS keyring rather than a file; collectToolAuth
+  // regenerates hosts.yml from `gh auth token`, so a resolvable token counts.
+  if (tool === "gh") {
+    const token = spawnSync("gh", ["auth", "token"], { encoding: "utf8" })
+      .stdout?.trim();
+    if (token) return true;
+  }
+  return false;
 }
 
 /** Validate a requested tool list, returning {known, unknown}. */

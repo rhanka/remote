@@ -633,6 +633,50 @@ export function desiredManifest(): PluginManifest {
 }
 
 /**
+ * Injectable IO seams for the manifest sidecar + reconcile so the gate is
+ * unit-testable WITHOUT shelling out to kubectl. Production wires the real
+ * execPod against a tunnel (`manifestPodIo`); tests pass a stateful fake Pod and
+ * assert that a converged Pod re-reports NO drift (no resync) next pass.
+ */
+export type ManifestPodIo = {
+  /** Read the Pod's recorded manifest hash ("" when absent/unreadable). */
+  readHash: () => string;
+  /** Persist the manifest JSON + its hash in the Pod (the sidecar write). */
+  writeSidecar: (json: string, hash: string) => void;
+  /** Run one plugin's EXISTING buildPodSyncScript in the Pod; returns its stdout. */
+  runSync: (plugin: PluginEntry) => string;
+};
+
+/** Production wiring of `ManifestPodIo` against a live Pod (real kubectl exec). */
+export function manifestPodIo(
+  tunnel: TunnelConfig,
+  pod: string,
+  profile: string,
+): ManifestPodIo {
+  return {
+    readHash: () => {
+      try {
+        return execPod(
+          tunnel,
+          pod,
+          `cat "$HOME/${MANIFEST_HASH_FILE}" 2>/dev/null || true`,
+        ).trim();
+      } catch {
+        return "";
+      }
+    },
+    writeSidecar: (json, hash) => {
+      // Write the canonical JSON via stdin (argv-safe: no manifest content in
+      // the command string) then record the hash. SAFE_PKG/SAFE_NAME bound the
+      // JSON to tame chars; it still rides stdin so nothing is shell-interpolated.
+      execPod(tunnel, pod, `cat > "$HOME/${MANIFEST_FILE}"`, json);
+      execPod(tunnel, pod, `printf %s '${hash}' > "$HOME/${MANIFEST_HASH_FILE}"`);
+    },
+    runSync: (plugin) => execPod(tunnel, pod, buildPodSyncScript(plugin, profile)),
+  };
+}
+
+/**
  * Push the desired-state manifest into a Pod as ~/.remote-manifest.json +
  * ~/.remote-manifest.sha256, GATED exactly like CREDS_HASH_FILE: read the Pod's
  * recorded hash first and SKIP the write when it already matches (so a steady
@@ -644,42 +688,29 @@ export function pushManifestSidecar(
   pod: string,
   manifest: PluginManifest,
 ): { wrote: boolean; hash: string } {
+  return pushManifestSidecarVia(manifestPodIo(tunnel, pod, ""), manifest);
+}
+
+/** Sidecar push over an injected `ManifestPodIo` (the testable core). PURE-ish. */
+export function pushManifestSidecarVia(
+  io: ManifestPodIo,
+  manifest: PluginManifest,
+): { wrote: boolean; hash: string } {
   const hash = manifestHash(manifest);
   let podHash = "";
   try {
-    podHash = execPod(
-      tunnel,
-      pod,
-      `cat "$HOME/${MANIFEST_HASH_FILE}" 2>/dev/null || true`,
-    ).trim();
+    podHash = io.readHash();
   } catch {
-    // Pod state unreadable — fall through and (re)write; the write surfaces errors.
+    // unreadable — fall through and (re)write; the write surfaces real errors.
   }
   if (podHash === hash) return { wrote: false, hash };
-  // Write the canonical JSON via stdin (argv-safe: no manifest content in the
-  // command string) then record the hash. SAFE_PKG/SAFE_NAME bound the JSON to
-  // tame chars; it still rides stdin so nothing is shell-interpolated.
-  execPod(
-    tunnel,
-    pod,
-    `cat > "$HOME/${MANIFEST_FILE}"`,
-    canonicalManifestJson(manifest),
-  );
-  execPod(tunnel, pod, `printf %s '${hash}' > "$HOME/${MANIFEST_HASH_FILE}"`);
+  io.writeSidecar(canonicalManifestJson(manifest), hash);
   return { wrote: true, hash };
 }
 
 /** The Pod's recorded manifest hash, or "" when absent/unreadable. */
 export function readPodManifestHash(tunnel: TunnelConfig, pod: string): string {
-  try {
-    return execPod(
-      tunnel,
-      pod,
-      `cat "$HOME/${MANIFEST_HASH_FILE}" 2>/dev/null || true`,
-    ).trim();
-  } catch {
-    return "";
-  }
+  return manifestPodIo(tunnel, pod, "").readHash();
 }
 
 /**
@@ -767,8 +798,37 @@ export function reconcilePodManifest(
   plugins: ReadonlyArray<PluginEntry>,
   stderr: { write: (s: string) => unknown } = process.stderr,
 ): { reconciled: boolean; localHash: string; podHash: string; failures: number } {
+  return reconcilePodManifestVia(
+    manifestPodIo(tunnel, pod, profile),
+    pod,
+    manifest,
+    plugins,
+    stderr,
+  );
+}
+
+/**
+ * Reconcile core over an injected `ManifestPodIo` (the testable seam). PURE-ish:
+ * all Pod IO goes through `io`, so tests drive a stateful fake Pod and assert the
+ * gate — a matching hash is a zero-work no-op; an absent/mismatched hash resyncs
+ * ONCE then writes the sidecar so the NEXT pass converges (no re-sync).
+ *
+ * PERSISTENCE FIX (slice-3 regression): the sidecar is written via the SAME `io`
+ * (no second pod read, no `pushManifestSidecar` re-gate that could skip it) and
+ * is written even when some plugin syncs FAILED, so the Pod's recorded hash
+ * always converges to local after a reconcile — otherwise the next pass re-reads
+ * an absent hash and re-reports drift forever. (The dead-pod guard upstream keeps
+ * us off Evicted Pods where the write would throw and never persist at all.)
+ */
+export function reconcilePodManifestVia(
+  io: ManifestPodIo,
+  pod: string,
+  manifest: PluginManifest,
+  plugins: ReadonlyArray<PluginEntry>,
+  stderr: { write: (s: string) => unknown } = process.stderr,
+): { reconciled: boolean; localHash: string; podHash: string; failures: number } {
   const localHash = manifestHash(manifest);
-  const podHash = readPodManifestHash(tunnel, pod);
+  const podHash = io.readHash();
   if (podHash === localHash) {
     return { reconciled: false, localHash, podHash, failures: 0 };
   }
@@ -779,7 +839,7 @@ export function reconcilePodManifest(
   let failures = 0;
   for (const plugin of plugins) {
     try {
-      const out = execPod(tunnel, pod, buildPodSyncScript(plugin, profile));
+      const out = io.runSync(plugin);
       for (const line of out.trim().split("\n").filter(Boolean)) {
         stderr.write(`    ${line}\n`);
       }
@@ -790,9 +850,11 @@ export function reconcilePodManifest(
       );
     }
   }
-  // Re-push the sidecar so the Pod's recorded hash converges to local.
+  // Re-push the sidecar so the Pod's recorded hash converges to local — through
+  // the SAME io and UNCONDITIONALLY (we already know podHash != localHash), so a
+  // converged Pod reports NO drift next pass.
   try {
-    pushManifestSidecar(tunnel, pod, manifest);
+    io.writeSidecar(canonicalManifestJson(manifest), localHash);
   } catch (error) {
     stderr.write(
       `    manifest sidecar re-push failed: ${String(error).slice(0, 120)}\n`,
