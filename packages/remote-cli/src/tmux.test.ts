@@ -9,6 +9,7 @@ import {
   H2A_WINDOW_NAME,
   LOCAL_WRAPPER,
   buildSessionWindowArgs,
+  buildTmuxGlobalOptions,
   fanoutLabels,
   localRelaunchCommand,
   startH2aWindow,
@@ -148,6 +149,48 @@ describe("startH2aWindow", () => {
 
     expect(ok).toBe(false);
     expect(err.text()).toContain("h2a window failed");
+  });
+});
+
+describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)", () => {
+  const flat = (clip?: string) =>
+    buildTmuxGlobalOptions(clip).map((c) => c.join(" "));
+
+  it("turns set-titles ON so tmux forwards the agent's OSC title to the GNOME tab", () => {
+    expect(flat()).toContain("set -g set-titles on");
+  });
+
+  it("points set-titles-string at pane_title with the window name as fallback", () => {
+    const line = flat().find((l) => l.startsWith("set -g set-titles-string"));
+    expect(line).toBeDefined();
+    // pane_title (the agent's live title) is preferred; window_name is the fallback.
+    expect(line).toContain("#{pane_title}");
+    expect(line).toContain("#{window_name}");
+    // precedence: pane_title BEFORE the fallback in the conditional.
+    expect(line!.indexOf("#{pane_title}")).toBeLessThan(
+      line!.lastIndexOf("#{window_name}"),
+    );
+  });
+
+  it("allows the window name to follow the OSC title (allow-rename on) and NEVER touches automatic-rename", () => {
+    const lines = flat();
+    expect(lines).toContain("set -g allow-rename on");
+    expect(lines.some((l) => l.includes("automatic-rename"))).toBe(false);
+  });
+
+  it("keeps the scroll/clipboard contract intact (no regression)", () => {
+    const lines = flat("wl-copy");
+    expect(lines).toContain("set -g mouse on");
+    expect(lines).toContain("set -g set-clipboard on");
+    expect(lines).toContain("set -g focus-events on");
+    expect(lines).toContain("set -g copy-command wl-copy");
+    expect(lines.some((l) => l.startsWith("bind -n WheelUpPane"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("bind -n WheelDownPane"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("bind -n PPage"))).toBe(true);
+  });
+
+  it("omits copy-command when no clipboard tool is detected", () => {
+    expect(flat(undefined).some((l) => l.includes("copy-command"))).toBe(false);
   });
 });
 

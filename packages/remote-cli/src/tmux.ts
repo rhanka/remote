@@ -193,21 +193,37 @@ function detectClipboardCommand(): string | undefined {
 }
 
 /**
- * Make the LOCAL tmux server scroll the conversation on the wheel AND copy
- * selections to the system clipboard — same scroll settings the Pod image bakes
- * into /etc/tmux.conf. Without `mouse on`, the terminal falls back to
- * alternateScroll (wheel → arrow keys → the CLI's input history), which reads as
- * "scrolling scrolls the input history". With mouse on, a drag is tmux's
- * selection: `copy-command` pipes it to wl-copy/xclip so Ctrl+Shift+V / paste
- * works (VTE drops OSC52, so set-clipboard alone is not enough). Native
- * selection (for Ctrl+Shift+C) stays available via Shift+drag. Global,
- * idempotent, applied at every run/attach so it works even without ~/.tmux.conf.
+ * Pure builder for the global tmux options applied at every run/attach. Split
+ * out of `ensureScrollConfig` so the option set (scroll/clipboard AND the
+ * title-following options for the GNOME tab) is unit-testable without a tmux
+ * server. `clip` is the detected clipboard command (undefined → no copy-command).
+ *
+ * Title chain (bug #1 — "the tab name doesn't follow the agent"): the agent
+ * (claude/codex) emits its live title as an OSC sequence, which tmux records as
+ * `pane_title`. tmux only RE-EMITS that title to the OUTER terminal (the GNOME
+ * tab) when `set-titles on`; it is OFF by default, so the OSC title was trapped
+ * inside tmux and the GNOME tab kept the static launcher `--title`. We turn
+ * `set-titles on` and point `set-titles-string` at `#{pane_title}` (the agent's
+ * live title) with a friendly fallback (the window name, then the session name)
+ * when the agent has not set a title yet. `allow-rename on` lets the window NAME
+ * track the OSC title too. We deliberately NEVER touch `automatic-rename`
+ * (project rule); it stays at its default `on`, which is what lets the window
+ * follow the title.
  */
-export function ensureScrollConfig(): void {
+export function buildTmuxGlobalOptions(
+  clip: string | undefined,
+): Array<ReadonlyArray<string>> {
   const cmds: Array<ReadonlyArray<string>> = [
     ["set", "-g", "mouse", "on"],
     ["set", "-g", "set-clipboard", "on"],
     ["set", "-g", "focus-events", "on"],
+    // Forward the agent's live OSC title (pane_title) out to the GNOME tab, with
+    // the window name (then session name) as the fallback when none is set yet.
+    ["set", "-g", "set-titles", "on"],
+    ["set", "-g", "set-titles-string", "#{?pane_title,#{pane_title},#{window_name}}"],
+    // Let the window NAME follow the OSC title the agent emits (does not touch
+    // automatic-rename, which stays at its default `on`).
+    ["set", "-g", "allow-rename", "on"],
     [
       "bind",
       "-n",
@@ -224,8 +240,25 @@ export function ensureScrollConfig(): void {
   // copy-command makes every copy-pipe-and-cancel (mouse drag, double/triple
   // click) land in the real system clipboard. tmux's defaults already use
   // copy-pipe-and-cancel with no argument → they honour copy-command.
-  const clip = detectClipboardCommand();
   if (clip) cmds.push(["set", "-g", "copy-command", clip]);
+  return cmds;
+}
+
+/**
+ * Make the LOCAL tmux server scroll the conversation on the wheel AND copy
+ * selections to the system clipboard — same scroll settings the Pod image bakes
+ * into /etc/tmux.conf. Without `mouse on`, the terminal falls back to
+ * alternateScroll (wheel → arrow keys → the CLI's input history), which reads as
+ * "scrolling scrolls the input history". With mouse on, a drag is tmux's
+ * selection: `copy-command` pipes it to wl-copy/xclip so Ctrl+Shift+V / paste
+ * works (VTE drops OSC52, so set-clipboard alone is not enough). Native
+ * selection (for Ctrl+Shift+C) stays available via Shift+drag. ALSO turns on the
+ * title-following options (see buildTmuxGlobalOptions) so the GNOME tab tracks
+ * the agent's live title. Global, idempotent, applied at every run/attach so it
+ * works even without ~/.tmux.conf.
+ */
+export function ensureScrollConfig(): void {
+  const cmds = buildTmuxGlobalOptions(detectClipboardCommand());
   for (const args of cmds) {
     // Best-effort: no server yet / old tmux must never fail the caller.
     spawnSync(TMUX, [...args], { stdio: "ignore" });
