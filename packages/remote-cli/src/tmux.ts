@@ -367,6 +367,24 @@ export function startHeadlessSession(
   return { name, slug };
 }
 
+/**
+ * The raw tmux `#{session_attached}` count for a session: 0 = DETACHED (no client
+ * attached), ≥1 = a client (a human terminal) is attached. `undefined` when the
+ * session is gone / tmux can't be reached. The interactive throttle auto-resume
+ * uses this as its HARD guard — it only ever nudges a pane whose count is 0, so
+ * we never send keys into a session a human is driving. Best-effort.
+ */
+export function sessionAttachedCount(name: string): number | undefined {
+  const r = spawnSync(
+    TMUX,
+    ["display", "-p", "-t", `=${name}`, "#{session_attached}"],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || r.stdout === undefined) return undefined;
+  const n = Number.parseInt(r.stdout.trim(), 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /** Last `lines` of a session's main pane (interactive job logs). "" if gone. */
 export function capturePane(name: string, lines = 200): string {
   const r = spawnSync(
