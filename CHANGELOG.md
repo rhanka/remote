@@ -5,6 +5,23 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.13 — 2026-06-12
+
+Headline: **rate-limited interactive sessions can auto-resume** — the throttle
+recovery from slice 1 (headless jobs) now also covers live `remote run` tmux
+sessions, staggered and hands-off.
+
+- **`remote resume-throttled [filter]`** — detects interactive sessions stalled
+  on a transient provider rate-limit (`detectThrottle` reused from slice 1, AND
+  stall-corroborated via idle / unchanged pane-tail) and nudges them to continue,
+  so you don't have to poke each one by hand.
+- **Safety**: **dry-run by default** (prints what it would resume); `--apply` to
+  act, `--watch <min>` to loop. NEVER touches an ATTACHED pane (re-checks
+  `session_attached === 0` immediately before each `send-keys`). Staggered:
+  oldest-first, capped per pass by the AIMD concurrency cap, full-jitter backoff
+  (reused from slice 1), 6 attempts then gives up + advises.
+- 669 cli tests.
+
 ## v0.5.12 — 2026-06-12
 
 Headline: **remote session UX & disk-eviction fixes** — tabs follow the agent,
