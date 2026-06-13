@@ -13,6 +13,7 @@ import {
   snapshotSessionState,
 } from "./session-state.js";
 import { clearPresence, writePresence } from "./h2a-presence.js";
+import { applyStorageRedirect, planStorageRedirect } from "./redirect-storage.js";
 
 export const packageName = "@sentropic/remote-session-agent";
 
@@ -28,6 +29,11 @@ export {
   detectCliSessionId,
 } from "./session-state.js";
 export { writePresence, clearPresence, safePathSegment } from "./h2a-presence.js";
+export {
+  applyStorageRedirect,
+  planStorageRedirect,
+} from "./redirect-storage.js";
+export type { StoragePlan } from "./redirect-storage.js";
 
 export function materializeAuthBundle(
   stagingDir: string | undefined,
@@ -184,6 +190,26 @@ export async function main(): Promise<void> {
   const authHeaders: Record<string, string> = token
     ? { Authorization: `Bearer ${token}` }
     : {};
+
+  // Redirect heavy/temp/cache/worktree writes off the node's ephemeral overlay
+  // disk and onto the per-session RWX workspace BEFORE anything writes: create
+  // the cache/tmp/cargo/worktree dirs (the k8s env vars point the tools here,
+  // but they don't all mkdir -p their root) and symlink the legacy global
+  // superpowers worktree path onto the RWX so worktrees survive a pod restart
+  // even when superpowers ignores the env var. Best-effort — never fatal.
+  try {
+    const created = applyStorageRedirect(
+      planStorageRedirect({ workspacePath, home, env: process.env }),
+      (msg) => console.error(msg),
+    );
+    if (created.length > 0) {
+      console.log(
+        `[session-agent] redirected storage to RWX: ${created.join("; ")}`,
+      );
+    }
+  } catch (error) {
+    console.error("[session-agent] storage redirect failed:", error);
+  }
 
   const copied = materializeAuthBundle(
     process.env.SESSION_AUTH_STAGING_DIR,
