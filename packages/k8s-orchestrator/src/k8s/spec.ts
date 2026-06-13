@@ -573,6 +573,42 @@ export function buildSessionPodSpec(
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: descriptor.home ?? options.home },
+            // Redirect every heavy / temp / cache / worktree writer OFF the
+            // node's shared ephemeral overlay disk and ONTO the per-session RWX
+            // workspace subPath (descriptor.workspacePath, ~93G free). Without
+            // these, TMPDIR is unset and HOME-anchored caches (~/.cache, ~/.npm,
+            // ~/.cargo, pip) plus superpowers worktrees all land on the 17G node
+            // overlay → it fills → the kubelet DiskPressure-cascade-EVICTS every
+            // session (exit 137 ephemeral-storage), AND any work written outside
+            // /workspace is LOST on pod restart (ephemeral is wiped). Pointing
+            // them under the RETAINED RWX both stops the eviction and makes the
+            // writes survive a restart/re-deport. NEVER hardcode /workspace —
+            // always derive from descriptor.workspacePath (the actual mount).
+            { name: "TMPDIR", value: `${descriptor.workspacePath}/.tmp` },
+            {
+              name: "XDG_CACHE_HOME",
+              value: `${descriptor.workspacePath}/.cache`,
+            },
+            {
+              name: "npm_config_cache",
+              value: `${descriptor.workspacePath}/.cache/npm`,
+            },
+            { name: "CARGO_HOME", value: `${descriptor.workspacePath}/.cargo` },
+            {
+              name: "PIP_CACHE_DIR",
+              value: `${descriptor.workspacePath}/.cache/pip`,
+            },
+            // superpowers `using-git-worktrees` does NOT honor an env var for
+            // the worktree base (it picks `.worktrees/<branch>` repo-relative,
+            // else a legacy global `~/.config/superpowers/worktrees/<project>`),
+            // so this var is advisory: the DURABLE guarantee is the startup
+            // symlink in the session-agent that points the legacy global path
+            // onto the RWX. We still publish the base so any future env-aware
+            // tooling lands worktrees on the RWX too.
+            {
+              name: "SUPERPOWERS_WORKTREE_BASE",
+              value: `${descriptor.workspacePath}/.worktrees`,
+            },
             // UTF-8 locale so accented output (é, è, à…) renders instead of
             // ASCII fallback ("_"). C.UTF-8 is always present in glibc (no
             // locale-gen needed).
