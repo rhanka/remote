@@ -124,6 +124,49 @@ describe("k8s spec builders", () => {
     });
   });
 
+  it("points TMPDIR/caches/cargo/worktree-base under the RWX workspacePath (anti-ephemeral)", () => {
+    const pod = buildSessionPodSpec(baseDescriptor);
+    const container = pod.spec.containers[0]!;
+    const ws = baseDescriptor.workspacePath; // "/workspace"
+    const envOf = (name: string) =>
+      container.env.find((e) => e.name === name)?.value;
+    expect(envOf("TMPDIR")).toBe(`${ws}/.tmp`);
+    expect(envOf("XDG_CACHE_HOME")).toBe(`${ws}/.cache`);
+    expect(envOf("npm_config_cache")).toBe(`${ws}/.cache/npm`);
+    expect(envOf("CARGO_HOME")).toBe(`${ws}/.cargo`);
+    expect(envOf("PIP_CACHE_DIR")).toBe(`${ws}/.cache/pip`);
+    expect(envOf("SUPERPOWERS_WORKTREE_BASE")).toBe(`${ws}/.worktrees`);
+    // ADDITIVE: existing env (HOME, WORKSPACE_PATH, SESSION_ID) is untouched.
+    expect(envOf("WORKSPACE_PATH")).toBe(ws);
+    expect(envOf("HOME")).toBe(DEFAULT_BUILDER_OPTIONS.home);
+    expect(envOf("SESSION_ID")).toBe(baseDescriptor.id);
+  });
+
+  it("derives the redirect env from a NON-default workspacePath (never hardcodes /workspace)", () => {
+    const ws = "/data/ws";
+    const pod = buildSessionPodSpec({ ...baseDescriptor, workspacePath: ws });
+    const container = pod.spec.containers[0]!;
+    const envOf = (name: string) =>
+      container.env.find((e) => e.name === name)?.value;
+    expect(envOf("TMPDIR")).toBe(`${ws}/.tmp`);
+    expect(envOf("XDG_CACHE_HOME")).toBe(`${ws}/.cache`);
+    expect(envOf("npm_config_cache")).toBe(`${ws}/.cache/npm`);
+    expect(envOf("CARGO_HOME")).toBe(`${ws}/.cargo`);
+    expect(envOf("PIP_CACHE_DIR")).toBe(`${ws}/.cache/pip`);
+    expect(envOf("SUPERPOWERS_WORKTREE_BASE")).toBe(`${ws}/.worktrees`);
+    // none of the redirect values leak the literal "/workspace" default
+    for (const name of [
+      "TMPDIR",
+      "XDG_CACHE_HOME",
+      "npm_config_cache",
+      "CARGO_HOME",
+      "PIP_CACHE_DIR",
+      "SUPERPOWERS_WORKTREE_BASE",
+    ]) {
+      expect(envOf(name)?.startsWith(`${ws}/`)).toBe(true);
+    }
+  });
+
   it("respects descriptor resource limits and override options", () => {
     const descriptor: SessionDescriptor = {
       ...baseDescriptor,
