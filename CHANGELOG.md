@@ -5,6 +5,27 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.14 — 2026-06-12
+
+Headline: **session writes go to the RWX, not the node disk** — fixes the real
+disk-eviction cause AND makes worktrees survive pod restarts.
+
+- The node's ~16 GB local ephemeral overlay (shared by all pods, + the 780 MB
+  image) was filling to 85%+ and cascade-evicting sessions (exit 137,
+  `ephemeral-storage`) — the 93 GB RWX volume was never the issue. Sessions wrote
+  caches / `/tmp` / worktrees to the ephemeral disk (`TMPDIR` was unset).
+- Session-agent container now points the heavy/temp/worktree dirs UNDER the
+  per-session RWX `workspacePath`: `TMPDIR`, `XDG_CACHE_HOME`, `npm_config_cache`,
+  `CARGO_HOME`, `PIP_CACHE_DIR`, `SUPERPOWERS_WORKTREE_BASE` → `<ws>/.{tmp,cache,
+  cargo,worktrees}` (derived from `workspacePath`, never hardcoded).
+- Session-agent **startup** `mkdir -p`s those dirs and **symlinks
+  `~/.config/superpowers/worktrees` → `<ws>/.worktrees`** (idempotent, no
+  clobber) — so worktrees land on the persistent RWX and **survive pod restart /
+  recreation** (ephemeral is wiped). Result: node overlay stays lean (no more
+  eviction) and no more lost worktree assets. k8s 65 + session-agent 54 tests.
+- Residual: tools hardcoding an absolute `/tmp` (ignoring `$TMPDIR`) still hit
+  ephemeral; the dominant offenders are redirected.
+
 ## v0.5.13 — 2026-06-12
 
 Headline: **rate-limited interactive sessions can auto-resume** — the throttle
