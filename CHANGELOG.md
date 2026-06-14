@@ -5,6 +5,24 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.16 — 2026-06-14
+
+Headline: **rename a remote session** — `remote refresh <id> --name <name>`.
+
+- Sessions created without a display name showed up as the generic `workspace`
+  in `remote ls`, with no way to fix it afterwards (display name is set at create
+  time; the post-restart announce only re-fills it from the Pod's
+  `SESSION_DISPLAY_NAME`, which a nameless session never had — circular).
+- `remote refresh <id> --name openerp` stamps the descriptor on the hard refresh
+  (Pod recreate). The name rides as a `?displayName=` query on
+  `POST /:id/credentials` (the JSON body is the credentials map) and is applied
+  before the resume-arg rewrite, so it flows into the rebuilt descriptor + the
+  new Pod's `SESSION_DISPLAY_NAME` and survives the next announce/refresh. The
+  conversation resumes as usual; `--soft` ignores it (no recreate).
+- Fixes a stale `announce→refresh` parity test assertion: a custom-limits Pod's
+  `resources.limits` legitimately carries the v0.5.12 anti-eviction
+  `ephemeral-storage` cap alongside cpu/memory.
+
 ## v0.5.15 — 2026-06-14
 
 Headline: **Phase 0 reliability** — caches off the shared RWX onto a bounded
