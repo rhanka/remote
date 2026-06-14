@@ -133,6 +133,105 @@ const UUID_RE =
  * most-recently-modified conversation file under the profile's state dir,
  * reduced to a uuid (if present in the name) or the filename stem.
  */
+/**
+ * Profiles whose conversation files live under a per-cwd, PATH-ENCODED project
+ * dir (`<relDir>/<cwd-with-slashes-as-dashes>/<convId>.jsonl`). claude resolves
+ * `--resume <id>` only WITHIN the current cwd's project dir, so a conversation
+ * staged under a DIFFERENT key is invisible to a Pod running in workspacePath.
+ * (codex keys sessions by id, agy by its own scheme — neither needs this.)
+ */
+const PATH_ENCODED_PROJECT_DIRS: Readonly<Record<string, string>> = {
+  claude: ".claude/projects",
+  "claude-code": ".claude/projects",
+};
+
+/** claude's project-key encoding of an absolute cwd: every "/" → "-". */
+export function projectKeyForCwd(cwd: string): string {
+  return cwd.replace(/\//g, "-");
+}
+
+export type ConversationCanonicalization = {
+  /** Conversation filename(s) copied into the canonical key dir (empty = no-op). */
+  readonly copied: ReadonlyArray<string>;
+  /** The cwd-derived project key conversations must live under to resume. */
+  readonly canonicalKey: string;
+};
+
+/**
+ * Make the newest conversation resolvable under the cwd's canonical project key
+ * so `claude --resume <id>` (run with cwd=workspacePath) actually finds it.
+ *
+ * `remote migrate` stages a live conversation under the project key derived
+ * from the USER'S LOCAL path (e.g. `-home-antoinefa-src-foo`), but the Pod runs
+ * the CLI in `workspacePath` (e.g. `/workspace` → key `-workspace`). claude
+ * resolves `--resume <id>` only within the current cwd's project dir, so the
+ * resume silently falls back to a fresh shell — the remote-resume bug. This
+ * copies the newest `.jsonl` (the main conversation; companion subagent dirs
+ * are auxiliary, matching what migrate stages) from whatever key holds it into
+ * the canonical key dir.
+ *
+ * Idempotent + best-effort: if the newest conversation already lives under the
+ * canonical key (native remote session, or a prior run's copy — which is newer)
+ * nothing is copied, and an existing file at the destination is never clobbered.
+ */
+export function canonicalizeConversationKey(
+  profile: string,
+  home: string,
+  cwd: string,
+): ConversationCanonicalization {
+  const relDir = PATH_ENCODED_PROJECT_DIRS[profile];
+  const canonicalKey = projectKeyForCwd(cwd);
+  if (!relDir) return { copied: [], canonicalKey };
+
+  const projectsRoot = join(home, relDir);
+  if (!existsSync(projectsRoot)) return { copied: [], canonicalKey };
+
+  let keys;
+  try {
+    keys = readdirSync(projectsRoot, { withFileTypes: true });
+  } catch {
+    return { copied: [], canonicalKey };
+  }
+
+  // Newest <key>/<convId>.jsonl across ALL project keys.
+  let newest:
+    | { key: string; file: string; abs: string; mtime: number }
+    | undefined;
+  for (const k of keys) {
+    if (!k.isDirectory()) continue;
+    const keyDir = join(projectsRoot, k.name);
+    let files;
+    try {
+      files = readdirSync(keyDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
+      const abs = join(keyDir, f.name);
+      const mtime = statSync(abs).mtimeMs;
+      if (!newest || mtime > newest.mtime)
+        newest = { key: k.name, file: f.name, abs, mtime };
+    }
+  }
+  // Nothing to resume, or the newest conversation already lives under the
+  // canonical key — both no-ops.
+  if (!newest || newest.key === canonicalKey)
+    return { copied: [], canonicalKey };
+
+  const dstDir = join(projectsRoot, canonicalKey);
+  const dst = join(dstDir, newest.file);
+  // Never clobber a conversation already present at the canonical key.
+  if (existsSync(dst)) return { copied: [], canonicalKey };
+  try {
+    mkdirSync(dstDir, { recursive: true });
+    cpSync(newest.abs, dst);
+    return { copied: [newest.file], canonicalKey };
+  } catch {
+    return { copied: [], canonicalKey };
+  }
+}
+
 export function detectCliSessionId(
   profile: string,
   home: string,

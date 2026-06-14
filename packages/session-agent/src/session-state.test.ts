@@ -11,13 +11,20 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
 import {
+  canonicalizeConversationKey,
   detectCliSessionId,
+  projectKeyForCwd,
   restoreSessionState,
   snapshotSessionState,
 } from "./session-state.js";
 
-// Scratch lives under the package (gitignored .state-test/), never /tmp.
-const SCRATCH_ROOT = join(dirname(fileURLToPath(import.meta.url)), ".state-test");
+// Scratch lives under the package (gitignored), never /tmp. A file-specific
+// root so the parallel redirect-storage.test.ts (same src dir) can't race this
+// suite's afterAll rmSync against the other's writes (ENOTEMPTY).
+const SCRATCH_ROOT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  ".state-test-session",
+);
 
 function tmp(prefix: string): string {
   mkdirSync(SCRATCH_ROOT, { recursive: true });
@@ -96,5 +103,78 @@ describe("snapshot/restore round-trip across profiles", () => {
     const ws = tmp("ws-");
     expect(snapshotSessionState("shell", home, ws)).toEqual([]);
     expect(restoreSessionState("opencode", home, ws)).toEqual([]);
+  });
+});
+
+describe("projectKeyForCwd", () => {
+  it("path-encodes an absolute cwd the way claude does (/ → -)", () => {
+    expect(projectKeyForCwd("/workspace")).toBe("-workspace");
+    expect(projectKeyForCwd("/home/antoinefa/src/foo")).toBe(
+      "-home-antoinefa-src-foo",
+    );
+  });
+});
+
+describe("canonicalizeConversationKey", () => {
+  const CONV = "abcd1234-1111-2222-3333-444455556666";
+
+  it("copies a migrated conversation into the cwd's canonical project key", () => {
+    const home = tmp("home-");
+    // Staged by `remote migrate` under the user's LOCAL path key.
+    const localKey = "-home-antoinefa-src-foo";
+    writeAt(
+      join(home, ".claude/projects", localKey, `${CONV}.jsonl`),
+      "conv",
+      1000,
+    );
+
+    const result = canonicalizeConversationKey("claude", home, "/workspace");
+    expect(result.canonicalKey).toBe("-workspace");
+    expect(result.copied).toEqual([`${CONV}.jsonl`]);
+    // Now resolvable by `claude --resume` running in cwd=/workspace.
+    expect(
+      detectCliSessionId("claude", home),
+    ).toBe(CONV);
+  });
+
+  it("is a no-op when the newest conversation already lives under the canonical key", () => {
+    const home = tmp("home-");
+    writeAt(
+      join(home, ".claude/projects", "-workspace", `${CONV}.jsonl`),
+      "conv",
+      1000,
+    );
+    const result = canonicalizeConversationKey("claude", home, "/workspace");
+    expect(result.copied).toEqual([]);
+  });
+
+  it("leaves a newer native conversation at the canonical key untouched", () => {
+    const home = tmp("home-");
+    const other = "ffffffff-0000-0000-0000-000000000000";
+    // A NEWER native conv at the canonical key + an older migrated one under a
+    // local key: the newest already resolves under the cwd, so it's a no-op and
+    // the native conv is never overwritten.
+    writeAt(
+      join(home, ".claude/projects", "-workspace", `${CONV}.jsonl`),
+      "native",
+      2000,
+    );
+    writeAt(
+      join(home, ".claude/projects", "-other-path", `${other}.jsonl`),
+      "older",
+      1000,
+    );
+    const result = canonicalizeConversationKey("claude", home, "/workspace");
+    expect(result.copied).toEqual([]);
+  });
+
+  it("is a no-op for non-path-encoded profiles (codex/agy)", () => {
+    const home = tmp("home-");
+    expect(
+      canonicalizeConversationKey("codex", home, "/workspace").copied,
+    ).toEqual([]);
+    expect(
+      canonicalizeConversationKey("agy", home, "/workspace").copied,
+    ).toEqual([]);
   });
 });

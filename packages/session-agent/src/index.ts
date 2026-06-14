@@ -9,6 +9,7 @@ import { connectWebSocketTransport } from "./websocket-transport.js";
 import { exportWorkspace, materializeWorkspace } from "./workspace-sync.js";
 import { bootstrapGit } from "./git-bootstrap.js";
 import {
+  canonicalizeConversationKey,
   detectCliSessionId,
   snapshotSessionState,
 } from "./session-state.js";
@@ -27,6 +28,8 @@ export {
   restoreSessionState,
   snapshotSessionState,
   detectCliSessionId,
+  canonicalizeConversationKey,
+  projectKeyForCwd,
 } from "./session-state.js";
 export { writePresence, clearPresence, safePathSegment } from "./h2a-presence.js";
 export {
@@ -271,6 +274,24 @@ export async function main(): Promise<void> {
   // via a subPath volume mount (see k8s-orchestrator spec.ts). So the log is on
   // the durable volume from PID 1 — no startup copy/symlink, and in-session
   // history survives pod restart/re-deport by construction.
+
+  // Canonicalize the conversation's project key to THIS Pod's cwd
+  // (workspacePath) BEFORE the CLI launches: `remote migrate` stages the live
+  // conversation under the user's LOCAL path key, but claude resolves
+  // `--resume <id>` only within the cwd's project dir (here `-workspace`), so
+  // without this the resume silently drops to a fresh shell (the remote-resume
+  // bug). Idempotent + best-effort for a native session (newest conv already
+  // under the canonical key → no-op).
+  try {
+    const canon = canonicalizeConversationKey(profile, home, workspacePath);
+    if (canon.copied.length > 0) {
+      console.log(
+        `[session-agent] canonicalized conversation under ${canon.canonicalKey} for resume: ${canon.copied.join(", ")}`,
+      );
+    }
+  } catch (error) {
+    console.error("[session-agent] conversation canonicalize failed:", error);
+  }
 
   // Project this session as an h2a presence file in the workspace (DEC-059),
   // so other sessions / an h2a sidecar can discover who's on this workspace.
