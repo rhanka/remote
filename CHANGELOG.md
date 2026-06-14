@@ -5,6 +5,37 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## v0.5.15 — 2026-06-14
+
+Headline: **Phase 0 reliability** — caches off the shared RWX onto a bounded
+per-pod scratch disk, and remote conversation resume actually works.
+
+- **Caches/tmp → bounded scratch `emptyDir`, not the RWX (corrects v0.5.14).**
+  v0.5.14 redirected `$TMPDIR`/`XDG_CACHE_HOME`/`npm`/`cargo`/`pip` onto the RWX
+  workspace subPath. That was wrong: the RWX is slow network File Storage and a
+  single point of failure, and routing regenerable, IO-hot caches through it
+  risks git/npm-lock corruption for no durability gain. They now live on a
+  per-pod `emptyDir` (`/scratch`) with a `sizeLimit` (`SESSION_SCRATCH_SIZE_LIMIT`,
+  default `6Gi`): fast node-local disk, but BOUNDED — exceeding it evicts only
+  that pod, never the node-wide DiskPressure cascade that started this thread
+  (the v0.5.12 ephemeral request/limit is still the backstop). **Worktrees stay
+  on the RWX** (`<ws>/.worktrees`) — those are durable assets that must survive a
+  restart. `K8sVolume` gains an `emptyDir` variant; `planStorageRedirect` takes a
+  `scratch` arg. k8s 65 + session-agent tests.
+- **Remote conversation resume fixed (the bare-shell-on-resume bug).** A session
+  created by `remote migrate` staged its live conversation under the project key
+  derived from the user's LOCAL path, but the Pod runs the CLI in `workspacePath`
+  (`/workspace` → key `-workspace`), and claude resolves `--resume <id>` only
+  within the cwd's project dir — so the resume silently fell back to a fresh
+  shell while the conversation sat on the RWX under an unreachable key. The
+  session-agent now canonicalizes the newest conversation under the cwd's project
+  key at startup (idempotent, never clobbers, self-heals already-staged convs,
+  no-op for codex/agy). 59 session-agent tests.
+- Phase 0 of the session-consolidation roadmap. P0.2 (durable control-plane
+  session state via the `session.announce` re-announce on every agent reconnect)
+  was already shipped — a control-plane restart repopulates its store from the
+  agents, so sessions and their resume args survive it.
+
 ## v0.5.14 — 2026-06-12
 
 Headline: **session writes go to the RWX, not the node disk** — fixes the real
