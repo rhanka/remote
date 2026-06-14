@@ -419,15 +419,22 @@ export async function refreshRemoteSession(
   sessionId: string,
   credentials: Readonly<Record<string, string>>,
   fetchImpl: typeof fetch = fetch,
+  displayName?: string,
 ): Promise<{ sessionId: string; accepted: boolean }> {
-  const response = await fetchImpl(
-    joinUrl(baseUrl, `/sessions/${sessionId}/credentials`),
-    {
-      method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders() },
-      body: JSON.stringify(credentials),
-    },
-  );
+  // displayName rides as a query param (the JSON body is the free-form
+  // path→base64 credentials map, so it has no room for a named field). The
+  // control-plane stamps it onto the session descriptor before recreating the
+  // Pod, so the new name sticks (and survives the next announce/refresh).
+  const path = `/sessions/${sessionId}/credentials`;
+  const url =
+    displayName && displayName.length > 0
+      ? `${joinUrl(baseUrl, path)}?displayName=${encodeURIComponent(displayName)}`
+      : joinUrl(baseUrl, path);
+  const response = await fetchImpl(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders() },
+    body: JSON.stringify(credentials),
+  });
   if (!response.ok) {
     throw new Error(
       `refreshRemoteSession: ${response.status} ${response.statusText}`,

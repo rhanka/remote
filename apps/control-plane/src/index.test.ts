@@ -1258,7 +1258,13 @@ describe("control plane", () => {
       env: ReadonlyArray<{ name: string; value: string }>;
       resources?: { limits?: Record<string, string> };
     };
-    expect(container.resources?.limits).toEqual({ cpu: "4", memory: "8Gi" });
+    // Custom cpu/memory override the baseline; the anti-eviction
+    // ephemeral-storage cap is always added (v0.5.12) — see SESSION_AGENT_EPHEMERAL_LIMIT.
+    expect(container.resources?.limits).toEqual({
+      cpu: "4",
+      memory: "8Gi",
+      "ephemeral-storage": "8Gi",
+    });
     const env = container.env;
     expect(env.find((e) => e.name === "SESSION_DISPLAY_NAME")?.value).toBe(
       "big-build",

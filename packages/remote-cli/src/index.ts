@@ -339,6 +339,7 @@ type RefreshOpts = {
   profile?: string;
   auth?: boolean;
   authRefresh?: boolean;
+  name?: string;
 };
 
 function describeAuthStatus(status: AuthDiagnosticsStatus): string {
@@ -591,9 +592,17 @@ async function refreshProfileSession(
     return;
   }
 
-  const response = await refreshRemoteSession(baseUrl, sessionId, credentials);
+  const response = await refreshRemoteSession(
+    baseUrl,
+    sessionId,
+    credentials,
+    fetch,
+    opts.name,
+  );
   process.stderr.write(
-    `[remote] refresh ${response.accepted ? "accepted" : "rejected"} for ${response.sessionId}\n`,
+    `[remote] refresh ${response.accepted ? "accepted" : "rejected"} for ${response.sessionId}` +
+      (opts.name ? ` (renamed → ${opts.name})` : "") +
+      "\n",
   );
 }
 
@@ -4864,6 +4873,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .option(
       "--profile <profile>",
       "override the auto-detected profile (rarely needed)",
+    )
+    .option(
+      "--name <name>",
+      "set the session's display name (shown as PROJECT in `remote ls`); applied on the hard refresh (Pod recreate), ignored with --soft",
     )
     .option("--no-auth", "skip bundling local credentials")
     .option(

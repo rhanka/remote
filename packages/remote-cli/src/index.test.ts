@@ -439,6 +439,8 @@ describe("main", () => {
       "http://localhost:8080",
       "sess-refresh",
       { ".codex/auth.json": "BASE64" },
+      expect.any(Function),
+      undefined,
     );
   });
 
@@ -463,6 +465,8 @@ describe("main", () => {
       "http://localhost:8080",
       "sess-refresh",
       { ".codex/auth.json": "BASE64" },
+      expect.any(Function),
+      undefined,
     );
   });
 
@@ -531,6 +535,8 @@ describe("main", () => {
       "http://localhost:8080",
       "sess-refresh",
       { ".codex/auth.json": "BASE64" },
+      expect.any(Function),
+      undefined,
     );
   });
 

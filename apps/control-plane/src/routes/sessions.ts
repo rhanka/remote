@@ -495,6 +495,19 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
       const userId = c.var.auth!.userId;
       const stored = store.get(id, userId);
       if (!stored) return notFound(c);
+      // Optional rename: a `?displayName=` query stamps the descriptor so the
+      // recreated Pod gets SESSION_DISPLAY_NAME and `remote ls` shows the real
+      // project name. Done here (not the JSON body, which is reserved for the
+      // free-form credentials map). Applied BEFORE descriptorWithFreshResume so
+      // it flows into the rebuilt descriptor regardless of the resume action.
+      const renameTo = c.req.query("displayName")?.trim();
+      const renamedBase: SessionDescriptor =
+        renameTo !== undefined &&
+        renameTo.length > 0 &&
+        renameTo !== stored.displayName
+          ? { ...stored, displayName: renameTo }
+          : stored;
+      const renamed = renamedBase !== stored;
       // A refresh regenerates the Pod from the descriptor, replaying its
       // startup args. Those args were captured at CREATION time; the
       // conversation may have advanced/forked since (the agent reports the
@@ -502,15 +515,20 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
       // id BEFORE the provisioner rebuilds the Pod, so the refreshed CLI
       // resumes where the user actually is — not the stale creation-time file.
       // Without a reported cliSessionId (old agent) this is a no-op.
-      const fresh = descriptorWithFreshResume(stored);
+      const fresh = descriptorWithFreshResume(renamedBase);
       const descriptor = fresh.descriptor;
+      if (renamed) {
+        console.log(`[control-plane] refresh ${id}: displayName → ${renameTo}`);
+      }
       if (fresh.action !== "unchanged") {
         console.log(
           `[control-plane] refresh ${id}: resume arg ${fresh.action} → ${descriptor.cliSessionId}` +
             (fresh.previous !== undefined ? ` (was ${fresh.previous})` : ""),
         );
+      }
+      if (renamed || fresh.action !== "unchanged") {
         // Persist so the record matches the Pod actually running (and so a
-        // later announce/refresh starts from the rewritten args).
+        // later announce/refresh starts from the rewritten args + name).
         store.put(descriptor, userId);
       }
       const body = validatedBody<RefreshSessionCredentialsRequest>(c);
