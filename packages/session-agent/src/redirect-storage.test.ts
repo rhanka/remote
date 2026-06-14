@@ -30,18 +30,19 @@ afterAll(() => {
 });
 
 describe("planStorageRedirect", () => {
-  it("derives all cache/tmp/cargo/worktree dirs under the RWX workspacePath", () => {
+  it("puts caches/tmp on the scratch mount, worktrees on the RWX workspace", () => {
     const plan = planStorageRedirect({
       workspacePath: "/workspace",
       home: "/root",
+      scratch: "/scratch",
       env: {},
     });
     expect(plan.dirs).toEqual([
-      "/workspace/.tmp",
-      "/workspace/.cache",
-      "/workspace/.cache/npm",
-      "/workspace/.cargo",
-      "/workspace/.cache/pip",
+      "/scratch/tmp",
+      "/scratch/cache",
+      "/scratch/cache/npm",
+      "/scratch/cargo",
+      "/scratch/cache/pip",
       "/workspace/.worktrees",
     ]);
     // legacy global superpowers worktree path symlinked onto the RWX base
@@ -53,16 +54,15 @@ describe("planStorageRedirect", () => {
     ]);
   });
 
-  it("honors a non-default workspacePath and home (never hardcodes /workspace)", () => {
+  it("worktree base follows a non-default workspacePath; caches stay on scratch", () => {
     const plan = planStorageRedirect({
       workspacePath: "/data/ws",
       home: "/home/antoinefa",
+      scratch: "/scratch",
       env: {},
     });
-    expect(plan.dirs).toContain("/data/ws/.tmp");
-    expect(plan.dirs).toContain("/data/ws/.cache/npm");
-    expect(plan.dirs).toContain("/data/ws/.cargo");
-    expect(plan.dirs).toContain("/data/ws/.cache/pip");
+    expect(plan.dirs).toContain("/scratch/tmp");
+    expect(plan.dirs).toContain("/scratch/cache/npm");
     expect(plan.dirs).toContain("/data/ws/.worktrees");
     expect(plan.symlinks[0]).toEqual({
       link: "/home/antoinefa/.config/superpowers/worktrees",
@@ -96,7 +96,8 @@ describe("applyStorageRedirect", () => {
     mkdirSync(ws, { recursive: true });
     mkdirSync(home, { recursive: true });
 
-    const plan = planStorageRedirect({ workspacePath: ws, home, env: {} });
+    const scratch = join(root, "scratch");
+    const plan = planStorageRedirect({ workspacePath: ws, home, scratch, env: {} });
     const first = applyStorageRedirect(plan);
     // every dir created + the one symlink
     expect(first.length).toBe(plan.dirs.length + 1);
@@ -123,7 +124,12 @@ describe("applyStorageRedirect", () => {
     mkdirSync(link, { recursive: true });
     writeFileSync(join(link, "keep.txt"), "preexisting");
 
-    const plan = planStorageRedirect({ workspacePath: ws, home, env: {} });
+    const plan = planStorageRedirect({
+      workspacePath: ws,
+      home,
+      scratch: join(root, "scratch"),
+      env: {},
+    });
     applyStorageRedirect(plan);
 
     // Untouched: still a directory, file preserved (not clobbered by a symlink).
@@ -140,7 +146,12 @@ describe("applyStorageRedirect", () => {
     mkdirSync(dirname(link), { recursive: true });
     symlinkSync(target, link);
 
-    const plan = planStorageRedirect({ workspacePath: ws, home, env: {} });
+    const plan = planStorageRedirect({
+      workspacePath: ws,
+      home,
+      scratch: join(root, "scratch"),
+      env: {},
+    });
     const done = applyStorageRedirect(plan);
     expect(done.some((m) => m.startsWith("symlink "))).toBe(false);
     expect(readlinkSync(link)).toBe(target);

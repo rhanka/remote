@@ -15,6 +15,8 @@ import {
   SESSION_AGENT_EPHEMERAL_REQUEST,
   SESSION_AGENT_MEM_LIMIT,
   SESSION_AGENT_MEM_REQUEST,
+  SCRATCH_MOUNT,
+  SESSION_SCRATCH_SIZE_LIMIT,
   buildSessionPodSpec,
   buildSessionPvcSpec,
   buildWorkspaceGcJanitorPodSpec,
@@ -124,47 +126,47 @@ describe("k8s spec builders", () => {
     });
   });
 
-  it("points TMPDIR/caches/cargo/worktree-base under the RWX workspacePath (anti-ephemeral)", () => {
+  it("points caches/tmp at the bounded scratch emptyDir, worktrees on the RWX", () => {
     const pod = buildSessionPodSpec(baseDescriptor);
     const container = pod.spec.containers[0]!;
     const ws = baseDescriptor.workspacePath; // "/workspace"
     const envOf = (name: string) =>
       container.env.find((e) => e.name === name)?.value;
-    expect(envOf("TMPDIR")).toBe(`${ws}/.tmp`);
-    expect(envOf("XDG_CACHE_HOME")).toBe(`${ws}/.cache`);
-    expect(envOf("npm_config_cache")).toBe(`${ws}/.cache/npm`);
-    expect(envOf("CARGO_HOME")).toBe(`${ws}/.cargo`);
-    expect(envOf("PIP_CACHE_DIR")).toBe(`${ws}/.cache/pip`);
+    // caches/tmp on the node-local bounded scratch emptyDir (NOT the RWX).
+    expect(envOf("TMPDIR")).toBe(`${SCRATCH_MOUNT}/tmp`);
+    expect(envOf("XDG_CACHE_HOME")).toBe(`${SCRATCH_MOUNT}/cache`);
+    expect(envOf("npm_config_cache")).toBe(`${SCRATCH_MOUNT}/cache/npm`);
+    expect(envOf("CARGO_HOME")).toBe(`${SCRATCH_MOUNT}/cargo`);
+    expect(envOf("PIP_CACHE_DIR")).toBe(`${SCRATCH_MOUNT}/cache/pip`);
+    // worktrees stay on the persistent RWX workspace.
     expect(envOf("SUPERPOWERS_WORKTREE_BASE")).toBe(`${ws}/.worktrees`);
     // ADDITIVE: existing env (HOME, WORKSPACE_PATH, SESSION_ID) is untouched.
     expect(envOf("WORKSPACE_PATH")).toBe(ws);
     expect(envOf("HOME")).toBe(DEFAULT_BUILDER_OPTIONS.home);
     expect(envOf("SESSION_ID")).toBe(baseDescriptor.id);
+    // a bounded scratch emptyDir volume is mounted at SCRATCH_MOUNT.
+    const scratchVol = pod.spec.volumes.find(
+      (v) => "emptyDir" in v && v.name === "scratch",
+    );
+    expect(scratchVol && "emptyDir" in scratchVol && scratchVol.emptyDir.sizeLimit).toBe(
+      SESSION_SCRATCH_SIZE_LIMIT,
+    );
+    expect(
+      container.volumeMounts.some((m) => m.mountPath === SCRATCH_MOUNT),
+    ).toBe(true);
   });
 
-  it("derives the redirect env from a NON-default workspacePath (never hardcodes /workspace)", () => {
+  it("worktree base derives from a NON-default workspacePath (never hardcodes /workspace)", () => {
     const ws = "/data/ws";
     const pod = buildSessionPodSpec({ ...baseDescriptor, workspacePath: ws });
     const container = pod.spec.containers[0]!;
     const envOf = (name: string) =>
       container.env.find((e) => e.name === name)?.value;
-    expect(envOf("TMPDIR")).toBe(`${ws}/.tmp`);
-    expect(envOf("XDG_CACHE_HOME")).toBe(`${ws}/.cache`);
-    expect(envOf("npm_config_cache")).toBe(`${ws}/.cache/npm`);
-    expect(envOf("CARGO_HOME")).toBe(`${ws}/.cargo`);
-    expect(envOf("PIP_CACHE_DIR")).toBe(`${ws}/.cache/pip`);
+    // worktree base follows the actual RWX mount, not a hardcoded default.
     expect(envOf("SUPERPOWERS_WORKTREE_BASE")).toBe(`${ws}/.worktrees`);
-    // none of the redirect values leak the literal "/workspace" default
-    for (const name of [
-      "TMPDIR",
-      "XDG_CACHE_HOME",
-      "npm_config_cache",
-      "CARGO_HOME",
-      "PIP_CACHE_DIR",
-      "SUPERPOWERS_WORKTREE_BASE",
-    ]) {
-      expect(envOf(name)?.startsWith(`${ws}/`)).toBe(true);
-    }
+    // caches stay on the fixed node-local scratch mount regardless of ws.
+    expect(envOf("TMPDIR")).toBe(`${SCRATCH_MOUNT}/tmp`);
+    expect(envOf("XDG_CACHE_HOME")).toBe(`${SCRATCH_MOUNT}/cache`);
   });
 
   it("respects descriptor resource limits and override options", () => {

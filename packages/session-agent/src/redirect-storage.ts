@@ -2,13 +2,15 @@ import { lstatSync, mkdirSync, readlinkSync, symlinkSync } from "node:fs";
 import { dirname } from "node:path";
 
 /**
- * Belt-and-braces companion to the k8s-orchestrator env vars (TMPDIR,
- * XDG_CACHE_HOME, npm_config_cache, CARGO_HOME, PIP_CACHE_DIR,
- * SUPERPOWERS_WORKTREE_BASE), all pointed under the per-session RWX workspace.
+ * Belt-and-braces companion to the k8s-orchestrator env vars: caches/tmp
+ * (TMPDIR, XDG_CACHE_HOME, npm_config_cache, CARGO_HOME, PIP_CACHE_DIR) point at
+ * the bounded node-local scratch emptyDir (SCRATCH_MOUNT), while worktrees
+ * (SUPERPOWERS_WORKTREE_BASE) point at the persistent RWX workspace.
  *
- * The env vars stop NEW heavy/temp/cache writes from landing on the node's
- * ephemeral overlay disk (which DiskPressure-cascade-evicts sessions and is
- * wiped on restart). But two things still need help at startup:
+ * The env vars stop NEW heavy/temp/cache writes from piling onto the node's
+ * shared ephemeral overlay unbounded (which DiskPressure-cascade-evicted whole
+ * nodes); the scratch emptyDir's sizeLimit caps a single pod instead. But two
+ * things still need help at startup:
  *
  *   1. The target dirs must EXIST before the tools first write to them
  *      (npm/cargo/pip don't always mkdir -p their cache root).
@@ -42,15 +44,21 @@ export type StoragePlan = {
 export function planStorageRedirect(input: {
   readonly workspacePath: string;
   readonly home: string;
+  /** Mount of the bounded node-local scratch emptyDir (SCRATCH_MOUNT, default
+   * "/scratch") where caches/tmp live — OFF the shared RWX. */
+  readonly scratch?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): StoragePlan {
   const ws = input.workspacePath;
+  const scratch = input.scratch ?? "/scratch";
   const env = input.env ?? {};
-  const tmpdir = env.TMPDIR ?? `${ws}/.tmp`;
-  const xdgCache = env.XDG_CACHE_HOME ?? `${ws}/.cache`;
-  const npmCache = env.npm_config_cache ?? `${ws}/.cache/npm`;
-  const cargoHome = env.CARGO_HOME ?? `${ws}/.cargo`;
-  const pipCache = env.PIP_CACHE_DIR ?? `${ws}/.cache/pip`;
+  // Caches/tmp default onto the bounded scratch emptyDir (fast node-local,
+  // not the shared RWX); worktrees default onto the RWX (persistent).
+  const tmpdir = env.TMPDIR ?? `${scratch}/tmp`;
+  const xdgCache = env.XDG_CACHE_HOME ?? `${scratch}/cache`;
+  const npmCache = env.npm_config_cache ?? `${scratch}/cache/npm`;
+  const cargoHome = env.CARGO_HOME ?? `${scratch}/cargo`;
+  const pipCache = env.PIP_CACHE_DIR ?? `${scratch}/cache/pip`;
   const worktreeBase = env.SUPERPOWERS_WORKTREE_BASE ?? `${ws}/.worktrees`;
 
   // Dedupe while preserving order (parents before children isn't required —

@@ -21,6 +21,10 @@ export type K8sVolume =
         readonly secretName: string;
         readonly defaultMode?: number;
       };
+    }
+  | {
+      readonly name: string;
+      readonly emptyDir: { readonly sizeLimit?: string };
     };
 
 export type K8sPodAffinityTerm = {
@@ -143,6 +147,7 @@ const CONVERSATION_DIRS: Readonly<Record<string, string>> = {
 
 const PVC_VOLUME = "workspace";
 const AUTH_VOLUME = "auth";
+const SCRATCH_VOLUME = "scratch";
 const POD_CONTAINER = "session-agent";
 const AUTH_STAGING_DIR = "/run/auth-bundle";
 
@@ -190,6 +195,15 @@ export const SESSION_AGENT_EPHEMERAL_REQUEST =
 /** ephemeral-storage LIMIT — generous per-pod cap; an over-runner is evicted alone. */
 export const SESSION_AGENT_EPHEMERAL_LIMIT =
   process.env.SESSION_AGENT_EPHEMERAL_LIMIT ?? "8Gi";
+
+/** Mount path of the per-pod scratch `emptyDir` (bounded, node-local) where the
+ * session's caches/tmp live ($TMPDIR/XDG_CACHE_HOME/npm/cargo/pip) — OFF the
+ * shared RWX (which is reserved for /workspace + conv + worktrees). */
+export const SCRATCH_MOUNT = "/scratch";
+/** sizeLimit of the scratch emptyDir: exceeding it evicts ONLY this pod, never a
+ * node-wide cascade. Env-overridable. */
+export const SESSION_SCRATCH_SIZE_LIMIT =
+  process.env.SESSION_SCRATCH_SIZE_LIMIT ?? "6Gi";
 
 /** Default janitor image: tiny, has sh/find/stat/du/tar — everything the GC
  * script needs. Pinned (never :latest). */
@@ -465,11 +479,18 @@ export function buildSessionPodSpec(
       mountPath: descriptor.workspacePath,
       ...(wsSubPath ? { subPath: wsSubPath } : {}),
     },
+    // Bounded node-local scratch for caches/tmp (see the redirect env). Keeps
+    // hot, regenerable IO off the shared RWX; sizeLimit evicts only this pod.
+    { name: SCRATCH_VOLUME, mountPath: SCRATCH_MOUNT },
   ];
   const volumes: K8sVolume[] = [
     {
       name: PVC_VOLUME,
       persistentVolumeClaim: { claimName },
+    },
+    {
+      name: SCRATCH_VOLUME,
+      emptyDir: { sizeLimit: SESSION_SCRATCH_SIZE_LIMIT },
     },
   ];
 
@@ -573,31 +594,23 @@ export function buildSessionPodSpec(
             },
             { name: "WORKSPACE_PATH", value: descriptor.workspacePath },
             { name: "HOME", value: descriptor.home ?? options.home },
-            // Redirect every heavy / temp / cache / worktree writer OFF the
-            // node's shared ephemeral overlay disk and ONTO the per-session RWX
-            // workspace subPath (descriptor.workspacePath, ~93G free). Without
-            // these, TMPDIR is unset and HOME-anchored caches (~/.cache, ~/.npm,
-            // ~/.cargo, pip) plus superpowers worktrees all land on the 17G node
-            // overlay → it fills → the kubelet DiskPressure-cascade-EVICTS every
-            // session (exit 137 ephemeral-storage), AND any work written outside
-            // /workspace is LOST on pod restart (ephemeral is wiped). Pointing
-            // them under the RETAINED RWX both stops the eviction and makes the
-            // writes survive a restart/re-deport. NEVER hardcode /workspace —
-            // always derive from descriptor.workspacePath (the actual mount).
-            { name: "TMPDIR", value: `${descriptor.workspacePath}/.tmp` },
-            {
-              name: "XDG_CACHE_HOME",
-              value: `${descriptor.workspacePath}/.cache`,
-            },
-            {
-              name: "npm_config_cache",
-              value: `${descriptor.workspacePath}/.cache/npm`,
-            },
-            { name: "CARGO_HOME", value: `${descriptor.workspacePath}/.cargo` },
-            {
-              name: "PIP_CACHE_DIR",
-              value: `${descriptor.workspacePath}/.cache/pip`,
-            },
+            // Redirect heavy/temp/cache writers OFF the node's shared ephemeral
+            // overlay disk onto a BOUNDED per-pod `emptyDir` (SCRATCH_MOUNT,
+            // sizeLimit SESSION_SCRATCH_SIZE_LIMIT). Caches (~/.cache, ~/.npm,
+            // ~/.cargo, pip, $TMPDIR) are regenerable + IO-hot, so they belong on
+            // FAST node-local disk — but bounded: if a pod exceeds its emptyDir
+            // sizeLimit, the kubelet evicts ONLY that pod, never a node-wide
+            // DiskPressure cascade (the v0.5.12 ephemeral request/limit also caps
+            // it). They must NOT go on the shared RWX (network File Storage =
+            // slow + a SPOF + git/npm-lock corruption risk) — that was the
+            // v0.5.14 mistake, corrected here per the codex review. The RWX
+            // (descriptor.workspacePath) is reserved for /workspace + the
+            // conversation dir + worktrees (persistent assets, see below).
+            { name: "TMPDIR", value: `${SCRATCH_MOUNT}/tmp` },
+            { name: "XDG_CACHE_HOME", value: `${SCRATCH_MOUNT}/cache` },
+            { name: "npm_config_cache", value: `${SCRATCH_MOUNT}/cache/npm` },
+            { name: "CARGO_HOME", value: `${SCRATCH_MOUNT}/cargo` },
+            { name: "PIP_CACHE_DIR", value: `${SCRATCH_MOUNT}/cache/pip` },
             // superpowers `using-git-worktrees` does NOT honor an env var for
             // the worktree base (it picks `.worktrees/<branch>` repo-relative,
             // else a legacy global `~/.config/superpowers/worktrees/<project>`),
