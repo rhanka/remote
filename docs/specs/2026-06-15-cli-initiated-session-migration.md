@@ -315,58 +315,116 @@ control-plane unique) ; (2) **pas de moteur de sync continu fichiers en V1** (gi
 + working set seulement, node_modules reconstruits) ; (3) **SLO = transparence
 mesurée**, pas garantie de latence.
 
-### 6.2 Revue codex 5.5 xhigh — *(en cours, ajoutée à l'itération suivante)*
+### 6.2 Revue codex 5.5 xhigh (vérifiée contre le code) — verdict : **GO-réserves fortes si §6.1 devient le cadrage, NO-GO pour §5 tel quel**
+
+**Convergence** : d'accord avec §6.1 sur (a)→(f). Nuances + ajouts (file:line vérifiés) :
+
+- (a) **§6.1 surestime le « control-plane déjà CAS-capable ».** Le lock actuel
+  (`workspaces.ts:65`) est un `Map` en mémoire, **sans token**, avec unlock
+  **inconditionnel par owner** (`:298`) → insuffisant tel quel. ➜ nouvel endpoint
+  **`lineage leases` persistant** `{lineageId, epoch, holder, incarnationId,
+  location, expiresAt}`, acquire/renew/handoff en **CAS sur `expectedEpoch`**,
+  token monotone exigé sur **toute** mutation (sync/handoff/stop).
+- (b) **Pas un `.remote/lineage.json` unique naïf** → `.remote/lineages/<id>.json`
+  (`lin_<uuidv7>`), pour supporter **plusieurs sessions/fanout même profil** ;
+  mapping incarnation tmux/local, profil, kind, historique de workspace.
+- (c) bootstrap **`git clone/fetch` + base commit**, puis **`git diff --binary`**
+  (staged/unstaged/untracked) + **manifest hashé** pour deletes/renames/modes ;
+  exclusions reconstruites via **package-manager détecté** (pas seulement `npm ci`).
+- (d) état par conv **`{offset, prefixHash, generation, lastAckedToken}`** ; append
+  seulement si hash du préfixe commun match, sinon `.bak` + whole-file gardé.
+- (e) contrat machine = **exactitude des états `synced|pending|degraded|blocked`**
+  + métriques `oldestPendingAge / pendingBytes / lastAckedAt / estimatedCatchup` ;
+  SLO observé **par classe** (conv/hot set vs cold set).
+- (f) d'accord ; A0 doit inclure **tests crash/sleep/rollout à deux holders**
+  (token refusé après expiry, restart control-plane sans perte d'autorité, chemins
+  sync qui refusent un token périmé).
+
+**Trous neufs (manqués même par §6.1) :**
+1. **`ws:<hex>` durable n'est PAS honoré côté control-plane** : `workspaces.ts:25`
+   génère `ws-${rand}` et garde owners/namespaces **en mémoire** (`:55`) → perdu
+   au rollout. Sans **registre de workspace durable**, `lineage→N ws` est bancal.
+   *(C'est pourquoi les workspaces vus sont `ws-t4q2k01`… et non des `ws:<hex>`.)*
+2. **`migrate back` stoppe potentiellement la mauvaise session** (`migrate.ts:677`
+   trie et stoppe la plus récente) → besoin de `GET /sessions?lineageId=`.
+3. **Migration conv très Claude-centrée** (`migrate.ts:260` : plus récent `.jsonl`,
+   parité de chemin, companion dirs ignorés) alors que la spec dit claude **ou
+   codex** (codex = `.codex/sessions`, clé par id, pas par chemin).
+4. **Data-plane de migration en RAM control-plane** : archives workspace/export
+   stockées en mémoire (`sessions.ts:193,403`) → **perdues au rollout**, pas
+   seulement le lease.
+
+**Risques neufs :** (i) le fencing token **ne protège pas les écritures locales
+directes** du CLI réveillé → exiger qu'aucun push/sync ne sorte sans token valide,
+**et suspendre/terminer l'incarnation locale avant** le transfert d'autorité ;
+(ii) **secrets** : `.claude/settings.local.json` + `.remote/sessions` sont
+**force-inclus** dans l'archive (`workspace-sync.ts:115`) → classifier/redacter/
+chiffrer avant transit par le control-plane ; (iii) **rebuild deps** (registry
+auth, lockfile, native deps, cache, réseau) = readiness dédiée, pas un blocker flou.
 
 ## 7. Spec consolidée (post-revue opus 4.8 ; revue codex 5.5 en cours d'intégration)
 
 Les réserves dures de la revue opus (§6.1) sont **adoptées comme décisions**.
 
 ### D1 — Identité
-- **`lineage id`** opaque (`lin:<ulid>`), frappé à la 1re migration, **persisté
-  dans `.remote/lineage.json`** (à côté de `workspace.json`). **Dérivé de rien**
-  (surtout pas de `ws:<hex>`, qui bouge au `git commit`).
+- **`lineage id`** opaque (`lin_<uuidv7>`), frappé à la 1re migration. **Dérivé de
+  rien** (surtout pas de `ws:<hex>`, qui bouge au `git commit`). Persisté **par
+  lineage** sous **`.remote/lineages/<id>.json`** (PAS un fichier unique — pour
+  supporter plusieurs sessions / fanout même profil) : `{lineage, profile, kind,
+  incarnation: {local: {tmux,pid}|null, remote: {sessionId}|null}, wsHistory[]}`.
 - `ws:<hex>` reste l'ancre du **contenu** (subPath RWX). `(lineage, profile)`
   discrimine claude vs codex. `remote ls` + h2a **corrèlent par lineage**, plus
-  par chemin. `migrate back` corrigé pour cibler la session par lineage (fin du
-  « devine la session la plus récente »).
+  par chemin. `migrate back` corrigé : `GET /sessions?lineageId=` (fin du
+  « devine la session la plus récente », `migrate.ts:677`).
 
 ### D2 — Exclusion mutuelle = **control-plane** (pas h2a)
-- Étendre le soft-lock CAS existant (`apps/control-plane/.../workspaces.ts`) en
-  **lease de lineage** : `{lineage, holder, location: local|remote,
-  fencingToken: monotone, since, expiresAt}`.
-- **Fencing token monotone** : toute écriture mutante (push conv, push fichiers,
-  refresh) porte le token courant ; le control-plane **rejette tout token
-  périmé** → neutralise le « zombie de réveil » (laptop qui se réveille offline
-  et tente de flush après expiration du lease). Le heartbeat seul ne suffit pas.
-- **Persistance au rollout** : le lease se reconstruit via `session.announce` au
-  reboot du control-plane (le store l'est déjà) ; option PVC/SQLite sinon.
-- **h2a = observabilité/présence uniquement** (affiche la localisation), jamais
-  l'autorité du verrou. Aucun bail dans un fichier RWX.
-- **Handoff** : acquire@dest (nouveau token) → checkpoint@source (flush conv +
-  hot set) → control-plane bascule holder atomiquement → source quitte → dest
-  relance. Token périmé ⇒ le source ne peut plus muter (anti split-brain).
+- Le lock actuel (`workspaces.ts:65` `Map` mémoire, sans token, unlock
+  inconditionnel `:298`) est **insuffisant** → **nouvel endpoint `lineage
+  leases`** : `{lineageId, epoch, holder, incarnationId, location: local|remote,
+  expiresAt}`. acquire/renew/handoff en **CAS sur `expectedEpoch`**.
+- **Fencing token monotone (= epoch)** exigé sur **TOUTE** mutation (push conv,
+  push fichiers, handoff, stop) ; le control-plane **rejette tout token périmé**
+  → neutralise le « zombie de réveil ». Le heartbeat seul ne suffit pas.
+- **Enforcement côté écriture** : aucun push/sync local ne part sans token valide,
+  **et l'incarnation locale est suspendue/terminée AVANT** le transfert d'autorité
+  (un fencing token serveur ne bloque pas une écriture fichier locale directe).
+- **Persistance au rollout** : lease reconstruit via `session.announce` au reboot
+  (le store l'est déjà) ; sinon PVC/SQLite.
+- **h2a = observabilité/présence uniquement**, jamais l'autorité du verrou. Aucun
+  bail dans un fichier RWX.
+- **Handoff** : acquire@dest (epoch+1) → checkpoint@source (flush conv + hot set)
+  → **suspend/terminate incarnation source** → control-plane bascule holder (CAS)
+  → dest relance. Token périmé ⇒ le source ne peut plus muter (anti split-brain).
 
 ### D3 — Readiness
 `{ready: bool, mode: full|lazy, blockers[], pending:{files, bytes,
 est_seconds}}`. Le AND est **conditionné par `mode`** (en lazy, le cold set en
 attente n'empêche pas `ready`). `conv_resolvable` = **résolution réelle** côté
-pod (le `.jsonl` existe sous la clé-projet encodée du cwd), pas une hypothèse de
-parité de chemin. `plugins_parity` via le manifest plugin/MCP. **node_modules /
-artefacts = `npm ci`/build in-pod = blocker de readiness**, jamais un objet de
-sync.
+pod (le `.jsonl` existe sous la clé-projet encodée du cwd, claude ; **et le
+schéma codex `.codex/sessions` keyé par id**), pas une hypothèse de parité de
+chemin. `plugins_parity` via le manifest plugin/MCP. **`deps_rebuilt`** =
+reconstruction in-pod via **package-manager détecté** (lockfile, registry auth,
+native deps, cache) = **blocker dédié de readiness** (pas un objet de sync, pas un
+blocker flou), jamais un transfert de node_modules.
 
 ### D4 — Sync, deux flux
-- **Flux conv (.jsonl)** : incrémental **offset + garde de préfixe** (comparer le
-  sha du préfixe commun ; append si stable, sinon resync complet + `.bak`). Le
-  `.jsonl` n'est **pas** append-only fiable (compaction/sidechains claude). Cible
-  gap < 30 s. (≈ réécriture de `sync.ts`, assumé.)
-- **Flux fichiers** : **git = source de vérité** (commit/push : delta natif,
-  conflit-aware, reprenable, `gh` auth déjà bundlé) ; **working set non-commité**
-  (petit) = tar/rsync-delta over-exec ; **node_modules/artefacts jamais syncés**.
-  Conflits = **3-way merge + base snapshot** existant (`mergeWorkspaceArchive`),
-  **jamais** last-writer-mtime ; binaire en conflit → `.bak` + marqueur explicite.
-- **SLO `< 2 min` durée / `< 5 min` gap = métrique OBSERVÉE et affichée**, pas un
-  critère d'acceptation binaire (intenable comme garantie sur port-forward/exec).
+- **Flux conv (.jsonl)** : état par conv **`{offset, prefixHash, generation,
+  lastAckedToken}`** ; append seulement si le hash du préfixe commun match, sinon
+  `.bak` + whole-file gardé (jamais overwrite silencieux). Le `.jsonl` n'est
+  **pas** append-only fiable (compaction/sidechains claude). Cible gap < 30 s.
+  (≈ réécriture de `sync.ts`, assumé.)
+- **Flux fichiers** : **git = source de vérité** — bootstrap `git clone/fetch` +
+  base commit, puis **`git diff --binary`** (staged/unstaged/untracked) +
+  **manifest hashé** (deletes/renames/modes) ; **node_modules/artefacts jamais
+  syncés → reconstruits in-pod** (cf. D3). Conflits = **3-way merge + base
+  snapshot** existant (`mergeWorkspaceArchive`), **jamais** last-writer-mtime ;
+  binaire en conflit → `.bak` + marqueur explicite.
+- **SLO** : le contrat machine est **l'exactitude des états
+  `synced|pending|degraded|blocked`** + métriques exposées (`oldestPendingAge`,
+  `pendingBytes`, `lastAckedAt`, `estimatedCatchup`), **par classe** (conv/hot set
+  vs cold set). Le `< 2 min / < 5 min` est un **SLO observé**, pas un critère
+  d'acceptation binaire (intenable comme garantie sur port-forward/exec/repos
+  arbitraires).
 
 ### D5 — Lazy-files + conscience de fermeture
 - Hot set (trackés + conv + récemment modifiés) synchronisé avant readiness ;
@@ -388,10 +446,13 @@ sync.
 ### D7 — Phasage consolidé
 1. **Phase 0** (indépendant, débloquant) : R1 statut tab, R2 rename soft, R3
    auto-reconnect tunnel.
-2. **Phase A0** (GATE DUR, à prototyper avant tout) : décider + prototyper
-   **lease + fencing token au control-plane** ; **régler cap archive 256 Mo /
+2. **Phase A0** (GATE DUR, à prototyper avant tout) : **lease + fencing token
+   persistant au control-plane** (CAS epoch) + **enforcement token sur les chemins
+   d'écriture** + **suspension de l'incarnation source** ; **registre workspace
+   durable + data-plane hors-RAM (D9)** ; **régler cap archive 256 Mo /
    node_modules / `.git` clone-on-start** (sinon `migrate forward` throw sur tout
-   vrai repo).
+   vrai repo). Tests A0 : **crash/sleep/rollout à deux holders** (token refusé
+   après expiry, restart control-plane sans perte d'autorité).
 3. **Phase A** : `lineage id` + readiness + `migrate to-remote/to-local` **mode
    full** ; corriger `migrate back` (lineage).
 4. **Phase B1** : conv incrémentale (garde de préfixe).
@@ -401,8 +462,26 @@ sync.
 (Track : WP `01KV637TTQEA2SR3N738KEJBG7` + phases 0/A0/A/B1/B2/B3.)
 
 ### D8 — Invariants de sécurité/intégrité
-Pas de secret en clair (bundling auth/Secret existant) ; jamais afficher
-« synced » s'il reste du pending ; lease + fencing **avant toute relance**.
+- Pas de secret en clair (bundling auth/Secret existant) ; jamais afficher
+  « synced » s'il reste du pending ; lease + fencing **avant toute relance**.
+- **Redaction archive** : `.claude/settings.local.json` et `.remote/sessions` sont
+  aujourd'hui **force-inclus** dans l'archive (`workspace-sync.ts:115`) →
+  **classifier / redacter / chiffrer** avant tout transit par le control-plane.
 
-> Verdict de cadrage (opus 4.8) : **GO avec réserves**, réserves ci-dessus
-> adoptées. Seconde opinion codex 5.5 à intégrer en §6.2 (confirmation/contradiction).
+### D9 — Durabilité du registre workspace + data-plane (NOUVEAU, trou codex)
+- Le control-plane génère `ws-${rand}` et garde owners/namespaces **en mémoire**
+  (`workspaces.ts:25,55`) → **perdu au rollout** ; ce ne sont **pas** les
+  `ws:<hex>` durables CLI. ➜ **registre workspace persistant** (mapping
+  `ws:<hex>` ↔ subPath ↔ owner ↔ lineages), sinon `lineage→N ws` est bancal.
+- Les **archives workspace/export** sont en RAM control-plane (`sessions.ts:193,
+  403`) → **data-plane de migration perdu au rollout**. ➜ stockage durable (RWX
+  staging) ou transfert direct sans staging RAM.
+- Préalable transverse aux Phases A/B (à séquencer avec A0).
+
+> Verdict de cadrage — **double revue convergente** : opus 4.8 = *GO avec
+> réserves* ; codex 5.5 = *GO-réserves fortes si §6.1 devient le cadrage, NO-GO
+> pour §5 tel quel*. Les deux exigent la **Phase A0 (lease+fencing persistant +
+> enforcement token sur les chemins d'écriture + suspension de l'incarnation
+> source)** AVANT toute migration réelle, sinon le cas nominal « laptop dort →
+> remote reprend → laptop revient » corrompt conv + working set. Réserves
+> adoptées dans D1-D9.
