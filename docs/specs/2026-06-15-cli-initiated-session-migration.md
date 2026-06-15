@@ -317,4 +317,92 @@ mesurée**, pas garantie de latence.
 
 ### 6.2 Revue codex 5.5 xhigh — *(en cours, ajoutée à l'itération suivante)*
 
-## 7. Spec consolidée — après réconciliation des revues
+## 7. Spec consolidée (post-revue opus 4.8 ; revue codex 5.5 en cours d'intégration)
+
+Les réserves dures de la revue opus (§6.1) sont **adoptées comme décisions**.
+
+### D1 — Identité
+- **`lineage id`** opaque (`lin:<ulid>`), frappé à la 1re migration, **persisté
+  dans `.remote/lineage.json`** (à côté de `workspace.json`). **Dérivé de rien**
+  (surtout pas de `ws:<hex>`, qui bouge au `git commit`).
+- `ws:<hex>` reste l'ancre du **contenu** (subPath RWX). `(lineage, profile)`
+  discrimine claude vs codex. `remote ls` + h2a **corrèlent par lineage**, plus
+  par chemin. `migrate back` corrigé pour cibler la session par lineage (fin du
+  « devine la session la plus récente »).
+
+### D2 — Exclusion mutuelle = **control-plane** (pas h2a)
+- Étendre le soft-lock CAS existant (`apps/control-plane/.../workspaces.ts`) en
+  **lease de lineage** : `{lineage, holder, location: local|remote,
+  fencingToken: monotone, since, expiresAt}`.
+- **Fencing token monotone** : toute écriture mutante (push conv, push fichiers,
+  refresh) porte le token courant ; le control-plane **rejette tout token
+  périmé** → neutralise le « zombie de réveil » (laptop qui se réveille offline
+  et tente de flush après expiration du lease). Le heartbeat seul ne suffit pas.
+- **Persistance au rollout** : le lease se reconstruit via `session.announce` au
+  reboot du control-plane (le store l'est déjà) ; option PVC/SQLite sinon.
+- **h2a = observabilité/présence uniquement** (affiche la localisation), jamais
+  l'autorité du verrou. Aucun bail dans un fichier RWX.
+- **Handoff** : acquire@dest (nouveau token) → checkpoint@source (flush conv +
+  hot set) → control-plane bascule holder atomiquement → source quitte → dest
+  relance. Token périmé ⇒ le source ne peut plus muter (anti split-brain).
+
+### D3 — Readiness
+`{ready: bool, mode: full|lazy, blockers[], pending:{files, bytes,
+est_seconds}}`. Le AND est **conditionné par `mode`** (en lazy, le cold set en
+attente n'empêche pas `ready`). `conv_resolvable` = **résolution réelle** côté
+pod (le `.jsonl` existe sous la clé-projet encodée du cwd), pas une hypothèse de
+parité de chemin. `plugins_parity` via le manifest plugin/MCP. **node_modules /
+artefacts = `npm ci`/build in-pod = blocker de readiness**, jamais un objet de
+sync.
+
+### D4 — Sync, deux flux
+- **Flux conv (.jsonl)** : incrémental **offset + garde de préfixe** (comparer le
+  sha du préfixe commun ; append si stable, sinon resync complet + `.bak`). Le
+  `.jsonl` n'est **pas** append-only fiable (compaction/sidechains claude). Cible
+  gap < 30 s. (≈ réécriture de `sync.ts`, assumé.)
+- **Flux fichiers** : **git = source de vérité** (commit/push : delta natif,
+  conflit-aware, reprenable, `gh` auth déjà bundlé) ; **working set non-commité**
+  (petit) = tar/rsync-delta over-exec ; **node_modules/artefacts jamais syncés**.
+  Conflits = **3-way merge + base snapshot** existant (`mergeWorkspaceArchive`),
+  **jamais** last-writer-mtime ; binaire en conflit → `.bak` + marqueur explicite.
+- **SLO `< 2 min` durée / `< 5 min` gap = métrique OBSERVÉE et affichée**, pas un
+  critère d'acceptation binaire (intenable comme garantie sur port-forward/exec).
+
+### D5 — Lazy-files + conscience de fermeture
+- Hot set (trackés + conv + récemment modifiés) synchronisé avant readiness ;
+  cold/heavy en background. **Seuil lazy = temps de transfert estimé** (pas un
+  octet-seuil ; 10⁴ petits fichiers coûtent plus qu'un fichier de 200 Mo).
+- **`SAFE TO CLOSE` conservateur** : tant qu'il reste un octet de delta local
+  non **confirmé-reçu** côté remote ⇒ `PENDING` (jamais de faux `SAFE`). Rendu
+  dans la CLI **et** le statut du tab (lien R1).
+- Réouverture : le transport websocket self-healing reconnecte et **reprend** le
+  pending ; le fencing token empêche tout écrasement par le source zombie.
+
+### D6 — Déclenchement depuis la CLI
+- **(A) `remote migrate to-remote` / `to-local`** = surface utilisateur (étend
+  `migrate forward/back`, qui tient déjà le terminal). 
+- **(B)** option ergonomique : hook **Stop** (fin de tour), **pas** `SessionEnd`
+  (trop tard pour un handoff à chaud).
+- **Pas** de plan de contrôle via h2a (appel control-plane synchrone existant).
+
+### D7 — Phasage consolidé
+1. **Phase 0** (indépendant, débloquant) : R1 statut tab, R2 rename soft, R3
+   auto-reconnect tunnel.
+2. **Phase A0** (GATE DUR, à prototyper avant tout) : décider + prototyper
+   **lease + fencing token au control-plane** ; **régler cap archive 256 Mo /
+   node_modules / `.git` clone-on-start** (sinon `migrate forward` throw sur tout
+   vrai repo).
+3. **Phase A** : `lineage id` + readiness + `migrate to-remote/to-local` **mode
+   full** ; corriger `migrate back` (lineage).
+4. **Phase B1** : conv incrémentale (garde de préfixe).
+5. **Phase B2** : fichiers git-based + working set.
+6. **Phase B3** : lazy + fermeture/réouverture + SLO observé.
+
+(Track : WP `01KV637TTQEA2SR3N738KEJBG7` + phases 0/A0/A/B1/B2/B3.)
+
+### D8 — Invariants de sécurité/intégrité
+Pas de secret en clair (bundling auth/Secret existant) ; jamais afficher
+« synced » s'il reste du pending ; lease + fencing **avant toute relance**.
+
+> Verdict de cadrage (opus 4.8) : **GO avec réserves**, réserves ci-dessus
+> adoptées. Seconde opinion codex 5.5 à intégrer en §6.2 (confirmation/contradiction).
