@@ -242,6 +242,79 @@ Recommandation : (A) comme surface utilisateur + (C) comme transport interne
 
 ---
 
-## 6. Revues (codex 5.5 xhigh + opus 4.8) — à venir dans ce commit/itération
+## 6. Revues (codex 5.5 xhigh + opus 4.8)
+
+### 6.1 Revue opus 4.8 (architecte, vérifiée contre le code) — verdict : **GO avec réserves**
+
+Critiques majeures (toutes vérifiées dans le code) :
+
+- **5.1 identité — formule fausse.** `lineage = hash(ws+profile)` casse : `ws:<hex>`
+  inclut `rootCommitSHA` → bouge à chaque `git commit` → l'identité de la session
+  mobile change *pendant* le travail. ➜ `lineage id` doit être **opaque, frappé
+  une fois, persisté dans `.remote/lineage.json`** (à côté du `workspace.json` lu
+  par `migrate.ts`), dérivé de rien. `ws:<hex>` = ancre du contenu (subPath RWX) ;
+  `lineage` = ancre de l'identité mobile. Relation lineage→N ws.
+- **5.2 bail h2a — FAUX VERROU DISTRIBUÉ (point dur).** `h2a-presence.ts` =
+  projection pure (`writeFileSync` sans temp+rename/O_EXCL/CAS). Un JSON sur RWX
+  partagé (NFS/CephFS) n'est ni atomique ni exclusif ; `O_EXCL`/`rename` non
+  fiables sur NFS. Le heartbeat sans **fencing token** = zombie de réveil : laptop
+  dort → lease expire → pod reprend → laptop se réveille offline et flush la conv
+  → **corruption dans le flux NOMINAL** (fermer/rouvrir = le cas d'usage §1).
+  ➜ **Autorité = control-plane** (déjà CAS-capable : `workspaces.ts:68` soft-lock
+  `Map`), étendu en **lease de lineage + fencing token monotone** + **persistance
+  au rollout** (via `session.announce` au reboot, sinon R3 perd tous les baux).
+  h2a reste observabilité, **jamais** l'exclusion mutuelle.
+- **5.3 readiness.** `conv_resolvable` doit **résoudre réellement** la conv côté
+  pod (fichier présent sous la clé encodée), pas supposer la parité de chemin
+  (diverge si `$HOME`/path multi-machine). `hot_set_synced` dans le AND
+  **contredit** le mode lazy → le `mode` (full|lazy) doit conditionner le AND.
+- **5.4 sync — SLO irréaliste + « réutilise » trompeur.** `sync.ts` lit/écrit le
+  `.jsonl` **entier** en base64 (pas d'append ; `maxBuffer 512MB`). Le `.jsonl`
+  **n'est pas append-only fiable** (compaction/sidechains claude réécrivent le
+  préfixe ; l'état `diverged` existe déjà). ➜ Flux 1 = **incrémental par offset
+  avec garde de préfixe (sha du préfixe commun)**, fallback whole-file+`.bak`.
+  Flux 2 : `workspace-sync.ts` = **tar complet plafonné 256 Mo**, `.git` gaté
+  128 Mo → rsync/watcher = **net-new**, et `rsync-over-kubectl-exec` passe par le
+  port-forward instable (R3) **sans reprise**. ➜ source de vérité fichiers =
+  **git** (delta natif, conflit-aware, reprenable, gh auth déjà bundlé) ;
+  **node_modules/artefacts jamais syncés → reconstruits in-pod (`npm ci`) =
+  blocker de readiness** ; working set non-commité (petit) = rsync-over-exec.
+  Conflits : **garder le 3-way merge + base snapshot existant**
+  (`mergeWorkspaceArchive`), pas du last-writer-mtime (mtime non fiable
+  cross-machine). **SLO `<2min/<5min` = métrique observée, pas contrat binaire.**
+- **5.5 lazy/fermeture — 3 trous de perte.** (1) flush conv local non poussé
+  avant reprise pod lazy → `diverged` ; barrière de checkpoint + fencing token
+  obligatoires. (2) verdict `SAFE TO CLOSE` calculé localement = faux positif ;
+  doit être **conservateur** (1 octet de delta non confirmé-reçu = `PENDING`).
+  (3) seuils 25/200 Mo arbitraires → critère = **temps de transfert estimé**
+  (10⁴ petits fichiers tuent rsync plus qu'un fichier de 200 Mo).
+- **5.6 déclenchement.** (A) `remote migrate to-remote/to-local` = bon (c'est ce
+  que `migrate.ts` fait déjà, il tient le terminal via `attach`). (C) h2a comme
+  transport interne = **sur-architecturé** (appel control-plane synchrone existe
+  déjà). (B) utiliser le hook **Stop** (fin de tour), pas `SessionEnd` (trop tard).
+- **5.7 réutilisation — honnêteté.** Sur 6 briques « réutilisées » : 2 réelles
+  (`migrate forward` mode full ; websocket self-healing pour la reprise réseau),
+  1 à corriger (`migrate back` devine la session → besoin de lineage), 3 net-new
+  (Flux 1 incrémental, Flux 2 delta/watcher, lease/fencing).
+- **5.8 phasage.** Ajouter une **Phase A0** : décider+prototyper lease/fencing au
+  control-plane **avant** `migrate to-remote`. Régler le **cap 256 Mo /
+  node_modules / .git avant** le mode full (sinon `migrate forward` throw sur tout
+  vrai repo). Découper Phase B (B1 conv incrémentale, B2 git+working set, B3
+  lazy+fermeture). SLO = métrique, pas critère.
+
+5 risques non couverts : (1) pas de fencing token → zombie de réveil corrompt la
+conv (flux nominal) ; (2) control-plane in-memory perd l'autorité au rollout ;
+(3) `.jsonl` non append-only fiable → ni whole-file ni append naïf ne tiennent
+SLO+intégrité sans garde de préfixe ; (4) transport (port-forward/exec) = maillon
+le plus fragile, sans reprise de transfert ; (5) quota tenant + pic
+create-before-delete pendant le handoff à chaud (2 pods/incarnations transitoires
+sur le même subPath) → échec à mi-chemin sans rollback.
+
+3 simplifications YAGNI : (1) **supprimer le bail file-based** (autorité
+control-plane unique) ; (2) **pas de moteur de sync continu fichiers en V1** (git
++ working set seulement, node_modules reconstruits) ; (3) **SLO = transparence
+mesurée**, pas garantie de latence.
+
+### 6.2 Revue codex 5.5 xhigh — *(en cours, ajoutée à l'itération suivante)*
 
 ## 7. Spec consolidée — après réconciliation des revues
