@@ -111,4 +111,137 @@ thème « cycle de vie / déplacement d'une session » :
 
 ---
 
-*Sections suivantes (Cadrage / Revues / Spec consolidée) ajoutées après ce commit.*
+## 5. Cadrage (opus 4.8) — architecture proposée
+
+> Brouillon de cadrage soumis à double revue (codex 5.5 xhigh + opus 4.8) — voir
+> §6. Les choix sont des **recommandations argumentées**, pas des décisions
+> finales.
+
+### 5.1 Modèle d'identité d'une session mobile
+
+Trois identités distinctes, déjà partiellement présentes :
+
+- **`ws:<hex>` (workspace durable)** — `sha256(rootCommitSHA+"\n"+worktreeRelPath)`,
+  byte-identique remote/track/h2a. C'est l'ancre du *contenu* (fichiers + conv).
+- **`lineage id` (NOUVEAU)** — identité logique de la session qui se déplace,
+  stable à travers local↔remote. Proposé : `lin:<hex>` dérivé de
+  `ws:<hex> + profile` (une session claude et une codex sur le même workspace
+  sont deux lineages). Le `sess-…` (pod) et le PID/slug tmux local restent des
+  *incarnations* éphémères d'un lineage.
+- **`cliSessionId` (conv)** — l'id de conversation du CLI, déjà détecté/reporté.
+
+**Décision R-ID** : introduire `lineage id` comme clé pivot. h2a et `remote ls`
+corrèlent local+remote par `lineage id` (et non plus par chemin, fragile).
+
+### 5.2 Arbitrage de localisation via h2a (anti split-brain)
+
+Invariant dur : **un seul exécuteur actif par lineage** (jamais claude qui tourne
+en local ET en remote sur le même workspace → corruption conv + fichiers).
+
+- h2a tient un **bail de localisation** par lineage :
+  `~/h2a-workspace/.h2a/locations/<lineage>.json = {location: local|remote,
+  holder: <pid|pod>, since, heartbeat, syncState}`.
+- Migration = **handoff transactionnel** : (1) destination prépare + atteint
+  readiness, (2) source *checkpoint* (flush conv + fichiers hot), (3) bail
+  transféré atomiquement, (4) source quitte le process, (5) destination relance.
+- Heartbeat : un holder mort (pas de heartbeat depuis N) libère le bail
+  (récupération après crash/laptop fermé sans handoff propre).
+- Réutilise la présence de session déjà projetée par l'agent (DEC-059).
+
+### 5.3 Readiness (contrat machine)
+
+`readiness = AND(auth_ok, plugins_parity_ok, repo_bootstrapped, conv_resolvable,
+hot_set_synced)`. Retour structuré : `{ready: bool, blockers: [...], pending:
+{files: n, bytes: m}, mode: full|lazy}`. `plugins_parity_ok` réutilise le
+manifest plugin/MCP existant (slice 3). `conv_resolvable` réutilise
+`canonicalizeConversationKey` (P0.3).
+
+### 5.4 Moteur de sync — DEUX flux séparés
+
+**Flux 1 — Contenu de session (petit, chaud, prioritaire).**
+Conversation `.jsonl` + état CLI. Réutilise `remote sync`/`diff` (base64 over
+kubectl exec, garde anti-écrasement + backup `.bak`). Rendu **continu +
+bidirectionnel** par un watcher (debounce sur écriture conv). Cible : gap < 30s
+(bien sous les 5 min) car petit.
+
+**Flux 2 — Fichiers du workspace (gros, tiède).**
+Recommandation : **deux couches**.
+- *Tracked (git)* : la source de vérité reste git sur le RWX ; un push/pull
+  (ou bundle) couvre l'historique + le suivi, conflit-aware nativement.
+- *Working set non-commité* : delta **rsync-over-kubectl-exec** (ou `tar`
+  incrémental) piloté par un watcher (inotify local + poll remote), priorisé.
+
+**Choix de moteur (à challenger en revue)** : préférer un moteur **maison léger**
+(watcher + rsync/tar delta) à un démon tiers (mutagen/unison) pour ne pas
+introduire une dépendance lourde non auto-hébergée dans le pod, MAIS si le SLO
+< 2 min / < 5 min n'est pas tenable proprement, adopter **mutagen** (continuous
+two-way, conflict modes) comme moteur du Flux 2. Décision déléguée à la revue
+(coût d'intégration vs garantie SLO).
+
+**Conflits** : last-writer par mtime au niveau fichier pour le working set ;
+pour la conv, la garde existante (refus d'écraser le côté en avance + backup) ;
+jamais de merge silencieux destructif.
+
+### 5.5 Lazy-files + conscience de fermeture laptop
+
+- **Hot set** (sync avant readiness) = fichiers trackés + conv + fichiers
+  récemment modifiés/ouverts. **Cold/heavy set** = le reste (seuil : fichier
+  > 25 Mo OU total restant > 200 Mo → mode `lazy`).
+- En mode lazy : transit immédiat, **sync bg** continue, et le « reste à sync »
+  (n fichiers / m Mo, + lesquels sont bloquants) est **rendu en continu** dans la
+  CLI ET dans le statut du tab (lien avec R1).
+- **Fermeture laptop** : `remote status` (et un indicateur tab) affichent un
+  verdict net : `SAFE TO CLOSE` (tout synchronisé OU le pending n'est pas requis
+  côté remote) vs `PENDING: k fichiers — reprendra à la réouverture`. L'utilisateur
+  décide. À la réouverture, le watcher se reconnecte (`ensureConnected`) et
+  **reprend** le pending + la session.
+
+### 5.6 Déclenchement « depuis la CLI »
+
+L'instruction part de l'intérieur de la session claude/codex. Options :
+- (A) **commande `remote` dans un autre pane / la side-window h2a** :
+  `remote migrate to-remote` / `to-local` — simple, pas d'intrusion dans le CLI.
+- (B) **sentinelle/hook** : un hook de fin de tour (claude SessionEnd / un
+  marqueur que l'agent watch) déclenche le handoff — « depuis la CLI » au sens
+  strict.
+- (C) **enveloppe h2a** `session-migrate-request` postée par l'agent.
+Recommandation : (A) comme surface utilisateur + (C) comme transport interne
+(h2a porte la demande, le bail, et l'état de sync). (B) en option ergonomique.
+
+### 5.7 Réutilisation de l'existant
+
+- `remote migrate forward|back` : socle de la primo-migration (link workspace,
+  push, create session, handoff terminal / pull-back). À **étendre** (lazy,
+  readiness, bail h2a) plutôt que réécrire.
+- `remote refresh --soft`, `plugin-manifest`, `canonicalizeConversationKey`,
+  `session.announce`, présence DEC-059, `ensureConnected` : briques réutilisées.
+
+### 5.8 Phasage proposé
+
+- **Phase 0 (quick wins, débloquants)** : R3 (auto-reconnect tunnel sur refresh
+  hard), R2 (rename soft sans recreate), R1 (statut d'activité du tab — concilier
+  displayName statique vs pane_title dynamique).
+- **Phase A (lifecycle)** : `lineage id` + bail de localisation h2a (exclusion
+  mutuelle + heartbeat) + contrat readiness + `migrate to-remote/to-local`
+  étendant `migrate forward/back`, **mode full** (sync complète avant transit).
+- **Phase B (sync continue + lazy)** : Flux 1 (conv continue bidirectionnelle) +
+  Flux 2 (fichiers, watcher + delta) + mode lazy + conscience fermeture/réouverture
+  + SLO resync < 5 min gap / < 2 min durée + indicateurs CLI/tab.
+
+### 5.9 Risques / pièges identifiés
+
+- **Split-brain** (double exécuteur) → bail h2a obligatoire AVANT toute relance.
+- **Corruption conv** sur sync concurrente → garde existante + séquencement
+  checkpoint→handoff.
+- **SLO sync** difficile à tenir sur gros repos → mode lazy + métrique honnête
+  (jamais prétendre « synced » si pending).
+- **Quota tenant / éviction** : la primo-migration crée un pod ; respecter
+  create-before-delete + quota (cf. mémoire refresh-quota).
+- **Sécurité** : ne jamais transiter de secrets en clair ; réutiliser le
+  bundling auth + Secret existant.
+
+---
+
+## 6. Revues (codex 5.5 xhigh + opus 4.8) — à venir dans ce commit/itération
+
+## 7. Spec consolidée — après réconciliation des revues
