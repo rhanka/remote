@@ -35,7 +35,7 @@ export const LOCAL_WRAPPER = `relaunch="$0"; cli="$1"; shift
 "$cli" "$@"; code=$?
 printf '\\n[remote] %s exited (code %s) — shell on %s.\\n' "$cli" "$code" "$PWD"
 printf '[remote] relaunch: %s   (or Ctrl-D to end this session)\\n' "$relaunch"
-exec /bin/bash -l`;
+if [ -t 0 ]; then exec /bin/bash -l; else exit "$code"; fi`;
 
 /**
  * Run-once-exit wrapper for HEADLESS delegated jobs — the OPPOSITE of
@@ -84,12 +84,16 @@ export function fanoutLabels(base: string, count: number): string[] {
 /**
  * Same drop-to-shell contract for SIDE windows (h2a, …), but the command is a
  * single configured shell line (quoting preserved via eval), not cli+args.
- * `$0` is a label, `$1` is the command line.
+ * `$0` is a label, `$1` is the optional agent pane wake target, `$2` is the
+ * command line. When present, `TMUX_PANE` is deliberately overridden before
+ * `eval` so h2a's local-tmux wake driver targets the agent pane, not the h2a
+ * side-window process.
  */
-const WINDOW_WRAPPER = `cmd="$1"
+const WINDOW_WRAPPER = `agent_pane="$1"; cmd="$2"
+if [ -n "$agent_pane" ]; then export TMUX_PANE="$agent_pane"; fi
 eval "$cmd"; code=$?
 printf '\\n[remote] %s exited (code %s) — shell on %s. Re-run it or Ctrl-D to end this window.\\n' "$cmd" "$code" "$PWD"
-exec /bin/bash -l`;
+if [ -t 0 ]; then exec /bin/bash -l; else exit "$code"; fi`;
 
 /**
  * Window name for the h2a MCP server side window — the a2a launcher contract:
@@ -97,6 +101,9 @@ exec /bin/bash -l`;
  * so the agent is reachable/wakeable through ~/h2a-workspace/.h2a.
  */
 export const H2A_WINDOW_NAME = "h2a";
+const AGENT_PANE_OPTION = "@remote_agent_pane";
+const AGENT_HOST_OPTION = "@remote_agent_host";
+const AGENT_CWD_OPTION = "@remote_agent_cwd";
 
 export type LocalSession = {
   /** full tmux session name, e.g. `remote-surch` */
@@ -331,7 +338,10 @@ export function startLocalSession(
   const slug = slugify(label ?? cwd);
   const name = localSessionName(slug);
   ensureScrollConfig();
-  if (findLocalSession(name)) return { name, slug };
+  if (findLocalSession(name)) {
+    persistAgentPaneMetadata(name, profile, cwd);
+    return { name, slug };
+  }
 
   const r = spawnSync(
     TMUX,
@@ -363,6 +373,7 @@ export function startLocalSession(
   spawnSync(TMUX, ["set-option", "-t", name, "@profile", profile], {
     stdio: "ignore",
   });
+  persistAgentPaneMetadata(name, profile, cwd);
   return { name, slug };
 }
 
@@ -456,6 +467,7 @@ export function buildSessionWindowArgs(
   windowName: string,
   cwd: string,
   commandLine: string,
+  agentPane?: string,
 ): string[] {
   return [
     "new-window",
@@ -470,6 +482,7 @@ export function buildSessionWindowArgs(
     "-lc",
     WINDOW_WRAPPER,
     "remote-window",
+    agentPane ?? "",
     commandLine,
   ];
 }
@@ -491,10 +504,11 @@ export function addSessionWindow(
   windowName: string,
   cwd: string,
   commandLine: string,
+  agentPane?: string,
 ): boolean {
   const r = spawnSync(
     TMUX,
-    buildSessionWindowArgs(session, windowName, cwd, commandLine),
+    buildSessionWindowArgs(session, windowName, cwd, commandLine, agentPane),
     { stdio: "ignore" },
   );
   return r.status === 0;
@@ -510,6 +524,91 @@ export function commandAvailable(cmd: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validTmuxPaneId(value: string | undefined): value is string {
+  return value !== undefined && /^%\d+$/.test(value);
+}
+
+function exactSessionTarget(session: string): string {
+  return session.startsWith("=") ? session : `=${session}`;
+}
+
+function readSessionOption(
+  session: string,
+  option: string,
+): string | undefined {
+  const r = spawnSync(
+    TMUX,
+    ["show-options", "-qv", "-t", exactSessionTarget(session), option],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || r.stdout === undefined) return undefined;
+  const value = r.stdout.trim();
+  return value || undefined;
+}
+
+function setSessionOption(
+  session: string,
+  option: string,
+  value: string,
+): void {
+  spawnSync(
+    TMUX,
+    ["set-option", "-t", exactSessionTarget(session), option, value],
+    {
+      stdio: "ignore",
+    },
+  );
+}
+
+function firstNonH2aPane(session: string): string | undefined {
+  const r = spawnSync(
+    TMUX,
+    [
+      "list-panes",
+      "-s",
+      "-t",
+      exactSessionTarget(session),
+      "-F",
+      "#{window_name}\t#{pane_id}",
+    ],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || !r.stdout) return undefined;
+  for (const line of r.stdout.split("\n")) {
+    if (!line) continue;
+    const [windowName, paneId] = line.split("\t");
+    if (windowName !== H2A_WINDOW_NAME && validTmuxPaneId(paneId)) {
+      return paneId;
+    }
+  }
+  return undefined;
+}
+
+/** Agent pane used as h2a local-tmux wake target, persisted on the tmux session. */
+export function resolveAgentPane(session: string): string | undefined {
+  const stored = readSessionOption(session, AGENT_PANE_OPTION);
+  if (validTmuxPaneId(stored)) return stored;
+  const pane = firstNonH2aPane(session);
+  if (pane) setSessionOption(session, AGENT_PANE_OPTION, pane);
+  return pane;
+}
+
+function persistAgentPaneMetadata(
+  session: string,
+  profile: string,
+  cwd: string,
+): string | undefined {
+  const pane = resolveAgentPane(session);
+  if (!pane) return undefined;
+  setSessionOption(session, AGENT_HOST_OPTION, profile);
+  setSessionOption(session, AGENT_CWD_OPTION, cwd);
+  return pane;
+}
+
+function commandNeedsLocalTmuxWake(commandLine: string): boolean {
+  return /(?:^|\s)--wake(?:=|\s+)local-tmux(?:\s|$)/.test(commandLine);
 }
 
 /**
@@ -531,8 +630,25 @@ export function startH2aWindow(
     );
     return false;
   }
-  if (sessionWindowNames(session).includes(H2A_WINDOW_NAME)) return true;
-  if (!addSessionWindow(session, H2A_WINDOW_NAME, cwd, commandLine)) {
+  const needsLocalTmuxWake = commandNeedsLocalTmuxWake(commandLine);
+  if (sessionWindowNames(session).includes(H2A_WINDOW_NAME)) {
+    if (needsLocalTmuxWake) {
+      stderr.write(
+        `[remote] h2a window already exists in ${session}; wake target may be stale/wrong. Restart that window/session to pick up the agent pane target.\n`,
+      );
+    }
+    return true;
+  }
+  const agentPane = resolveAgentPane(session);
+  if (needsLocalTmuxWake && !agentPane) {
+    stderr.write(
+      `[remote] h2a window skipped: agent pane could not be resolved for ${session}; refusing to publish a false --wake local-tmux target.\n`,
+    );
+    return false;
+  }
+  if (
+    !addSessionWindow(session, H2A_WINDOW_NAME, cwd, commandLine, agentPane)
+  ) {
     stderr.write(
       `[remote] h2a window failed to start (tmux new-window error on ${session})\n`,
     );

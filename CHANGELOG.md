@@ -5,6 +5,15 @@ The project uses date-based, image-tagged releases (`vMAJOR.MINOR.PATCH`);
 container images `ghcr.io/rhanka/sentropic-remote-{control-plane,session-agent}`
 are tagged to match.
 
+## Unreleased
+
+- `remote run <profile> --h2a` now publishes the real agent tmux pane as the
+  h2a `local-tmux` wake target: remote captures `@remote_agent_pane` on session
+  creation and exports it as `TMUX_PANE` before starting the h2a side-window.
+  Existing h2a windows warn about stale wake context, and remote refuses to start
+  `--wake local-tmux` without a resolved agent pane instead of advertising a
+  false wake target.
+
 ## v0.5.16 — 2026-06-14
 
 Headline: **rename a remote session** — `remote refresh <id> --name <name>`.

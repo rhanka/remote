@@ -14,6 +14,7 @@ import {
   fanoutLabels,
   localRelaunchCommand,
   sessionAttachedCount,
+  startLocalSession,
   startH2aWindow,
 } from "./tmux.js";
 
@@ -71,8 +72,71 @@ describe("buildSessionWindowArgs (pure)", () => {
     // wrapper: runs the command line, then drops to a shell instead of dying
     expect(args[10]).toContain('eval "$cmd"');
     expect(args[10]).toContain("exec /bin/bash -l");
-    // the command line is passed VERBATIM as $1 (quoting preserved by eval)
+    // the command line is passed VERBATIM as the final wrapper arg.
     expect(args[args.length - 1]).toBe(H2A_CMD);
+  });
+
+  it("exports the agent pane before eval when a wake target pane is provided", () => {
+    const args = buildSessionWindowArgs(
+      "remote-surch",
+      H2A_WINDOW_NAME,
+      "/home/u/src/surch",
+      H2A_CMD,
+      "%42",
+    );
+    expect(args[10]).toContain('export TMUX_PANE="$agent_pane"');
+    expect(args[10]!.indexOf("export TMUX_PANE")).toBeLessThan(
+      args[10]!.indexOf('eval "$cmd"'),
+    );
+    expect(args[args.length - 2]).toBe("%42");
+    expect(args[args.length - 1]).toBe(H2A_CMD);
+  });
+});
+
+describe("startLocalSession agent pane metadata", () => {
+  it("stores the agent pane on the tmux session after creation", () => {
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "tmux" && args[0] === "-V") return { status: 0 };
+      if (cmd === "tmux" && args[0] === "list-sessions")
+        return { status: 1, stdout: "" };
+      if (cmd === "tmux" && args[0] === "new-session") return { status: 0 };
+      if (cmd === "tmux" && args[0] === "show-options")
+        return { status: 1, stdout: "" };
+      if (cmd === "tmux" && args[0] === "list-panes")
+        return { status: 0, stdout: "codex\t%7\n" };
+      return { status: 0, stdout: "" };
+    });
+
+    const result = startLocalSession(
+      "codex",
+      "codex",
+      "/home/u/src/remote",
+      [],
+      "h2a-target",
+    );
+
+    expect(result).toEqual({ name: "remote-h2a-target", slug: "h2a-target" });
+    expect(spawnSyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["set-option", "-t", "=remote-h2a-target", "@remote_agent_pane", "%7"],
+      { stdio: "ignore" },
+    ]);
+    expect(spawnSyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["set-option", "-t", "=remote-h2a-target", "@remote_agent_host", "codex"],
+      { stdio: "ignore" },
+    ]);
+    expect(spawnSyncMock.mock.calls).toContainEqual([
+      "tmux",
+      [
+        "set-option",
+        "-t",
+        "=remote-h2a-target",
+        "@remote_agent_cwd",
+        "/home/u/src/remote",
+      ],
+      { stdio: "ignore" },
+    ]);
   });
 });
 
@@ -104,6 +168,8 @@ describe("startH2aWindow", () => {
       if (cmd === "bash") return { status: 0 }; // command -v ok
       if (cmd === "tmux" && args[0] === "list-windows")
         return { status: 0, stdout: "claude\n" }; // no h2a window yet
+      if (cmd === "tmux" && args[0] === "show-options")
+        return { status: 0, stdout: "%11\n" }; // stored agent pane
       return { status: 0 }; // new-window ok
     });
     const err = fakeStderr();
@@ -125,27 +191,31 @@ describe("startH2aWindow", () => {
         H2A_WINDOW_NAME,
         "/home/u/src/surch",
         H2A_CMD,
+        "%11",
       ),
     );
   });
 
-  it('is idempotent: an existing "h2a" window is reused, no new-window', () => {
+  it('is idempotent but warns when an existing "h2a" window may have a stale wake target', () => {
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "bash") return { status: 0 };
       if (cmd === "tmux" && args[0] === "list-windows")
         return { status: 0, stdout: "claude\nh2a\n" };
       return { status: 0 };
     });
+    const err = fakeStderr();
 
     const ok = startH2aWindow(
       "remote-surch",
       "/home/u/src/surch",
       H2A_CMD,
-      fakeStderr(),
+      err,
     );
 
     expect(ok).toBe(true);
     expect(tmuxCalls("new-window")).toHaveLength(0);
+    expect(err.text()).toContain("already exists");
+    expect(err.text()).toContain("wake target may be stale");
   });
 
   it("warns (but does not throw) when tmux new-window fails", () => {
@@ -153,6 +223,8 @@ describe("startH2aWindow", () => {
       if (cmd === "bash") return { status: 0 };
       if (cmd === "tmux" && args[0] === "list-windows")
         return { status: 0, stdout: "claude\n" };
+      if (cmd === "tmux" && args[0] === "show-options")
+        return { status: 0, stdout: "%12\n" };
       return { status: 1 }; // new-window fails
     });
     const err = fakeStderr();
@@ -166,6 +238,31 @@ describe("startH2aWindow", () => {
 
     expect(ok).toBe(false);
     expect(err.text()).toContain("h2a window failed");
+  });
+
+  it("refuses to start --wake local-tmux when no agent pane can be resolved", () => {
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "bash") return { status: 0 };
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { status: 0, stdout: "codex\n" };
+      if (cmd === "tmux" && args[0] === "show-options")
+        return { status: 1, stdout: "" };
+      if (cmd === "tmux" && args[0] === "list-panes")
+        return { status: 1, stdout: "" };
+      return { status: 0 };
+    });
+    const err = fakeStderr();
+
+    const ok = startH2aWindow(
+      "remote-surch",
+      "/home/u/src/surch",
+      H2A_CMD,
+      err,
+    );
+
+    expect(ok).toBe(false);
+    expect(err.text()).toContain("agent pane could not be resolved");
+    expect(tmuxCalls("new-window")).toHaveLength(0);
   });
 });
 
