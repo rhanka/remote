@@ -19,6 +19,7 @@ const PROFILE_STATE_DIRS: Readonly<Record<string, ReadonlyArray<string>>> = {
   codex: [".codex/sessions"],
   claude: [".claude/projects"],
   agy: [".gemini/antigravity-cli/conversations"],
+  gemini: [".gemini/gemini-cli/conversations"],
   // aliases
   "claude-code": [".claude/projects"],
   antigravity: [".gemini/antigravity-cli/conversations"],
@@ -75,7 +76,11 @@ export function linkSessionState(
       // Real dir with content (claude created it, or a prior copy)? seed the PVC
       // without overwriting newer PVC files, then remove it.
       if (existsSync(homeDir)) {
-        cpSync(homeDir, pvc, { recursive: true, force: false, errorOnExist: false });
+        cpSync(homeDir, pvc, {
+          recursive: true,
+          force: false,
+          errorOnExist: false,
+        });
         rmSync(homeDir, { recursive: true, force: true });
       }
 
@@ -125,8 +130,7 @@ export function snapshotSessionState(
   return saved;
 }
 
-const UUID_RE =
-  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 /**
  * Best-effort detection of the wrapped CLI's own conversation id: the

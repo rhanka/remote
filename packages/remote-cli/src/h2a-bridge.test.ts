@@ -74,11 +74,14 @@ function mockPod(state: PodState): void {
         );
       }
       // pull: base64 < "$HOME/h2a-workspace/.h2a/inbox/<dir>/<file>"
-      const pull = sh.match(/base64 < "\$HOME\/h2a-workspace\/\.h2a\/inbox\/([^"]+)"/);
+      const pull = sh.match(
+        /base64 < "\$HOME\/h2a-workspace\/\.h2a\/inbox\/([^"]+)"/,
+      );
       if (pull) {
         const entry = pull[1]!;
         const content = state.files[entry];
-        if (content === undefined) return { status: 1, stdout: "", stderr: "no such file" };
+        if (content === undefined)
+          return { status: 1, stdout: "", stderr: "no such file" };
         return ok(Buffer.from(content, "utf8").toString("base64"));
       }
       // push: existence-guarded base64 -d
@@ -86,7 +89,10 @@ function mockPod(state: PodState): void {
         const m = sh.match(/inbox\/([^"]+)"; f="\$d\/([^"]+)"/);
         const entry = `${m?.[1]}/${m?.[2]}`;
         if (state.files[entry] !== undefined) return ok("h2a-exists\n");
-        const decoded = Buffer.from(String(spawnOpts?.input ?? ""), "base64").toString("utf8");
+        const decoded = Buffer.from(
+          String(spawnOpts?.input ?? ""),
+          "base64",
+        ).toString("utf8");
         state.files[entry] = decoded;
         state.pushed[entry] = decoded;
         return ok("h2a-written\n");
@@ -97,7 +103,9 @@ function mockPod(state: PodState): void {
 }
 
 function execScripts(): string[] {
-  return spawnSyncMock.mock.calls.map((c) => String((c[1] as string[]).at(-1) ?? ""));
+  return spawnSyncMock.mock.calls.map((c) =>
+    String((c[1] as string[]).at(-1) ?? ""),
+  );
 }
 
 function seedLocal(entries: Record<string, string>): void {
@@ -114,6 +122,8 @@ describe("instance naming", () => {
     expect(defaultPodInstance("s1", "claude-code")).toBe("claude:remote:s1");
     expect(defaultPodInstance("s1", "codex")).toBe("codex:remote:s1");
     expect(defaultPodInstance("s1", "antigravity")).toBe("agy:remote:s1");
+    expect(defaultPodInstance("s1", "gemini")).toBe("gemini:remote:s1");
+    expect(defaultPodInstance("s1", "mistral")).toBe("mistral:remote:s1");
     expect(defaultPodInstance("s1")).toBe("claude:remote:s1");
   });
 
@@ -159,7 +169,9 @@ describe("planBridge (pure sync semantics)", () => {
       localFiles: ["claude__track__t1/env__old.json"],
       podInstanceDirs: podDirs,
     });
-    expect(plan.pull).toEqual([{ dir: "claude__track__t1", file: "env__new.json" }]);
+    expect(plan.pull).toEqual([
+      { dir: "claude__track__t1", file: "env__new.json" },
+    ]);
     expect(plan.skipped).toBe(1);
     expect(plan.push).toEqual([]);
   });
@@ -197,7 +209,12 @@ describe("planBridge (pure sync semantics)", () => {
       podInstanceDirs: podDirs,
     });
     // Everything in the plan is a copy; the shape itself has no removal field.
-    expect(Object.keys(plan).sort()).toEqual(["ignored", "pull", "push", "skipped"]);
+    expect(Object.keys(plan).sort()).toEqual([
+      "ignored",
+      "pull",
+      "push",
+      "skipped",
+    ]);
     expect(plan.pull).toHaveLength(1);
     expect(plan.push).toHaveLength(1);
   });
@@ -261,11 +278,19 @@ describe("bridgeSession (kubectl mocked, scratch local store)", () => {
     expect(result.podInstanceDirs).toContain(POD_DIR);
 
     // pulled envelope landed locally, decoded exactly once
-    const pulledFile = join(LOCAL_ROOT, "inbox", "codex__track__t9", "env__new.json");
+    const pulledFile = join(
+      LOCAL_ROOT,
+      "inbox",
+      "codex__track__t9",
+      "env__new.json",
+    );
     expect(readFileSync(pulledFile, "utf8")).toBe('{"id":"env:1:new"}');
     // pre-existing local file untouched
     expect(
-      readFileSync(join(LOCAL_ROOT, "inbox", "codex__track__t9", "env__old.json"), "utf8"),
+      readFileSync(
+        join(LOCAL_ROOT, "inbox", "codex__track__t9", "env__old.json"),
+        "utf8",
+      ),
     ).toBe('{"id":"env:2:old"}');
 
     // pushed envelope reached the Pod, encoded exactly ONCE on the wire
@@ -276,7 +301,9 @@ describe("bridgeSession (kubectl mocked, scratch local store)", () => {
       String((c[1] as string[]).at(-1)).includes("base64 -d"),
     );
     const wire = String((pushCall?.[2] as { input?: string })?.input ?? "");
-    expect(Buffer.from(wire, "base64").toString("utf8")).toBe('{"id":"env:4:hello"}');
+    expect(Buffer.from(wire, "base64").toString("utf8")).toBe(
+      '{"id":"env:4:hello"}',
+    );
 
     // NOTHING is ever deleted, on either side
     const scripts = execScripts().join("\n");
@@ -296,15 +323,17 @@ describe("bridgeSession (kubectl mocked, scratch local store)", () => {
     seedLocal({ [`${POD_DIR}/env__race.json`]: '{"id":"env:5:race"}' });
     // simulate the race: the file lands in the Pod between listing and push
     const baseImpl = spawnSyncMock.getMockImplementation()!;
-    spawnSyncMock.mockImplementation((cmd: string, args: string[], o?: object) => {
-      const sh = String(args[args.length - 1] ?? "");
-      if (sh.includes("==INSTANCES==")) {
-        const out = baseImpl(cmd, args, o) as { stdout: string };
-        podState.files[`${POD_DIR}/env__race.json`] = '{"id":"pod-side"}';
-        return out;
-      }
-      return baseImpl(cmd, args, o);
-    });
+    spawnSyncMock.mockImplementation(
+      (cmd: string, args: string[], o?: object) => {
+        const sh = String(args[args.length - 1] ?? "");
+        if (sh.includes("==INSTANCES==")) {
+          const out = baseImpl(cmd, args, o) as { stdout: string };
+          podState.files[`${POD_DIR}/env__race.json`] = '{"id":"pod-side"}';
+          return out;
+        }
+        return baseImpl(cmd, args, o);
+      },
+    );
 
     const result = await bridgeSession(SESSION, {
       profile: PROFILE,
@@ -313,11 +342,18 @@ describe("bridgeSession (kubectl mocked, scratch local store)", () => {
 
     expect(result.pushed).toBe(0);
     expect(result.skipped).toBe(1);
-    expect(podState.files[`${POD_DIR}/env__race.json`]).toBe('{"id":"pod-side"}');
+    expect(podState.files[`${POD_DIR}/env__race.json`]).toBe(
+      '{"id":"pod-side"}',
+    );
   });
 
   it("scaffolds a missing Pod store (inbox/ + README) and reports it", async () => {
-    const podState: PodState = { hasStore: false, instances: [], files: {}, pushed: {} };
+    const podState: PodState = {
+      hasStore: false,
+      instances: [],
+      files: {},
+      pushed: {},
+    };
     mockPod(podState);
 
     const result = await bridgeSession(SESSION, {
@@ -328,7 +364,9 @@ describe("bridgeSession (kubectl mocked, scratch local store)", () => {
     expect(result.scaffolded).toBe(true);
     expect(result.pulled).toBe(0);
     expect(result.pushed).toBe(0);
-    const scaffold = execScripts().find((s) => s.includes("h2a-store-created"))!;
+    const scaffold = execScripts().find((s) =>
+      s.includes("h2a-store-created"),
+    )!;
     expect(scaffold).toContain(`mkdir -p "$root/inbox/${POD_DIR}"`);
     expect(scaffold).toContain("README.md");
     // the README documents the drop convention for binary-less Pod agents

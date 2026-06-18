@@ -29,6 +29,8 @@ describe("protocol constants", () => {
       "opencode",
       "claude",
       "agy",
+      "gemini",
+      "mistral",
     ]);
   });
 

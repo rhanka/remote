@@ -57,6 +57,25 @@ describe("collectProfileAuth", () => {
     expect(bundle).toEqual({});
   });
 
+  it("bundles shared Gemini credentials for the gemini profile", async () => {
+    const files: Record<string, string> = {
+      ".gemini/oauth_creds.json": JSON.stringify({ token: "g" }),
+      ".gemini/settings.json": JSON.stringify({ model: "gemini" }),
+    };
+    const bundle = await collectProfileAuth("gemini", {
+      home: "/home/test",
+      async readFileImpl(path) {
+        const key = path.replace("/home/test/", "");
+        if (!(key in files)) throw new Error("ENOENT");
+        return Buffer.from(files[key]!, "utf8");
+      },
+    });
+    expect(Object.keys(bundle)).toEqual([
+      ".gemini/oauth_creds.json",
+      ".gemini/settings.json",
+    ]);
+  });
+
   it("returns an empty bundle for shell profile (no auth needed)", async () => {
     const bundle = await collectProfileAuth("shell", {
       home: "/home/test",
@@ -86,8 +105,10 @@ describe("assertRequiredAuthBundle", () => {
     ).not.toThrow();
   });
 
-  it("does not require auth files for shell or agy", () => {
+  it("does not require auth files for shell, agy, gemini or mistral", () => {
     expect(() => assertRequiredAuthBundle("shell", {})).not.toThrow();
     expect(() => assertRequiredAuthBundle("agy", {})).not.toThrow();
+    expect(() => assertRequiredAuthBundle("gemini", {})).not.toThrow();
+    expect(() => assertRequiredAuthBundle("mistral", {})).not.toThrow();
   });
 });

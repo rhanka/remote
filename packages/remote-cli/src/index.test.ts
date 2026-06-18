@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const createRemoteSession = vi.fn();
 const attach = vi.fn();
@@ -87,6 +90,8 @@ vi.mock("./soft-refresh.js", () => ({
 const bridgeSession = vi.fn();
 vi.mock("./h2a-bridge.js", () => ({
   bridgeSession,
+  defaultLocalH2aRoot: () => "/tmp/remote-test-h2a",
+  instanceInboxDir: (instance: string) => instance.replace(/:/g, "__"),
 }));
 
 const stderrWrite = vi
@@ -258,11 +263,9 @@ describe("main", () => {
       // Each session is bound to its own server-assigned workspaceId.
       const wsIds = createRemoteSession.mock.calls.map((c) => c[1].workspaceId);
       expect(new Set(wsIds).size).toBe(3);
-      expect(createRemoteSession.mock.calls.map((c) => c[1].displayName)).toEqual([
-        "fleet-1",
-        "fleet-2",
-        "fleet-3",
-      ]);
+      expect(
+        createRemoteSession.mock.calls.map((c) => c[1].displayName),
+      ).toEqual(["fleet-1", "fleet-2", "fleet-3"]);
       // A fleet is never auto-attached (no single terminal to take over).
       expect(attach).not.toHaveBeenCalled();
     });
@@ -523,7 +526,9 @@ describe("main", () => {
 
     expect(exitCode).toBe(0);
     expect(clearDefaultRemote).toHaveBeenCalled();
-    expect(stderrWrite).toHaveBeenCalledWith("[remote] cleared default remote\n");
+    expect(stderrWrite).toHaveBeenCalledWith(
+      "[remote] cleared default remote\n",
+    );
   });
 
   it("uses configured default remote for refresh when URL is omitted", async () => {
@@ -683,7 +688,13 @@ describe("main", () => {
           respawned: false,
         });
 
-      const exitCode = await main(["node", "remote", "refresh", "--soft", "--all"]);
+      const exitCode = await main([
+        "node",
+        "remote",
+        "refresh",
+        "--soft",
+        "--all",
+      ]);
 
       expect(exitCode).toBe(0);
       expect(listRemoteSessions).toHaveBeenCalledWith("http://localhost:8080");
@@ -714,7 +725,13 @@ describe("main", () => {
         };
       });
 
-      const exitCode = await main(["node", "remote", "refresh", "--soft", "--all"]);
+      const exitCode = await main([
+        "node",
+        "remote",
+        "refresh",
+        "--soft",
+        "--all",
+      ]);
 
       expect(exitCode).toBe(1);
       expect(softRefreshSession).toHaveBeenCalledTimes(3); // s2 failure didn't stop s3
@@ -739,7 +756,13 @@ describe("main", () => {
         respawned: true,
       });
 
-      const exitCode = await main(["node", "remote", "refresh", "--soft", "--all"]);
+      const exitCode = await main([
+        "node",
+        "remote",
+        "refresh",
+        "--soft",
+        "--all",
+      ]);
 
       expect(exitCode).toBe(0);
       expect(softRefreshSession).toHaveBeenCalledTimes(2);
@@ -903,6 +926,31 @@ describe("main", () => {
       bridgeSession.mockResolvedValue(bridged());
     });
 
+    it("h2a ping queues an h2a.ping envelope in the requested local root", async () => {
+      const root = mkdtempSync(join(tmpdir(), "remote-h2a-ping-"));
+      try {
+        const exitCode = await main([
+          "node",
+          "remote",
+          "h2a",
+          "ping",
+          "codex:remote:sess-1",
+          "--root",
+          root,
+        ]);
+
+        expect(exitCode).toBe(0);
+        const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+        expect(out).toContain("h2a ping queued for codex:remote:sess-1");
+        expect(out).toContain(root);
+        const path = out.match(/: (.*env__.*h2a_ping\.json)/)?.[1];
+        expect(path).toBeDefined();
+        expect(JSON.parse(readFileSync(path!, "utf8")).type).toBe("h2a.ping");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it("with a sessionId bridges that session with its control-plane profile", async () => {
       getDefaultRemote.mockReturnValue("http://localhost:8080");
       getRemoteSession.mockResolvedValue({ session: { profile: "claude" } });
@@ -910,11 +958,19 @@ describe("main", () => {
         bridged({ pulled: 2, pushed: 1, skipped: 3 }),
       );
 
-      const exitCode = await main(["node", "remote", "h2a", "bridge", "sess-1"]);
+      const exitCode = await main([
+        "node",
+        "remote",
+        "h2a",
+        "bridge",
+        "sess-1",
+      ]);
 
       expect(exitCode).toBe(0);
       expect(bridgeSession).toHaveBeenCalledTimes(1);
-      expect(bridgeSession).toHaveBeenCalledWith("sess-1", { profile: "claude" });
+      expect(bridgeSession).toHaveBeenCalledWith("sess-1", {
+        profile: "claude",
+      });
       expect(listRemoteSessions).not.toHaveBeenCalled();
       const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
       expect(out).toContain("pulled=2 pushed=1 skipped=3");
@@ -971,7 +1027,13 @@ describe("main", () => {
       getRemoteSession.mockResolvedValue({ session: { profile: "codex" } });
       bridgeSession.mockResolvedValue(bridged({ pulled: 1, failed: 2 }));
 
-      const exitCode = await main(["node", "remote", "h2a", "bridge", "sess-1"]);
+      const exitCode = await main([
+        "node",
+        "remote",
+        "h2a",
+        "bridge",
+        "sess-1",
+      ]);
 
       expect(exitCode).toBe(1);
       const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");

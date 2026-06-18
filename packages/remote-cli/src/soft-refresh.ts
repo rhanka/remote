@@ -105,8 +105,8 @@ function execPodArgv(
   return { status: r.status ?? 1, stdout: r.stdout ?? "" };
 }
 
-/** `<cli> --resume <id>` per profile. */
-function resumeCommand(profile: string, convId: string): string {
+/** `<cli> --resume <id>` per profile, when the profile has a verified resume form. */
+function resumeCommand(profile: string, convId: string): string | undefined {
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   switch (profile) {
     case "codex":
@@ -114,8 +114,11 @@ function resumeCommand(profile: string, convId: string): string {
     case "agy":
     case "antigravity":
       return `agy --resume ${q(convId)}`;
-    default: // claude / claude-code
+    case "claude":
+    case "claude-code":
       return `claude --resume ${q(convId)}`;
+    default:
+      return undefined;
   }
 }
 
@@ -300,7 +303,9 @@ export async function softRefreshSession(
     );
     filesPushed.push(rel);
   }
-  stderr.write(`[remote] pushed ${filesPushed.length} cred file(s) into ${pod}\n`);
+  stderr.write(
+    `[remote] pushed ${filesPushed.length} cred file(s) into ${pod}\n`,
+  );
 
   // Record the pushed bundle's hash in the Pod so future --all/--watch passes
   // can no-op (and NOT respawn) when the local creds haven't changed.
@@ -353,7 +358,9 @@ export async function softRefreshSession(
       rmSync(patchFile, { force: true });
     }
   }
-  stderr.write(`[remote] patched ${secretKeysPatched.length} Secret key(s) (durable across restart)\n`);
+  stderr.write(
+    `[remote] patched ${secretKeysPatched.length} Secret key(s) (durable across restart)\n`,
+  );
 
   // 3. detect the newest conversation in the Pod and respawn the CLI in tmux.
   const convId = detectNewestConversation(tunnel, pod);
@@ -365,7 +372,14 @@ export async function softRefreshSession(
     stderr.write(`[remote] creds pushed; no conversation found to resume\n`);
   }
 
-  return { changed: true, hash, filesPushed, secretKeysPatched, convId, respawned };
+  return {
+    changed: true,
+    hash,
+    filesPushed,
+    secretKeysPatched,
+    convId,
+    respawned,
+  };
 }
 
 /** Newest conversation id present in the Pod (claude projects / codex rollouts). */
@@ -395,6 +409,12 @@ function respawnPane(
   stderr: NodeJS.WriteStream,
 ): boolean {
   const resume = resumeCommand(profile, convId);
+  if (!resume) {
+    stderr.write(
+      `[remote] creds pushed but ${profile} has no verified resume command for ${convId}; restart the CLI in the Pod manually\n`,
+    );
+    return false;
+  }
   const script = [
     `cat > "$HOME/.remote-relaunch.sh" <<'RL'`,
     `#!/bin/bash`,
@@ -475,11 +495,19 @@ export async function probeAndPushToolHealth(
   const probe = deps.exec(buildHealthProbeCommand(tool));
   const health = parseHealthResult(tool, probe.status, probe.stdout);
   if (health.ok) {
-    return { tool, health, pushed: false, filesPushed: [], secretKeysPatched: [] };
+    return {
+      tool,
+      health,
+      pushed: false,
+      filesPushed: [],
+      secretKeysPatched: [],
+    };
   }
   // ok:false → re-bundle + push this tool's LOCAL creds (same path as today).
   // Tool/status only — NEVER a secret value.
-  stderr.write(`[remote] pod 401: ${health.reason} — pushing fresh ${tool} creds\n`);
+  stderr.write(
+    `[remote] pod 401: ${health.reason} — pushing fresh ${tool} creds\n`,
+  );
   const { bundle } = await deps.collect([tool]);
   const rels = Object.keys(bundle);
   const filesPushed: string[] = [];
@@ -496,7 +524,13 @@ export async function probeAndPushToolHealth(
       `[remote] no local ${tool} creds to push — run \`${tool} login\` locally\n`,
     );
   }
-  return { tool, health, pushed: filesPushed.length > 0, filesPushed, secretKeysPatched };
+  return {
+    tool,
+    health,
+    pushed: filesPushed.length > 0,
+    filesPushed,
+    secretKeysPatched,
+  };
 }
 
 /**
@@ -514,7 +548,8 @@ export async function probePodCredHealth(
 ): Promise<ToolHealthAction[]> {
   const stderr = options.stderr ?? process.stderr;
   const tunnel = getTunnel();
-  if (!tunnel) throw new Error("pod cred health probe needs a tunnel configured");
+  if (!tunnel)
+    throw new Error("pod cred health probe needs a tunnel configured");
   const pod = `session-${sessionId}`;
   const secret = `${pod}-auth`;
 
@@ -539,7 +574,11 @@ export async function probePodCredHealth(
       mkdirSync(runDir, { recursive: true });
       const patchFile = join(runDir, `tool-patch-${process.pid}-${key}.json`);
       try {
-        writeFileSync(patchFile, JSON.stringify({ data: { [key]: base64 } }), "utf8");
+        writeFileSync(
+          patchFile,
+          JSON.stringify({ data: { [key]: base64 } }),
+          "utf8",
+        );
         kubectl(tunnel, [
           "patch",
           "secret",

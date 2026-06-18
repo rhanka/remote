@@ -8,6 +8,7 @@ vi.mock("node:child_process", () => ({ spawnSync: spawnSyncMock }));
 import {
   H2A_WINDOW_NAME,
   LOCAL_WRAPPER,
+  buildCodexImagePasteBinding,
   buildSessionWindowArgs,
   buildTmuxGlobalOptions,
   fanoutLabels,
@@ -81,7 +82,12 @@ describe("startH2aWindow", () => {
     spawnSyncMock.mockReturnValue({ status: 1, stdout: "" });
     const err = fakeStderr();
 
-    const ok = startH2aWindow("remote-surch", "/home/u/src/surch", H2A_CMD, err);
+    const ok = startH2aWindow(
+      "remote-surch",
+      "/home/u/src/surch",
+      H2A_CMD,
+      err,
+    );
 
     expect(ok).toBe(false);
     expect(err.text()).toContain("[remote]");
@@ -102,7 +108,12 @@ describe("startH2aWindow", () => {
     });
     const err = fakeStderr();
 
-    const ok = startH2aWindow("remote-surch", "/home/u/src/surch", H2A_CMD, err);
+    const ok = startH2aWindow(
+      "remote-surch",
+      "/home/u/src/surch",
+      H2A_CMD,
+      err,
+    );
 
     expect(ok).toBe(true);
     expect(err.text()).toBe("");
@@ -118,7 +129,7 @@ describe("startH2aWindow", () => {
     );
   });
 
-  it("is idempotent: an existing \"h2a\" window is reused, no new-window", () => {
+  it('is idempotent: an existing "h2a" window is reused, no new-window', () => {
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "bash") return { status: 0 };
       if (cmd === "tmux" && args[0] === "list-windows")
@@ -146,7 +157,12 @@ describe("startH2aWindow", () => {
     });
     const err = fakeStderr();
 
-    const ok = startH2aWindow("remote-surch", "/home/u/src/surch", H2A_CMD, err);
+    const ok = startH2aWindow(
+      "remote-surch",
+      "/home/u/src/surch",
+      H2A_CMD,
+      err,
+    );
 
     expect(ok).toBe(false);
     expect(err.text()).toContain("h2a window failed");
@@ -188,10 +204,25 @@ describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)
     expect(lines.some((l) => l.startsWith("bind -n WheelUpPane"))).toBe(true);
     expect(lines.some((l) => l.startsWith("bind -n WheelDownPane"))).toBe(true);
     expect(lines.some((l) => l.startsWith("bind -n PPage"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("bind -n C-v if-shell"))).toBe(true);
   });
 
   it("omits copy-command when no clipboard tool is detected", () => {
     expect(flat(undefined).some((l) => l.includes("copy-command"))).toBe(false);
+  });
+});
+
+describe("buildCodexImagePasteBinding", () => {
+  it("binds Ctrl+V to save Wayland clipboard images and paste the file path into Codex panes only", () => {
+    const line = buildCodexImagePasteBinding().join(" ");
+    expect(line).toContain("bind -n C-v");
+    expect(line).toContain("wl-paste --list-types");
+    expect(line).toContain("image/png");
+    expect(line).toContain("image/jpeg");
+    expect(line).toContain(".remote/images");
+    expect(line).toContain("send-keys -l");
+    expect(line).toContain("codex");
+    expect(line).toContain("send-keys C-v");
   });
 });
 
@@ -253,11 +284,10 @@ describe("LOCAL_WRAPPER (real bash) — regression: cli runs with its args", () 
   }
 
   it("runs `echo --resume CONV` (the resume shape that broke) with both args", () => {
-    const r = runWrapper(
-      "remote run claude /x --name remote -r CONV",
-      "echo",
-      ["--resume", "CONV-abc"],
-    );
+    const r = runWrapper("remote run claude /x --name remote -r CONV", "echo", [
+      "--resume",
+      "CONV-abc",
+    ]);
     expect(r.stdout).toContain("--resume CONV-abc"); // echo got BOTH args
     expect(r.stdout).toContain("echo exited (code 0)");
     expect(r.stdout).toContain(

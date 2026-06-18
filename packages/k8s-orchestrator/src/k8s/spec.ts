@@ -143,6 +143,7 @@ const CONVERSATION_DIRS: Readonly<Record<string, string>> = {
   codex: ".codex/sessions",
   agy: ".gemini/antigravity-cli/conversations",
   antigravity: ".gemini/antigravity-cli/conversations",
+  gemini: ".gemini/gemini-cli/conversations",
 };
 
 const PVC_VOLUME = "workspace";

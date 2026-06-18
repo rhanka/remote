@@ -12,6 +12,8 @@ const DEFAULT_PROFILES: Readonly<Record<CliProfile, ProfileConfig>> = {
   opencode: { profile: "opencode", command: "opencode", args: [] },
   claude: { profile: "claude", command: "claude", args: [] },
   agy: { profile: "agy", command: "agy", args: [] },
+  gemini: { profile: "gemini", command: "gemini", args: [] },
+  mistral: { profile: "mistral", command: "mistral", args: [] },
 };
 
 /**
@@ -21,6 +23,9 @@ const DEFAULT_PROFILES: Readonly<Record<CliProfile, ProfileConfig>> = {
  * - claude's bare `--resume` opens an interactive picker (useless headless in
  *   a pod) — the most-recent form is `--continue`, explicit is `--resume <id>`;
  * - agy follows claude's shape (`--resume <id>` / `--continue`).
+ * - gemini/mistral are exposed as runnable profiles, but their stable resume
+ *   argv is not established here; returning [] avoids promising continuity we
+ *   cannot verify.
  */
 export function resumeArgsFor(
   config: ProfileConfig,
@@ -40,6 +45,8 @@ export function resumeArgsFor(
 const PROFILE_ALIASES: Readonly<Record<string, CliProfile>> = {
   "claude-code": "claude",
   antigravity: "agy",
+  "gemini-cli": "gemini",
+  mistralcli: "mistral",
 };
 
 export function isCliProfile(value: string): value is CliProfile {

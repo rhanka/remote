@@ -47,8 +47,16 @@ describe("detectCliSessionId", () => {
     const older = "11111111-1111-1111-1111-111111111111";
     const newer = "22222222-2222-2222-2222-222222222222";
     // claude state dir is .claude/projects; nest under a project subdir.
-    writeAt(join(home, ".claude/projects/proj-a", `${older}.jsonl`), "{}", 1000);
-    writeAt(join(home, ".claude/projects/proj-b", `${newer}.jsonl`), "{}", 2000);
+    writeAt(
+      join(home, ".claude/projects/proj-a", `${older}.jsonl`),
+      "{}",
+      1000,
+    );
+    writeAt(
+      join(home, ".claude/projects/proj-b", `${newer}.jsonl`),
+      "{}",
+      2000,
+    );
     expect(detectCliSessionId("claude", home)).toBe(newer);
   });
 
@@ -69,6 +77,17 @@ describe("detectCliSessionId", () => {
     expect(detectCliSessionId("agy", home)).toBe(id);
   });
 
+  it("detects gemini conversations under the explicit gemini-cli state dir", () => {
+    const home = tmp("home-");
+    const id = "44444444-4444-4444-4444-444444444444";
+    writeAt(
+      join(home, ".gemini/gemini-cli/conversations", `${id}.json`),
+      "{}",
+      1600,
+    );
+    expect(detectCliSessionId("gemini", home)).toBe(id);
+  });
+
   it("returns undefined when the profile has no state dir or no files", () => {
     const home = tmp("home-");
     expect(detectCliSessionId("shell", home)).toBeUndefined();
@@ -80,6 +99,7 @@ describe("snapshot/restore round-trip across profiles", () => {
   it.each([
     ["claude", ".claude/projects/proj/conv.jsonl"],
     ["agy", ".gemini/antigravity-cli/conversations/conv.json"],
+    ["gemini", ".gemini/gemini-cli/conversations/conv.json"],
     // alias: claude-code maps to the same state dir as claude
     ["claude-code", ".claude/projects/proj/conv.jsonl"],
   ])("persists %s state through the workspace", (profile, rel) => {
@@ -132,9 +152,7 @@ describe("canonicalizeConversationKey", () => {
     expect(result.canonicalKey).toBe("-workspace");
     expect(result.copied).toEqual([`${CONV}.jsonl`]);
     // Now resolvable by `claude --resume` running in cwd=/workspace.
-    expect(
-      detectCliSessionId("claude", home),
-    ).toBe(CONV);
+    expect(detectCliSessionId("claude", home)).toBe(CONV);
   });
 
   it("is a no-op when the newest conversation already lives under the canonical key", () => {

@@ -67,6 +67,8 @@ const PROFILE_COMMANDS: Readonly<
   opencode: { command: "opencode", args: [] },
   claude: { command: "claude", args: [] },
   agy: { command: "agy", args: [] },
+  gemini: { command: "gemini", args: [] },
+  mistral: { command: "mistral", args: [] },
 };
 
 /**

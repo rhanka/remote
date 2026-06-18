@@ -70,6 +70,9 @@ function profileTool(profile: string | undefined): string {
     case "agy":
     case "antigravity":
       return "agy";
+    case "gemini":
+    case "mistral":
+      return profile;
     default:
       return profile && profile.length > 0 ? profile : "claude";
   }
@@ -88,7 +91,8 @@ export function defaultPodInstance(
  * observed h2a convention: `claude__track__abc/env__...json`). Anything else
  * — path tricks, quotes, whitespace — is IGNORED, never executed.
  */
-const SAFE_ENTRY = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*\.json$/;
+const SAFE_ENTRY =
+  /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*\.json$/;
 
 export type BridgeFile = { dir: string; file: string };
 
@@ -214,7 +218,9 @@ function execPod(
   });
   if (r.status !== 0) {
     // stderr only (kubectl/bash diagnostics) — never envelope content.
-    throw new Error(`kubectl exec failed: ${(r.stderr || "").trim().slice(0, 200)}`);
+    throw new Error(
+      `kubectl exec failed: ${(r.stderr || "").trim().slice(0, 200)}`,
+    );
   }
   return r.stdout;
 }
@@ -277,8 +283,11 @@ function listLocalInbox(localRoot: string): string[] {
   const entries: string[] = [];
   for (const dir of readdirSync(inbox, { withFileTypes: true })) {
     if (!dir.isDirectory()) continue;
-    for (const f of readdirSync(join(inbox, dir.name), { withFileTypes: true })) {
-      if (f.isFile() && f.name.endsWith(".json")) entries.push(`${dir.name}/${f.name}`);
+    for (const f of readdirSync(join(inbox, dir.name), {
+      withFileTypes: true,
+    })) {
+      if (f.isFile() && f.name.endsWith(".json"))
+        entries.push(`${dir.name}/${f.name}`);
     }
   }
   return entries;

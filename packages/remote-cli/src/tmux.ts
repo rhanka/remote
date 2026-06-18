@@ -120,7 +120,9 @@ export function tmuxAvailable(): boolean {
 }
 
 export function slugify(p: string): string {
-  const base = basename(p).replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/^-+|-+$/g, "");
+  const base = basename(p)
+    .replace(/[^a-zA-Z0-9_.-]/g, "-")
+    .replace(/^-+|-+$/g, "");
   return base || "session";
 }
 
@@ -131,6 +133,10 @@ export function localSessionName(slug: string): string {
 
 function expandHome(p: string): string {
   return p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 /** List remote-managed local tmux sessions (best-effort; [] if no server). */
@@ -185,7 +191,10 @@ function detectClipboardCommand(): string | undefined {
     : ["xclip -selection clipboard", "xsel -ib", "wl-copy"];
   for (const c of candidates) {
     const bin = c.split(" ")[0]!;
-    if (spawnSync("command", ["-v", bin], { shell: true, stdio: "ignore" }).status === 0) {
+    if (
+      spawnSync("command", ["-v", bin], { shell: true, stdio: "ignore" })
+        .status === 0
+    ) {
       return c;
     }
   }
@@ -220,7 +229,12 @@ export function buildTmuxGlobalOptions(
     // Forward the agent's live OSC title (pane_title) out to the GNOME tab, with
     // the window name (then session name) as the fallback when none is set yet.
     ["set", "-g", "set-titles", "on"],
-    ["set", "-g", "set-titles-string", "#{?pane_title,#{pane_title},#{window_name}}"],
+    [
+      "set",
+      "-g",
+      "set-titles-string",
+      "#{?pane_title,#{pane_title},#{window_name}}",
+    ],
     // Let the window NAME follow the OSC title the agent emits (does not touch
     // automatic-rename, which stays at its default `on`).
     ["set", "-g", "allow-rename", "on"],
@@ -236,12 +250,48 @@ export function buildTmuxGlobalOptions(
     ],
     ["bind", "-n", "WheelDownPane", "send-keys", "-M"],
     ["bind", "-n", "PPage", "copy-mode", "-eu"],
+    buildCodexImagePasteBinding(),
   ];
   // copy-command makes every copy-pipe-and-cancel (mouse drag, double/triple
   // click) land in the real system clipboard. tmux's defaults already use
   // copy-pipe-and-cancel with no argument → they honour copy-command.
   if (clip) cmds.push(["set", "-g", "copy-command", clip]);
   return cmds;
+}
+
+/**
+ * Wayland image paste bridge for Codex panes. Terminals/tmux cannot paste image
+ * bytes into a TTY, so the reliable path is: read the clipboard image with
+ * wl-paste, save it under the pane cwd, then paste the resulting file path into
+ * Codex. The binding is guarded by the current tmux session/window profile and
+ * clipboard MIME type; when the guard fails, Ctrl+V is forwarded unchanged.
+ */
+export function buildCodexImagePasteBinding(): ReadonlyArray<string> {
+  const condition = [
+    "command -v wl-paste >/dev/null 2>&1",
+    'wl-paste --list-types 2>/dev/null | grep -Eq "^(image/png|image/jpeg)$"',
+    'tmux display-message -p "#{@profile}:#{window_name}:#{pane_current_command}" | grep -Eqi "(^|:)codex(:|$)"',
+  ].join(" && ");
+  const script = [
+    'pane_cwd=$(tmux display-message -p "#{pane_current_path}")',
+    'dir="$pane_cwd/.remote/images"',
+    'mkdir -p "$dir"',
+    "mime=$(wl-paste --list-types | awk '/^image\\/png$/{print; exit} /^image\\/jpeg$/{print; exit}')",
+    'case "$mime" in image/png) ext=png ;; image/jpeg) ext=jpg ;; *) exit 1 ;; esac',
+    'file="$dir/paste-$(date +%Y%m%d-%H%M%S)-$$.$ext"',
+    'wl-paste -t "$mime" > "$file"',
+    'tmux send-keys -l "$file"',
+  ].join("; ");
+  return [
+    "bind",
+    "-n",
+    "C-v",
+    "if-shell",
+    "-b",
+    condition,
+    `run-shell -b ${shellSingleQuote(script)}`,
+    "send-keys C-v",
+  ];
 }
 
 /**
@@ -518,11 +568,10 @@ export function killLocalSession(name: string): boolean {
  */
 export function conductorRunning(): boolean {
   try {
-    const r = spawnSync(
-      "pgrep",
-      ["-f", "jobs +conduct"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
+    const r = spawnSync("pgrep", ["-f", "jobs +conduct"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     if (r.status !== 0 || !r.stdout) return false;
     const pids = r.stdout
       .split("\n")
@@ -555,10 +604,14 @@ export function localSessionIdle(name: string): boolean {
   const pid = Number(pidStr);
   if (!Number.isInteger(pid) || pid <= 0) return false;
   // Count children of the pane shell.
-  const children = spawnSync("bash", [
-    "-lc",
-    `awk -v p="${pid}" '$1=="PPid:" && $2==p {c++} END{print c+0}' /proc/[0-9]*/status 2>/dev/null || ps --ppid ${pid} -o pid= 2>/dev/null | grep -c .`,
-  ], { encoding: "utf8" });
+  const children = spawnSync(
+    "bash",
+    [
+      "-lc",
+      `awk -v p="${pid}" '$1=="PPid:" && $2==p {c++} END{print c+0}' /proc/[0-9]*/status 2>/dev/null || ps --ppid ${pid} -o pid= 2>/dev/null | grep -c .`,
+    ],
+    { encoding: "utf8" },
+  );
   const kids = Number((children.stdout ?? "").trim());
   return Number.isInteger(kids) && kids === 0;
 }
@@ -582,10 +635,7 @@ export function relaunchInSession(name: string, command: string): boolean {
  * tmux-backed session (Pod started by the tmux-wrapping agent). Blocks until
  * detach/exit; returns the kubectl exit status.
  */
-export function attachPodTmux(
-  tunnel: TunnelConfig,
-  sessionId: string,
-): number {
+export function attachPodTmux(tunnel: TunnelConfig, sessionId: string): number {
   const env = { ...process.env };
   if (tunnel.kubeconfig) env.KUBECONFIG = expandHome(tunnel.kubeconfig);
   // The attach CLIENT must be UTF-8 or tmux transcodes accented output to "_"

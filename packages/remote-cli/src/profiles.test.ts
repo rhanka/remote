@@ -12,6 +12,8 @@ describe("profiles", () => {
     expect(resolveProfile("codex").command).toBe("codex");
     expect(resolveProfile("claude").command).toBe("claude");
     expect(resolveProfile("agy").command).toBe("agy");
+    expect(resolveProfile("gemini").command).toBe("gemini");
+    expect(resolveProfile("mistral").command).toBe("mistral");
     expect(resolveProfile("shell").command).toBe("/bin/bash");
   });
 
@@ -34,6 +36,11 @@ describe("profiles", () => {
 
     const shell = resolveProfile("shell");
     expect(withResume(shell, "abc").args).toEqual([]);
+
+    const gemini = resolveProfile("gemini");
+    expect(withResume(gemini, "abc").args).toEqual([]);
+    const mistral = resolveProfile("mistral");
+    expect(withResume(mistral, "abc").args).toEqual([]);
   });
 
   it("isCliProfile narrows known names", () => {
@@ -46,6 +53,8 @@ describe("profiles", () => {
     expect(coerceCliProfileName("claude-code")).toBe("claude");
     expect(coerceCliProfileName("agy")).toBe("agy");
     expect(coerceCliProfileName("antigravity")).toBe("agy");
+    expect(coerceCliProfileName("gemini-cli")).toBe("gemini");
+    expect(coerceCliProfileName("mistralcli")).toBe("mistral");
     expect(coerceCliProfileName("codex")).toBe("codex");
     expect(coerceCliProfileName("not-real")).toBeUndefined();
   });

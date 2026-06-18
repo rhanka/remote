@@ -11,18 +11,28 @@ import type { CliProfile } from "@sentropic/remote-protocol";
  */
 export const PROFILE_AUTH_FILES: Readonly<
   Record<CliProfile, ReadonlyArray<string>>
-> =
-  {
-    shell: [],
-    codex: [".codex/auth.json", ".codex/config.toml"],
-    opencode: [],
-    claude: [".claude/.credentials.json", ".claude.json", ".claude/settings.json"],
-    agy: [
-      ".gemini/oauth_creds.json",
-      ".gemini/google_accounts.json",
-      ".gemini/antigravity-cli/settings.json",
-    ],
-  };
+> = {
+  shell: [],
+  codex: [".codex/auth.json", ".codex/config.toml"],
+  opencode: [],
+  claude: [
+    ".claude/.credentials.json",
+    ".claude.json",
+    ".claude/settings.json",
+  ],
+  agy: [
+    ".gemini/oauth_creds.json",
+    ".gemini/google_accounts.json",
+    ".gemini/antigravity-cli/settings.json",
+  ],
+  gemini: [
+    ".gemini/oauth_creds.json",
+    ".gemini/google_accounts.json",
+    ".gemini/settings.json",
+    ".gemini/config/mcp_config.json",
+  ],
+  mistral: [],
+};
 
 export type AuthBundle = Readonly<Record<string, string>>;
 

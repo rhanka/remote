@@ -59,7 +59,7 @@ thème « cycle de vie / déplacement d'une session » :
   dans le nom du tab** (terminal/tmux), en local **et** en remote attaché.
   C'est une régression à corriger. Mécanisme existant : `tmux set-titles on` +
   `set-titles-string=#{?pane_title,#{pane_title},#{window_name}}` + `allow-rename
-  on`, `automatic-rename` jamais forcé off (cf. `packages/remote-cli/src/tmux.ts`).
+on`, `automatic-rename` jamais forcé off (cf. `packages/remote-cli/src/tmux.ts`).
   Hypothèse à vérifier : le `displayName`/`SESSION_DISPLAY_NAME` (rename) fige le
   nom de fenêtre et masque le `pane_title` dynamique → à concilier (nom de
   session ≠ statut d'activité ; les deux doivent coexister).
@@ -78,7 +78,7 @@ thème « cycle de vie / déplacement d'une session » :
   vérité, pas de Zod) ; TS strict `exactOptionalPropertyTypes` ; vitest ; tsup.
 - RWX **partagé par utilisateur** (un volume, subPath par workspace) sur SCW
   Kapsule ; **id de workspace durable** `ws:<hex>` = `sha256(rootCommitSHA + "\n"
-  + worktreeRelPath)`, byte-identique remote/track/h2a.
+  - worktreeRelPath)`, byte-identique remote/track/h2a.
 - Conversation : montée déclarativement depuis le RWX ; **clé-projet canonique**
   côté pod = cwd (`/workspace` → `-workspace`) ; `--resume` ne résout que sous la
   clé du cwd (cf. P0.3, `canonicalizeConversationKey`).
@@ -122,12 +122,12 @@ thème « cycle de vie / déplacement d'une session » :
 Trois identités distinctes, déjà partiellement présentes :
 
 - **`ws:<hex>` (workspace durable)** — `sha256(rootCommitSHA+"\n"+worktreeRelPath)`,
-  byte-identique remote/track/h2a. C'est l'ancre du *contenu* (fichiers + conv).
+  byte-identique remote/track/h2a. C'est l'ancre du _contenu_ (fichiers + conv).
 - **`lineage id` (NOUVEAU)** — identité logique de la session qui se déplace,
   stable à travers local↔remote. Proposé : `lin:<hex>` dérivé de
   `ws:<hex> + profile` (une session claude et une codex sur le même workspace
   sont deux lineages). Le `sess-…` (pod) et le PID/slug tmux local restent des
-  *incarnations* éphémères d'un lineage.
+  _incarnations_ éphémères d'un lineage.
 - **`cliSessionId` (conv)** — l'id de conversation du CLI, déjà détecté/reporté.
 
 **Décision R-ID** : introduire `lineage id` comme clé pivot. h2a et `remote ls`
@@ -140,9 +140,9 @@ en local ET en remote sur le même workspace → corruption conv + fichiers).
 
 - h2a tient un **bail de localisation** par lineage :
   `~/h2a-workspace/.h2a/locations/<lineage>.json = {location: local|remote,
-  holder: <pid|pod>, since, heartbeat, syncState}`.
+holder: <pid|pod>, since, heartbeat, syncState}`.
 - Migration = **handoff transactionnel** : (1) destination prépare + atteint
-  readiness, (2) source *checkpoint* (flush conv + fichiers hot), (3) bail
+  readiness, (2) source _checkpoint_ (flush conv + fichiers hot), (3) bail
   transféré atomiquement, (4) source quitte le process, (5) destination relance.
 - Heartbeat : un holder mort (pas de heartbeat depuis N) libère le bail
   (récupération après crash/laptop fermé sans handoff propre).
@@ -166,9 +166,10 @@ bidirectionnel** par un watcher (debounce sur écriture conv). Cible : gap < 30s
 
 **Flux 2 — Fichiers du workspace (gros, tiède).**
 Recommandation : **deux couches**.
-- *Tracked (git)* : la source de vérité reste git sur le RWX ; un push/pull
+
+- _Tracked (git)_ : la source de vérité reste git sur le RWX ; un push/pull
   (ou bundle) couvre l'historique + le suivi, conflit-aware nativement.
-- *Working set non-commité* : delta **rsync-over-kubectl-exec** (ou `tar`
+- _Working set non-commité_ : delta **rsync-over-kubectl-exec** (ou `tar`
   incrémental) piloté par un watcher (inotify local + poll remote), priorisé.
 
 **Choix de moteur (à challenger en revue)** : préférer un moteur **maison léger**
@@ -199,14 +200,15 @@ jamais de merge silencieux destructif.
 ### 5.6 Déclenchement « depuis la CLI »
 
 L'instruction part de l'intérieur de la session claude/codex. Options :
+
 - (A) **commande `remote` dans un autre pane / la side-window h2a** :
   `remote migrate to-remote` / `to-local` — simple, pas d'intrusion dans le CLI.
 - (B) **sentinelle/hook** : un hook de fin de tour (claude SessionEnd / un
   marqueur que l'agent watch) déclenche le handoff — « depuis la CLI » au sens
   strict.
 - (C) **enveloppe h2a** `session-migrate-request` postée par l'agent.
-Recommandation : (A) comme surface utilisateur + (C) comme transport interne
-(h2a porte la demande, le bail, et l'état de sync). (B) en option ergonomique.
+  Recommandation : (A) comme surface utilisateur + (C) comme transport interne
+  (h2a porte la demande, le bail, et l'état de sync). (B) en option ergonomique.
 
 ### 5.7 Réutilisation de l'existant
 
@@ -226,7 +228,7 @@ Recommandation : (A) comme surface utilisateur + (C) comme transport interne
   étendant `migrate forward/back`, **mode full** (sync complète avant transit).
 - **Phase B (sync continue + lazy)** : Flux 1 (conv continue bidirectionnelle) +
   Flux 2 (fichiers, watcher + delta) + mode lazy + conscience fermeture/réouverture
-  + SLO resync < 5 min gap / < 2 min durée + indicateurs CLI/tab.
+  - SLO resync < 5 min gap / < 2 min durée + indicateurs CLI/tab.
 
 ### 5.9 Risques / pièges identifiés
 
@@ -250,7 +252,7 @@ Critiques majeures (toutes vérifiées dans le code) :
 
 - **5.1 identité — formule fausse.** `lineage = hash(ws+profile)` casse : `ws:<hex>`
   inclut `rootCommitSHA` → bouge à chaque `git commit` → l'identité de la session
-  mobile change *pendant* le travail. ➜ `lineage id` doit être **opaque, frappé
+  mobile change _pendant_ le travail. ➜ `lineage id` doit être **opaque, frappé
   une fois, persisté dans `.remote/lineage.json`** (à côté du `workspace.json` lu
   par `migrate.ts`), dérivé de rien. `ws:<hex>` = ancre du contenu (subPath RWX) ;
   `lineage` = ancre de l'identité mobile. Relation lineage→N ws.
@@ -312,8 +314,9 @@ sur le même subPath) → échec à mi-chemin sans rollback.
 
 3 simplifications YAGNI : (1) **supprimer le bail file-based** (autorité
 control-plane unique) ; (2) **pas de moteur de sync continu fichiers en V1** (git
-+ working set seulement, node_modules reconstruits) ; (3) **SLO = transparence
-mesurée**, pas garantie de latence.
+
+- working set seulement, node_modules reconstruits) ; (3) **SLO = transparence
+  mesurée**, pas garantie de latence.
 
 ### 6.2 Revue codex 5.5 xhigh (vérifiée contre le code) — verdict : **GO-réserves fortes si §6.1 devient le cadrage, NO-GO pour §5 tel quel**
 
@@ -323,7 +326,7 @@ mesurée**, pas garantie de latence.
   (`workspaces.ts:65`) est un `Map` en mémoire, **sans token**, avec unlock
   **inconditionnel par owner** (`:298`) → insuffisant tel quel. ➜ nouvel endpoint
   **`lineage leases` persistant** `{lineageId, epoch, holder, incarnationId,
-  location, expiresAt}`, acquire/renew/handoff en **CAS sur `expectedEpoch`**,
+location, expiresAt}`, acquire/renew/handoff en **CAS sur `expectedEpoch`**,
   token monotone exigé sur **toute** mutation (sync/handoff/stop).
 - (b) **Pas un `.remote/lineage.json` unique naïf** → `.remote/lineages/<id>.json`
   (`lin_<uuidv7>`), pour supporter **plusieurs sessions/fanout même profil** ;
@@ -334,17 +337,18 @@ mesurée**, pas garantie de latence.
 - (d) état par conv **`{offset, prefixHash, generation, lastAckedToken}`** ; append
   seulement si hash du préfixe commun match, sinon `.bak` + whole-file gardé.
 - (e) contrat machine = **exactitude des états `synced|pending|degraded|blocked`**
-  + métriques `oldestPendingAge / pendingBytes / lastAckedAt / estimatedCatchup` ;
-  SLO observé **par classe** (conv/hot set vs cold set).
+  - métriques `oldestPendingAge / pendingBytes / lastAckedAt / estimatedCatchup` ;
+    SLO observé **par classe** (conv/hot set vs cold set).
 - (f) d'accord ; A0 doit inclure **tests crash/sleep/rollout à deux holders**
   (token refusé après expiry, restart control-plane sans perte d'autorité, chemins
   sync qui refusent un token périmé).
 
 **Trous neufs (manqués même par §6.1) :**
+
 1. **`ws:<hex>` durable n'est PAS honoré côté control-plane** : `workspaces.ts:25`
    génère `ws-${rand}` et garde owners/namespaces **en mémoire** (`:55`) → perdu
    au rollout. Sans **registre de workspace durable**, `lineage→N ws` est bancal.
-   *(C'est pourquoi les workspaces vus sont `ws-t4q2k01`… et non des `ws:<hex>`.)*
+   _(C'est pourquoi les workspaces vus sont `ws-t4q2k01`… et non des `ws:<hex>`.)_
 2. **`migrate back` stoppe potentiellement la mauvaise session** (`migrate.ts:677`
    trie et stoppe la plus récente) → besoin de `GET /sessions?lineageId=`.
 3. **Migration conv très Claude-centrée** (`migrate.ts:260` : plus récent `.jsonl`,
@@ -362,26 +366,85 @@ directes** du CLI réveillé → exiger qu'aucun push/sync ne sorte sans token v
 chiffrer avant transit par le control-plane ; (iii) **rebuild deps** (registry
 auth, lockfile, native deps, cache, réseau) = readiness dédiée, pas un blocker flou.
 
+### 6.3 Deuxieme revue codex 5.5 xhigh (agent principal, passe independante) — verdict : **GO pour A0 seulement, NO-GO migration tant que l'autorite d'ecriture n'est pas prouvee**
+
+Note de methode : la tentative de lancer un sous-agent `codex exec -m
+gpt-5.5-codex` a echoue avec le compte local (`model is not supported when using
+Codex with a ChatGPT account`). Cette passe est donc faite par l'agent principal
+Codex 5.5 xhigh, separement de §6.2.
+
+Findings additionnels :
+
+- **A0 doit etre decoupe plus finement.** La spec consolidee met beaucoup de
+  choses sous "Phase A0". Pour eviter un mega-lot, A0 doit etre separe en :
+  (A0a) modele pur lineage/lease/epoch/fencing ; (A0b) endpoints control-plane +
+  persistance ; (A0c) enforcement token sur tous les chemins de mutation ; (A0d)
+  tests crash/sleep/rollout. Aucune migration reelle avant A0c.
+- **Le token serveur ne stoppe pas le processus local.** Meme avec fencing cote
+  control-plane, un CLI local reveille peut ecrire dans son `.jsonl` local. Le
+  handoff doit donc inclure une action locale explicite : suspendre/quitter le
+  pane source, flush puis interdire toute sync sortante sans token valide.
+- **Lineage ne doit pas etre confondu avec profil.** Plusieurs sessions du meme
+  profil dans un meme workspace doivent avoir des lineages distincts, et une
+  session peut traverser plusieurs `ws:<hex>` au fil des commits. Le couple
+  `(workspace, profile)` est un indice de creation, pas une identite.
+- **Codex et Claude n'ont pas les memes primitives de resume/conversation.** Les
+  regles Claude `.claude/projects/<cwd>` ne couvrent pas Codex `.codex/sessions`.
+  Le premier slice doit tester un lineage Claude et un lineage Codex, sinon la
+  spec restera Claude-centree.
+- **"Depuis la CLI" doit etre rendu concret.** `remote migrate to-remote` depuis
+  un shell voisin est robuste, mais pas exactement "depuis l'agent". Si l'UX
+  cible est une instruction donnee a Claude/Codex, il faut specifier le transport
+  minimal : side-window h2a, commande affichee, hook Stop, ou message out-of-band.
+- **Le data-plane ne doit pas dependre du control-plane RAM.** Le diagnostic de
+  §6.2 est accepte : archives/export en RAM rendent la migration fragile au
+  rollout. A0 doit imposer staging durable ou transfert direct avant Phase A.
+- **Les criteres d'acceptation doivent etre negatifs autant que positifs.** Les
+  tests doivent prouver que les mauvaises actions sont refusees : ancien token,
+  deux holders, laptop reveille, session la plus recente mais mauvais lineage,
+  codex/claude mauvais conv path.
+
+Decisions requises avant implementation :
+
+- D-A0-SPLIT : valider le decoupage A0a/A0b/A0c/A0d.
+- D-SOURCE-STOP : choisir comment l'incarnation source est suspendue/terminee et
+  comment on prouve qu'elle ne peut plus pousser.
+- D-CLI-TRIGGER : definir la surface utilisateur minimale "depuis la CLI".
+- D-DATAPLANE : choisir staging durable RWX vs transfert direct pour les archives
+  et diffs.
+
+Suggested first slice :
+
+1. Module pur `lineage-lease` : acquire/renew/handoff/reject stale epoch.
+2. Tests purs de split-brain : deux holders, token expire, source zombie.
+3. Aucun pod, aucun sync fichier, aucun secret.
+4. Ensuite seulement endpoint control-plane + persistence.
+
 ## 7. Spec consolidée (post-revue opus 4.8 ; revue codex 5.5 en cours d'intégration)
 
-Les réserves dures de la revue opus (§6.1) sont **adoptées comme décisions**.
+Les réserves dures des revues (§6.1, §6.2, §6.3) sont **adoptées comme
+décisions**. Les deux passes Codex 5.5 xhigh convergent : le design est viable
+seulement si la Phase A0 prouve d'abord l'autorité de lineage, le fencing token,
+l'arrêt/suspension de la source et la durabilité du data-plane.
 
 ### D1 — Identité
+
 - **`lineage id`** opaque (`lin_<uuidv7>`), frappé à la 1re migration. **Dérivé de
   rien** (surtout pas de `ws:<hex>`, qui bouge au `git commit`). Persisté **par
   lineage** sous **`.remote/lineages/<id>.json`** (PAS un fichier unique — pour
   supporter plusieurs sessions / fanout même profil) : `{lineage, profile, kind,
-  incarnation: {local: {tmux,pid}|null, remote: {sessionId}|null}, wsHistory[]}`.
+incarnation: {local: {tmux,pid}|null, remote: {sessionId}|null}, wsHistory[]}`.
 - `ws:<hex>` reste l'ancre du **contenu** (subPath RWX). `(lineage, profile)`
   discrimine claude vs codex. `remote ls` + h2a **corrèlent par lineage**, plus
   par chemin. `migrate back` corrigé : `GET /sessions?lineageId=` (fin du
   « devine la session la plus récente », `migrate.ts:677`).
 
 ### D2 — Exclusion mutuelle = **control-plane** (pas h2a)
+
 - Le lock actuel (`workspaces.ts:65` `Map` mémoire, sans token, unlock
   inconditionnel `:298`) est **insuffisant** → **nouvel endpoint `lineage
-  leases`** : `{lineageId, epoch, holder, incarnationId, location: local|remote,
-  expiresAt}`. acquire/renew/handoff en **CAS sur `expectedEpoch`**.
+leases`** : `{lineageId, epoch, holder, incarnationId, location: local|remote,
+expiresAt}`. acquire/renew/handoff en **CAS sur `expectedEpoch`**.
 - **Fencing token monotone (= epoch)** exigé sur **TOUTE** mutation (push conv,
   push fichiers, handoff, stop) ; le control-plane **rejette tout token périmé**
   → neutralise le « zombie de réveil ». Le heartbeat seul ne suffit pas.
@@ -397,6 +460,7 @@ Les réserves dures de la revue opus (§6.1) sont **adoptées comme décisions**
   → dest relance. Token périmé ⇒ le source ne peut plus muter (anti split-brain).
 
 ### D3 — Readiness
+
 `{ready: bool, mode: full|lazy, blockers[], pending:{files, bytes,
 est_seconds}}`. Le AND est **conditionné par `mode`** (en lazy, le cold set en
 attente n'empêche pas `ready`). `conv_resolvable` = **résolution réelle** côté
@@ -408,8 +472,9 @@ native deps, cache) = **blocker dédié de readiness** (pas un objet de sync, pa
 blocker flou), jamais un transfert de node_modules.
 
 ### D4 — Sync, deux flux
+
 - **Flux conv (.jsonl)** : état par conv **`{offset, prefixHash, generation,
-  lastAckedToken}`** ; append seulement si le hash du préfixe commun match, sinon
+lastAckedToken}`** ; append seulement si le hash du préfixe commun match, sinon
   `.bak` + whole-file gardé (jamais overwrite silencieux). Le `.jsonl` n'est
   **pas** append-only fiable (compaction/sidechains claude). Cible gap < 30 s.
   (≈ réécriture de `sync.ts`, assumé.)
@@ -427,6 +492,7 @@ blocker flou), jamais un transfert de node_modules.
   arbitraires).
 
 ### D5 — Lazy-files + conscience de fermeture
+
 - Hot set (trackés + conv + récemment modifiés) synchronisé avant readiness ;
   cold/heavy en background. **Seuil lazy = temps de transfert estimé** (pas un
   octet-seuil ; 10⁴ petits fichiers coûtent plus qu'un fichier de 200 Mo).
@@ -437,22 +503,26 @@ blocker flou), jamais un transfert de node_modules.
   pending ; le fencing token empêche tout écrasement par le source zombie.
 
 ### D6 — Déclenchement depuis la CLI
+
 - **(A) `remote migrate to-remote` / `to-local`** = surface utilisateur (étend
-  `migrate forward/back`, qui tient déjà le terminal). 
+  `migrate forward/back`, qui tient déjà le terminal).
 - **(B)** option ergonomique : hook **Stop** (fin de tour), **pas** `SessionEnd`
   (trop tard pour un handoff à chaud).
 - **Pas** de plan de contrôle via h2a (appel control-plane synchrone existant).
 
 ### D7 — Phasage consolidé
+
 1. **Phase 0** (indépendant, débloquant) : R1 statut tab, R2 rename soft, R3
    auto-reconnect tunnel.
-2. **Phase A0** (GATE DUR, à prototyper avant tout) : **lease + fencing token
-   persistant au control-plane** (CAS epoch) + **enforcement token sur les chemins
-   d'écriture** + **suspension de l'incarnation source** ; **registre workspace
-   durable + data-plane hors-RAM (D9)** ; **régler cap archive 256 Mo /
-   node_modules / `.git` clone-on-start** (sinon `migrate forward` throw sur tout
-   vrai repo). Tests A0 : **crash/sleep/rollout à deux holders** (token refusé
-   après expiry, restart control-plane sans perte d'autorité).
+2. **Phase A0** (GATE DUR, à prototyper avant tout), decoupee :
+   - **A0a** module pur lineage/lease/epoch/fencing ;
+   - **A0b** endpoints control-plane + persistance ;
+   - **A0c** enforcement token sur tous les chemins d'ecriture + suspension ou
+     terminaison de l'incarnation source ;
+   - **A0d** tests crash/sleep/rollout à deux holders.
+     Inclut aussi **registre workspace durable + data-plane hors-RAM (D9)** et
+     **régler cap archive 256 Mo / node_modules / `.git` clone-on-start** (sinon
+     `migrate forward` throw sur tout vrai repo).
 3. **Phase A** : `lineage id` + readiness + `migrate to-remote/to-local` **mode
    full** ; corriger `migrate back` (lineage).
 4. **Phase B1** : conv incrémentale (garde de préfixe).
@@ -462,6 +532,7 @@ blocker flou), jamais un transfert de node_modules.
 (Track : WP `01KV637TTQEA2SR3N738KEJBG7` + phases 0/A0/A/B1/B2/B3.)
 
 ### D8 — Invariants de sécurité/intégrité
+
 - Pas de secret en clair (bundling auth/Secret existant) ; jamais afficher
   « synced » s'il reste du pending ; lease + fencing **avant toute relance**.
 - **Redaction archive** : `.claude/settings.local.json` et `.remote/sessions` sont
@@ -469,19 +540,22 @@ blocker flou), jamais un transfert de node_modules.
   **classifier / redacter / chiffrer** avant tout transit par le control-plane.
 
 ### D9 — Durabilité du registre workspace + data-plane (NOUVEAU, trou codex)
+
 - Le control-plane génère `ws-${rand}` et garde owners/namespaces **en mémoire**
   (`workspaces.ts:25,55`) → **perdu au rollout** ; ce ne sont **pas** les
   `ws:<hex>` durables CLI. ➜ **registre workspace persistant** (mapping
   `ws:<hex>` ↔ subPath ↔ owner ↔ lineages), sinon `lineage→N ws` est bancal.
 - Les **archives workspace/export** sont en RAM control-plane (`sessions.ts:193,
-  403`) → **data-plane de migration perdu au rollout**. ➜ stockage durable (RWX
+403`) → **data-plane de migration perdu au rollout**. ➜ stockage durable (RWX
   staging) ou transfert direct sans staging RAM.
 - Préalable transverse aux Phases A/B (à séquencer avec A0).
 
-> Verdict de cadrage — **double revue convergente** : opus 4.8 = *GO avec
-> réserves* ; codex 5.5 = *GO-réserves fortes si §6.1 devient le cadrage, NO-GO
-> pour §5 tel quel*. Les deux exigent la **Phase A0 (lease+fencing persistant +
-> enforcement token sur les chemins d'écriture + suspension de l'incarnation
-> source)** AVANT toute migration réelle, sinon le cas nominal « laptop dort →
+> Verdict de cadrage — **double revue convergente** : opus 4.8 = _GO avec
+> réserves_ ; codex 5.5 passe 1 = _GO-réserves fortes si §6.1 devient le
+> cadrage, NO-GO pour §5 tel quel_ ; codex 5.5 passe 2 = _GO pour A0 seulement,
+> NO-GO migration tant que l'autorite d'ecriture n'est pas prouvee_. Les revues
+> exigent la **Phase A0 decoupee (lease+fencing persistant + enforcement token
+> sur les chemins d'ecriture + suspension de l'incarnation source + data-plane
+> durable)** AVANT toute migration réelle, sinon le cas nominal « laptop dort →
 > remote reprend → laptop revient » corrompt conv + working set. Réserves
 > adoptées dans D1-D9.

@@ -41,11 +41,7 @@ import {
   type TunnelConfig,
 } from "./config.js";
 import { ensureConnected, stopTunnel } from "./tunnel.js";
-import {
-  detectToolAuth,
-  KNOWN_TOOLS,
-  partitionTools,
-} from "./auth-tools.js";
+import { detectToolAuth, KNOWN_TOOLS, partitionTools } from "./auth-tools.js";
 import { transmittedSecrets, secretsSummary } from "./secrets.js";
 import { localConvStat, remoteConvStat, alignment } from "./convsync.js";
 import {
@@ -136,6 +132,7 @@ import {
   type InteractiveSession,
   type InteractiveThrottleInfo,
 } from "./interactive-throttle.js";
+import { promptProfileMenu, shouldShowProfileMenu } from "./profile-menu.js";
 import {
   DEFAULT_FANOUT_MAX,
   mapWithConcurrency,
@@ -189,6 +186,7 @@ import {
 } from "./cred-health.js";
 import { forwardSessionPort } from "./forward.js";
 import { buildBrowserOpenPlan } from "./browser.js";
+import { remoteSessionIdFromInstance, sendH2aPing } from "./h2a-ping.js";
 import {
   inspectProfileAuth,
   type AuthDiagnosticsStatus,
@@ -199,7 +197,12 @@ import {
   assertRequiredAuthBundle,
   collectProfileAuth,
 } from "./auth-bundle.js";
-import { coerceCliProfileName, isCliProfile, resolveProfile, resumeArgsFor } from "./profiles.js";
+import {
+  coerceCliProfileName,
+  isCliProfile,
+  resolveProfile,
+  resumeArgsFor,
+} from "./profiles.js";
 import { getLoginCommand, runInteractiveLogin } from "./auth-login.js";
 import {
   buildWorkspaceArchive,
@@ -219,10 +222,7 @@ import {
   writeWorkspaceMarker,
 } from "./workspace.js";
 import { mergeWorkspaceArchive } from "./workspace-merge.js";
-import {
-  restoreSessionsToLocal,
-  type OnConflict,
-} from "./session-restore.js";
+import { restoreSessionsToLocal, type OnConflict } from "./session-restore.js";
 import { run } from "./run.js";
 import {
   pluginAdd,
@@ -243,6 +243,8 @@ import {
 import { createInterface } from "node:readline";
 
 import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
+
+const KNOWN_PROFILE_HELP = `${CLI_PROFILES.join(", ")} (aliases: claude-code, antigravity, gemini-cli, mistralcli)`;
 
 export const packageName = "@sentropic/remote-cli";
 
@@ -347,7 +349,10 @@ function describeAuthStatus(status: AuthDiagnosticsStatus): string {
   return `skipped: ${status.reason}`;
 }
 
-function resumeStartupArgs(profileName: string, resume: string | true): string[] {
+function resumeStartupArgs(
+  profileName: string,
+  resume: string | true,
+): string[] {
   if (!isCliProfile(profileName)) return [];
   return resumeArgsFor(resolveProfile(profileName), resume);
 }
@@ -384,13 +389,17 @@ async function startRemoteFanout(
       // Each member gets its OWN workspace → its OWN subPath on the shared RWX
       // volume (server assigns the workspaceId). This is the single-session
       // wiring repeated N times, never a shared tree.
-      const ws = await createWorkspace(remote, { displayName: member.workspaceName });
+      const ws = await createWorkspace(remote, {
+        displayName: member.workspaceName,
+      });
       const session = await createRemoteSession(remote, {
         profile: profileName,
         target,
         workspaceId: ws.id,
         displayName: member.name,
-        ...(spec.startupArgs.length > 0 ? { startupArgs: spec.startupArgs } : {}),
+        ...(spec.startupArgs.length > 0
+          ? { startupArgs: spec.startupArgs }
+          : {}),
         ...(spec.credentials ? { credentials: spec.credentials } : {}),
       });
       return { name: member.name, sessionId: session.id, workspaceId: ws.id };
@@ -404,9 +413,19 @@ async function startRemoteFanout(
   const rows = results.map((r, i) => {
     const member = members[i]!;
     if (r.status === "fulfilled") {
-      return [member.name, r.value.sessionId, r.value.workspaceId, "created"].join("\t");
+      return [
+        member.name,
+        r.value.sessionId,
+        r.value.workspaceId,
+        "created",
+      ].join("\t");
     }
-    return [member.name, "-", "-", `FAILED: ${(r.reason as Error).message}`].join("\t");
+    return [
+      member.name,
+      "-",
+      "-",
+      `FAILED: ${(r.reason as Error).message}`,
+    ].join("\t");
   });
   process.stdout.write(
     `NAME\tSESSION\tWORKSPACE\tSTATUS\n${rows.join("\n")}\n`,
@@ -462,6 +481,11 @@ async function runProfile(
       opts.resume !== undefined
         ? resumeStartupArgs(profileName, opts.resume)
         : [];
+    if (opts.resume !== undefined && resumeArgs.length === 0) {
+      throw new Error(
+        `profile "${profileName}" has no verified resume argv; start it without -r/--resume`,
+      );
+    }
     const startupArgs = [...resumeArgs, ...commandArgs];
 
     // WP6 — REMOTE fan-out: --count N spawns N concurrent remote sessions, each
@@ -489,7 +513,11 @@ async function runProfile(
         );
       }
       const base = opts.name ?? basename(process.cwd());
-      const members = planRemoteFanout({ base, count, max: DEFAULT_FANOUT_MAX });
+      const members = planRemoteFanout({
+        base,
+        count,
+        max: DEFAULT_FANOUT_MAX,
+      });
       await startRemoteFanout(opts.remote, profileName, members, {
         target: opts.target,
         startupArgs,
@@ -500,7 +528,9 @@ async function runProfile(
 
     let archive: Buffer | undefined;
     if (opts.sync) {
-      process.stderr.write(`[remote] packing ${process.cwd()} (respecting .gitignore)\n`);
+      process.stderr.write(
+        `[remote] packing ${process.cwd()} (respecting .gitignore)\n`,
+      );
       archive = await buildWorkspaceArchive(process.cwd());
       process.stderr.write(
         `[remote] workspace archive: ${(archive.byteLength / 1024).toFixed(0)} KiB\n`,
@@ -560,7 +590,10 @@ async function refreshProfileSession(
   const remoteProfile = (await getRemoteSession(baseUrl, sessionId)).session
     .profile;
   const requestedProfile = opts.profile ?? remoteProfile;
-  if (opts.profile && coerceCliProfileName(opts.profile) !== coerceCliProfileName(remoteProfile)) {
+  if (
+    opts.profile &&
+    coerceCliProfileName(opts.profile) !== coerceCliProfileName(remoteProfile)
+  ) {
     process.stderr.write(
       `[remote] warning: --profile ${opts.profile} does not match the session profile ${remoteProfile}; bundling ${opts.profile} credentials anyway\n`,
     );
@@ -568,7 +601,7 @@ async function refreshProfileSession(
   const profileName = coerceCliProfileName(requestedProfile);
   if (!profileName) {
     throw new Error(
-      `Unknown profile "${requestedProfile}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
+      `Unknown profile "${requestedProfile}". Known: ${KNOWN_PROFILE_HELP}`,
     );
   }
 
@@ -692,11 +725,14 @@ function readSupervisorHeartbeatMtime(): number | undefined {
  * recorded cadence; a MISSING heartbeat still warns). Returns undefined when
  * fresh / unknown-but-present.
  */
-function supervisorStalenessAdvisory(now: number = Date.now()): string | undefined {
+function supervisorStalenessAdvisory(
+  now: number = Date.now(),
+): string | undefined {
   const mtime = readSupervisorHeartbeatMtime();
   const intervalMs = readSupervisorIntervalMs();
   // No heartbeat at all → loud MISSING warning regardless of interval.
-  if (mtime === undefined) return supervisorAdvisory(undefined, intervalMs ?? 0, now);
+  if (mtime === undefined)
+    return supervisorAdvisory(undefined, intervalMs ?? 0, now);
   if (intervalMs === undefined) return undefined; // present but cadence unknown
   return supervisorAdvisory(mtime, intervalMs, now);
 }
@@ -732,7 +768,9 @@ function readSupervisorIntervalMs(): number | undefined {
  * NO change to what gets pushed — detection + advisory only (slice 2). Returns
  * undefined when fresh / absent.
  */
-function localClaudeExpiryAdvisory(now: number = Date.now()): string | undefined {
+function localClaudeExpiryAdvisory(
+  now: number = Date.now(),
+): string | undefined {
   try {
     const raw = readFileSync(
       join(homedir(), ".claude", ".credentials.json"),
@@ -1105,7 +1143,10 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   const mirrorNew = () => {
     if (trackWp) {
       runTrackMirror(
-        trackItemNewArgs(trackWp, { id: job.id, ...(job.task !== undefined ? { task: job.task } : {}) }),
+        trackItemNewArgs(trackWp, {
+          id: job.id,
+          ...(job.task !== undefined ? { task: job.task } : {}),
+        }),
         job.originCwd ?? process.cwd(),
       );
     }
@@ -1167,7 +1208,9 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   let isolated: boolean;
   try {
     ({ runCwd, isolated } = resolveJobCwd(originCwd, job.id, {
-      ...(job.explicitCwd !== undefined ? { explicitCwd: job.explicitCwd } : {}),
+      ...(job.explicitCwd !== undefined
+        ? { explicitCwd: job.explicitCwd }
+        : {}),
     }));
   } catch (err) {
     return { started: false, error: (err as Error).message };
@@ -1181,7 +1224,9 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   // not the job slug), so an interactive tmux job actually completes.
   const prevDepth = process.env[DEPTH_ENV];
   const prevJobId = process.env[JOB_ID_ENV];
-  process.env[DEPTH_ENV] = childDepthEnvValue(job.depthBudget ?? clampDepth(undefined));
+  process.env[DEPTH_ENV] = childDepthEnvValue(
+    job.depthBudget ?? clampDepth(undefined),
+  );
   process.env[JOB_ID_ENV] = job.id;
   let tmuxSession: string;
   try {
@@ -1256,7 +1301,10 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
  */
 export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
   if (job.kind !== "local-tmux" || job.headless !== true) {
-    return { started: false, error: "throttle-resume is headless-local only (phase 1)" };
+    return {
+      started: false,
+      error: "throttle-resume is headless-local only (phase 1)",
+    };
   }
   if (!tmuxAvailable()) {
     return { started: false, error: "tmux is not installed locally" };
@@ -1276,7 +1324,9 @@ export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
   // Same env plumbing as startJob (depth budget + REMOTE_JOB_ID for the hooks).
   const prevDepth = process.env[DEPTH_ENV];
   const prevJobId = process.env[JOB_ID_ENV];
-  process.env[DEPTH_ENV] = childDepthEnvValue(job.depthBudget ?? clampDepth(undefined));
+  process.env[DEPTH_ENV] = childDepthEnvValue(
+    job.depthBudget ?? clampDepth(undefined),
+  );
   process.env[JOB_ID_ENV] = job.id;
   let tmuxSession: string;
   try {
@@ -1303,7 +1353,10 @@ export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
   // re-throttle on the resumed run accumulates toward the cap. Atomic.
   const advanced = advanceJob(job.id, "running");
   if (!advanced) {
-    return { started: false, error: "could not transition throttled → running" };
+    return {
+      started: false,
+      error: "could not transition throttled → running",
+    };
   }
   enroll({
     id: job.id,
@@ -1351,7 +1404,10 @@ function looksLikeUrl(value: string): boolean {
  */
 function resolveTools(withOpt?: string): string[] {
   const raw = withOpt
-    ? withOpt.split(",").map((s) => s.trim()).filter(Boolean)
+    ? withOpt
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
     : getDefaultTools();
   const { known, unknown } = partitionTools(raw);
   if (unknown.length > 0) {
@@ -1384,6 +1440,10 @@ const LOCAL_CLI: Readonly<Record<string, string>> = {
   codex: "codex",
   agy: "agy",
   antigravity: "agy",
+  gemini: "gemini",
+  "gemini-cli": "gemini",
+  mistral: "mistral",
+  mistralcli: "mistral",
   opencode: "opencode",
   shell: "/bin/bash",
 };
@@ -1429,11 +1489,36 @@ function setAndReportDefaultRemote(url: string): void {
 }
 
 export async function main(argv: ReadonlyArray<string>): Promise<number> {
+  if (
+    shouldShowProfileMenu(
+      argv,
+      process.stdin.isTTY === true && process.stdout.isTTY === true,
+    )
+  ) {
+    const profile = await promptProfileMenu(
+      process.stdin,
+      process.stderr,
+      process.cwd(),
+    );
+    if (!profile) {
+      process.stderr.write("[remote] no profile selected\n");
+      return 1;
+    }
+    return main([
+      argv[0] ?? "node",
+      argv[1] ?? "remote",
+      "run",
+      profile,
+      process.cwd(),
+      "--attach",
+    ]);
+  }
+
   const program = new Command();
   program
     .name("remote")
     .description(
-      "Wrap a local agent CLI (codex/claude/agy) and expose its session for remote attach.",
+      "Wrap a local agent CLI (codex/claude/agy/gemini/mistral) and expose its session for remote attach.",
     )
     .version("0.0.0");
 
@@ -1441,6 +1526,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     ["codex", undefined],
     ["claude", "claude-code"],
     ["agy", "antigravity"],
+    ["gemini", "gemini-cli"],
+    ["mistral", "mistralcli"],
     ["opencode", undefined],
     ["shell", undefined],
   ] as const) {
@@ -1492,46 +1579,48 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "--name <label>",
         "base label for the --count fan-out fleet names (default: cwd basename)",
       )
-      .action(async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {
-        const { remote: remoteOverride, local, workspace, ...rest } = opts;
-        if (local) {
+      .action(
+        async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {
+          const { remote: remoteOverride, local, workspace, ...rest } = opts;
+          if (local) {
+            try {
+              await runProfile(profileName, { ...rest }, commandArgs ?? []);
+            } catch (err) {
+              process.stderr.write(`[remote] ${(err as Error).message}\n`);
+              process.exitCode = 1;
+            }
+            return;
+          }
+          // WP6 — a fan-out (--count>1) needs N DISTINCT workspaces, so the cwd's
+          // single .remote/ mapping must NOT pin every member to one subPath:
+          // ignore the marker in that case (each member gets its own workspace).
+          const fanout = (rest.count ?? 1) > 1;
+          const marker =
+            workspace === false || fanout
+              ? undefined
+              : readWorkspaceMarker(process.cwd());
+          const remote = getConfiguredRemote(remoteOverride ?? marker?.remote);
+          if (marker) {
+            process.stderr.write(
+              `[remote] cwd mapped to ${marker.workspaceId} (reusing workspace)\n`,
+            );
+          }
           try {
-            await runProfile(profileName, { ...rest }, commandArgs ?? []);
+            await runProfile(
+              profileName,
+              {
+                ...rest,
+                remote,
+                ...(marker ? { workspaceId: marker.workspaceId } : {}),
+              },
+              commandArgs ?? [],
+            );
           } catch (err) {
             process.stderr.write(`[remote] ${(err as Error).message}\n`);
             process.exitCode = 1;
           }
-          return;
-        }
-        // WP6 — a fan-out (--count>1) needs N DISTINCT workspaces, so the cwd's
-        // single .remote/ mapping must NOT pin every member to one subPath:
-        // ignore the marker in that case (each member gets its own workspace).
-        const fanout = (rest.count ?? 1) > 1;
-        const marker =
-          workspace === false || fanout
-            ? undefined
-            : readWorkspaceMarker(process.cwd());
-        const remote = getConfiguredRemote(remoteOverride ?? marker?.remote);
-        if (marker) {
-          process.stderr.write(
-            `[remote] cwd mapped to ${marker.workspaceId} (reusing workspace)\n`,
-          );
-        }
-        try {
-          await runProfile(
-            profileName,
-            {
-              ...rest,
-              remote,
-              ...(marker ? { workspaceId: marker.workspaceId } : {}),
-            },
-            commandArgs ?? [],
-          );
-        } catch (err) {
-          process.stderr.write(`[remote] ${(err as Error).message}\n`);
-          process.exitCode = 1;
-        }
-      });
+        },
+      );
     if (alias) cmd.alias(alias);
   }
 
@@ -1553,7 +1642,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Create a persistent remote workspace and write the .remote/ mapping for the cwd",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .option("--name <name>", "display name for the workspace")
     .action(async (opts: { remote?: string; name?: string }) => {
       const cwd = process.cwd();
@@ -1588,9 +1680,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const rows = workspaces.map((w) =>
         [w.id, w.createdAt, w.displayName ?? ""].join("\t"),
       );
-      process.stdout.write(
-        ["ID\tCREATED\tDISPLAY", ...rows].join("\n") + "\n",
-      );
+      process.stdout.write(["ID\tCREATED\tDISPLAY", ...rows].join("\n") + "\n");
     });
 
   workspaceCommand
@@ -1676,7 +1766,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         await attached.finished;
         // The pushed tree is now the shared sync base.
         writeBaseSnapshot(cwd, archive);
-        process.stderr.write(`[remote] pushed ${cwd} to ${marker.workspaceId}\n`);
+        process.stderr.write(
+          `[remote] pushed ${cwd} to ${marker.workspaceId}\n`,
+        );
       } finally {
         await releaseWorkspaceLock(marker.remote, marker.workspaceId);
       }
@@ -1702,131 +1794,142 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         restoreSessions?: boolean;
         onConflict?: string;
       }) => {
-      const cwd = process.cwd();
-      const marker = requireMarker(cwd);
-      await guardLock(marker.remote, marker.workspaceId, opts.force ?? false);
-      try {
-        // Export the live /workspace via a bound session. The session-agent
-        // uploads the export on startup (before the shell), so we keep the
-        // shell alive, poll for the export, then stop the session explicitly —
-        // otherwise the terminal.exited cleanup cascade would drop the export
-        // before we could download it.
-        const session = await createRemoteSession(marker.remote, {
-          profile: "shell",
-          workspaceId: marker.workspaceId,
-          workspaceExport: true,
-          startupArgs: ["-c", "sleep 120"],
-        });
-        let remoteArchive: Buffer | null = null;
+        const cwd = process.cwd();
+        const marker = requireMarker(cwd);
+        await guardLock(marker.remote, marker.workspaceId, opts.force ?? false);
         try {
-          for (let attempt = 0; attempt < 60; attempt++) {
-            remoteArchive = await downloadWorkspaceExport(
-              marker.remote,
-              session.id,
-            );
-            if (remoteArchive) break;
-            await new Promise((r) => setTimeout(r, 1000));
+          // Export the live /workspace via a bound session. The session-agent
+          // uploads the export on startup (before the shell), so we keep the
+          // shell alive, poll for the export, then stop the session explicitly —
+          // otherwise the terminal.exited cleanup cascade would drop the export
+          // before we could download it.
+          const session = await createRemoteSession(marker.remote, {
+            profile: "shell",
+            workspaceId: marker.workspaceId,
+            workspaceExport: true,
+            startupArgs: ["-c", "sleep 120"],
+          });
+          let remoteArchive: Buffer | null = null;
+          try {
+            for (let attempt = 0; attempt < 60; attempt++) {
+              remoteArchive = await downloadWorkspaceExport(
+                marker.remote,
+                session.id,
+              );
+              if (remoteArchive) break;
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+          } finally {
+            await stopRemoteSession(marker.remote, session.id, "pull-complete");
           }
-        } finally {
-          await stopRemoteSession(marker.remote, session.id, "pull-complete");
-        }
-        if (!remoteArchive) {
-          process.stderr.write(
-            `[remote] nothing to pull (workspace ${marker.workspaceId} produced no export)\n`,
-          );
-          return;
-        }
-        const result = mergeWorkspaceArchive({
-          cwd,
-          remoteArchive,
-          baseArchive: readBaseSnapshot(cwd),
-        });
-        process.stderr.write(
-          `[remote] pull: ${result.tookRemote.length} from remote, ${result.keptLocal.length} kept local, ${result.merged.length} merged\n`,
-        );
-        if (result.conflicts.length > 0) {
-          process.stderr.write(
-            `[remote] ${result.conflicts.length} conflict(s) (left with markers, resolve then re-run):\n`,
-          );
-          for (const f of result.conflicts) process.stderr.write(`  ${f}\n`);
-          process.exitCode = 1;
-          return;
-        }
-        // Clean merge → the remote tree is the new shared base.
-        writeBaseSnapshot(cwd, remoteArchive);
-        process.stderr.write(`[remote] pulled ${marker.workspaceId} into ${cwd}\n`);
-
-        if (opts.restoreSessions) {
-          const onConflict: OnConflict =
-            opts.onConflict === "backup"
-              ? "backup"
-              : opts.onConflict === "keep-local"
-                ? "keep-local"
-                : "block";
-          const home = process.env.HOME ?? "";
-          let anyConflict = false;
-          for (const profile of CLI_PROFILES) {
-            const r = restoreSessionsToLocal({
-              home,
-              profile,
-              remoteArchive,
-              onConflict,
-            });
-            const touched =
-              r.restored.length + r.backedUp.length + r.conflicts.length;
-            if (touched === 0 && r.keptLocal.length === 0) continue;
+          if (!remoteArchive) {
             process.stderr.write(
-              `[remote] sessions(${profile}): ${r.restored.length} restored, ${r.backedUp.length} backed-up, ${r.keptLocal.length} kept, ${r.conflicts.length} conflict\n`,
+              `[remote] nothing to pull (workspace ${marker.workspaceId} produced no export)\n`,
             );
-            for (const b of r.backedUp)
-              process.stderr.write(`    backup ${b}\n`);
-            if (r.conflicts.length > 0) {
-              anyConflict = true;
-              for (const c of r.conflicts)
-                process.stderr.write(`    conflict ${c}\n`);
+            return;
+          }
+          const result = mergeWorkspaceArchive({
+            cwd,
+            remoteArchive,
+            baseArchive: readBaseSnapshot(cwd),
+          });
+          process.stderr.write(
+            `[remote] pull: ${result.tookRemote.length} from remote, ${result.keptLocal.length} kept local, ${result.merged.length} merged\n`,
+          );
+          if (result.conflicts.length > 0) {
+            process.stderr.write(
+              `[remote] ${result.conflicts.length} conflict(s) (left with markers, resolve then re-run):\n`,
+            );
+            for (const f of result.conflicts) process.stderr.write(`  ${f}\n`);
+            process.exitCode = 1;
+            return;
+          }
+          // Clean merge → the remote tree is the new shared base.
+          writeBaseSnapshot(cwd, remoteArchive);
+          process.stderr.write(
+            `[remote] pulled ${marker.workspaceId} into ${cwd}\n`,
+          );
+
+          if (opts.restoreSessions) {
+            const onConflict: OnConflict =
+              opts.onConflict === "backup"
+                ? "backup"
+                : opts.onConflict === "keep-local"
+                  ? "keep-local"
+                  : "block";
+            const home = process.env.HOME ?? "";
+            let anyConflict = false;
+            for (const profile of CLI_PROFILES) {
+              const r = restoreSessionsToLocal({
+                home,
+                profile,
+                remoteArchive,
+                onConflict,
+              });
+              const touched =
+                r.restored.length + r.backedUp.length + r.conflicts.length;
+              if (touched === 0 && r.keptLocal.length === 0) continue;
+              process.stderr.write(
+                `[remote] sessions(${profile}): ${r.restored.length} restored, ${r.backedUp.length} backed-up, ${r.keptLocal.length} kept, ${r.conflicts.length} conflict\n`,
+              );
+              for (const b of r.backedUp)
+                process.stderr.write(`    backup ${b}\n`);
+              if (r.conflicts.length > 0) {
+                anyConflict = true;
+                for (const c of r.conflicts)
+                  process.stderr.write(`    conflict ${c}\n`);
+              }
+            }
+            if (anyConflict) {
+              process.stderr.write(
+                `[remote] diverged conversations left untouched. Re-run with --on-conflict backup (keep both) or keep-local.\n`,
+              );
+              process.exitCode = 1;
             }
           }
-          if (anyConflict) {
-            process.stderr.write(
-              `[remote] diverged conversations left untouched. Re-run with --on-conflict backup (keep both) or keep-local.\n`,
-            );
-            process.exitCode = 1;
-          }
+        } finally {
+          await releaseWorkspaceLock(marker.remote, marker.workspaceId);
         }
-      } finally {
-        await releaseWorkspaceLock(marker.remote, marker.workspaceId);
-      }
-    });
+      },
+    );
 
   workspaceCommand
     .command("rm [workspaceId]")
     .description(
       "Delete a workspace (defaults to the cwd's mapped workspace) and its retained volume",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
-    .action(async (workspaceId: string | undefined, opts: { remote?: string }) => {
-      const marker = readWorkspaceMarker(process.cwd());
-      const remote = getConfiguredRemote(opts.remote ?? marker?.remote);
-      const id = workspaceId ?? marker?.workspaceId;
-      if (!id) {
-        throw new Error(
-          "No workspace id given and no .remote/ mapping in this directory.",
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .action(
+      async (workspaceId: string | undefined, opts: { remote?: string }) => {
+        const marker = readWorkspaceMarker(process.cwd());
+        const remote = getConfiguredRemote(opts.remote ?? marker?.remote);
+        const id = workspaceId ?? marker?.workspaceId;
+        if (!id) {
+          throw new Error(
+            "No workspace id given and no .remote/ mapping in this directory.",
+          );
+        }
+        const deleted = await deleteWorkspace(remote, id);
+        process.stderr.write(
+          deleted
+            ? `[remote] deleted workspace ${id}\n`
+            : `[remote] workspace ${id} not found\n`,
         );
-      }
-      const deleted = await deleteWorkspace(remote, id);
-      process.stderr.write(
-        deleted
-          ? `[remote] deleted workspace ${id}\n`
-          : `[remote] workspace ${id} not found\n`,
-      );
-    });
+      },
+    );
 
   workspaceCommand
     .command("gc")
     .description(
       "Garbage-collect stale workspace directories on the shared remote volume (dry-run unless --apply)",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .option(
       "--older-than <days>",
       "only directories with no activity for at least <days> days (default 30)",
@@ -1934,14 +2037,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   const authCommand = program
     .command("auth")
-    .description("Inspect and manage the local CLI credentials remote sends to sessions");
+    .description(
+      "Inspect and manage the local CLI credentials remote sends to sessions",
+    );
 
   const printAuthStatus = async (
     profile: CliProfile,
     opts: AuthDiagnosticOpts,
   ): Promise<void> => {
     const result = await inspectProfileAuth(profile, {
-      ...(opts.authRefresh !== undefined ? { authRefresh: opts.authRefresh } : {}),
+      ...(opts.authRefresh !== undefined
+        ? { authRefresh: opts.authRefresh }
+        : {}),
     });
     process.stdout.write(`profile: ${result.profile}\n`);
     process.stdout.write(
@@ -1983,7 +2090,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const profile = coerceCliProfileName(profileName);
         if (!profile) {
           throw new Error(
-            `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
+            `Unknown profile "${profileName}". Known: ${KNOWN_PROFILE_HELP}`,
           );
         }
         await printAuthStatus(profile, opts);
@@ -1999,7 +2106,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const profile = coerceCliProfileName(profileName);
       if (!profile) {
         throw new Error(
-          `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
+          `Unknown profile "${profileName}". Known: ${KNOWN_PROFILE_HELP}`,
         );
       }
       const loginCommand = getLoginCommand(profile);
@@ -2051,13 +2158,16 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         if (opts.soft) {
           await ensureConnected(url);
           const profile =
-            opts.profile ?? (await getRemoteSession(url, sessionId)).session.profile;
+            opts.profile ??
+            (await getRemoteSession(url, sessionId)).session.profile;
           const resolved = coerceCliProfileName(profile);
           if (!resolved) throw new Error(`Unknown profile "${profile}"`);
           if (opts.authRefresh !== false) {
             const fresh = await ensureProfileAuthFresh(resolved);
             if (fresh.checked)
-              process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
+              process.stderr.write(
+                `[remote] auth status ok: ${fresh.command}\n`,
+              );
           }
           await softRefreshSession(sessionId, resolved);
           return;
@@ -2074,7 +2184,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     const profile = coerceCliProfileName(profileName);
     if (!profile) {
       throw new Error(
-        `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell (aliases: claude-code, antigravity)`,
+        `Unknown profile "${profileName}". Known: ${KNOWN_PROFILE_HELP}`,
       );
     }
     const remote = getConfiguredRemote(opts.remote);
@@ -2164,7 +2274,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const requested =
         list.trim() === "none"
           ? []
-          : list.split(",").map((s) => s.trim()).filter(Boolean);
+          : list
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
       const { known, unknown } = partitionTools(requested);
       if (unknown.length > 0) {
         process.stderr.write(
@@ -2195,7 +2308,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       );
       process.stdout.write(`target: ${getDefaultTarget()}\n`);
       const tools = getDefaultTools();
-      if (tools.length > 0) process.stdout.write(`tools: ${tools.join(", ")}\n`);
+      if (tools.length > 0)
+        process.stdout.write(`tools: ${tools.join(", ")}\n`);
       const tunnel = getTunnel();
       if (tunnel) {
         process.stdout.write(
@@ -2210,11 +2324,24 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Configure how the CLI reaches the control-plane when there is no public ingress (kubectl port-forward, opened automatically on connect/attach/ls/migrate)",
     )
-    .requiredOption("--namespace <ns>", "namespace of the control-plane service")
+    .requiredOption(
+      "--namespace <ns>",
+      "namespace of the control-plane service",
+    )
     .requiredOption("--service <svc>", "control-plane Service name")
     .option("--kubeconfig <path>", "kubeconfig path (~ is expanded)")
-    .option("--local-port <port>", "local port", (v: string) => parseInt(v, 10), 8080)
-    .option("--remote-port <port>", "service port", (v: string) => parseInt(v, 10), 8080)
+    .option(
+      "--local-port <port>",
+      "local port",
+      (v: string) => parseInt(v, 10),
+      8080,
+    )
+    .option(
+      "--remote-port <port>",
+      "service port",
+      (v: string) => parseInt(v, 10),
+      8080,
+    )
     .action(
       (opts: {
         namespace: string;
@@ -2246,7 +2373,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Ensure the control-plane is reachable, opening the configured tunnel if needed",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .action(async (opts: { remote?: string }) => {
       const url = getConfiguredRemote(opts.remote);
       await ensureConnected(url);
@@ -2270,7 +2400,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Unified view: local active CLI sessions + remote sessions (correlated by path, with agent health) + local tool auth",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .action(async (opts: { remote?: string }) => {
       const now = Date.now();
       const ACTIVE_MS = 10 * 60 * 1000;
@@ -2280,12 +2413,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       await ensureConnected(url);
       const remote = await listRemoteSessions(url);
       const health = new Map<string, string>();
-      for (const s of remote) health.set(s.id, await sessionTerminalHealth(url, s.id));
+      for (const s of remote)
+        health.set(s.id, await sessionTerminalHealth(url, s.id));
       const remoteByPath = new Map<string, (typeof remote)[number]>();
-      for (const s of remote) if (s.workspacePath) remoteByPath.set(s.workspacePath, s);
+      for (const s of remote)
+        if (s.workspacePath) remoteByPath.set(s.workspacePath, s);
       const mark = (id: string): string => {
         const h = health.get(id);
-        return h === "ready" ? "● ready" : h === "agent-down" ? "○ down" : "? unknown";
+        return h === "ready"
+          ? "● ready"
+          : h === "agent-down"
+            ? "○ down"
+            : "? unknown";
       };
 
       // LOCAL sessions (claude conversations), newest first; "●" = active <10min.
@@ -2315,7 +2454,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
 
       // Local tool auth (what you can bundle into a deported session).
-      process.stdout.write("\nLOCAL tool auth (deport with --with / 'config tools'):\n");
+      process.stdout.write(
+        "\nLOCAL tool auth (deport with --with / 'config tools'):\n",
+      );
       for (const t of detectToolAuth()) {
         process.stdout.write(
           `  ${t.present ? "✓" : "·"} ${t.tool.padEnd(8)} ${t.present ? "authenticated" : `not set up — ${t.loginHint}`}\n`,
@@ -2336,53 +2477,60 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Show what auth/credentials each remote session received (live k8s Secret, key names only — values are never shown). Pass a sessionId for per-file detail.",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
-    .action(async (sessionId: string | undefined, opts: { remote?: string }) => {
-      const url = getConfiguredRemote(opts.remote);
-      await ensureConnected(url);
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .action(
+      async (sessionId: string | undefined, opts: { remote?: string }) => {
+        const url = getConfiguredRemote(opts.remote);
+        await ensureConnected(url);
 
-      if (sessionId) {
-        const entries = transmittedSecrets(sessionId);
-        if (entries === undefined) {
+        if (sessionId) {
+          const entries = transmittedSecrets(sessionId);
+          if (entries === undefined) {
+            process.stdout.write(
+              `[remote] cannot read secrets for ${sessionId} (no tunnel configured, or no auth Secret)\n`,
+            );
+            return;
+          }
           process.stdout.write(
-            `[remote] cannot read secrets for ${sessionId} (no tunnel configured, or no auth Secret)\n`,
+            `Secrets transmitted to ${sessionId} (live, names only):\n`,
           );
+          if (entries.length === 0) {
+            process.stdout.write("  (none)\n");
+            return;
+          }
+          for (const e of entries) {
+            process.stdout.write(
+              `  ${e.path}${e.tool !== "?" ? `  [${e.tool}]` : ""}${e.broad ? "  ⚠ account-wide cloud credential" : ""}\n`,
+            );
+          }
+          const broad = entries.filter((e) => e.broad).map((e) => e.tool);
+          if (broad.length > 0) {
+            process.stdout.write(
+              `\n⚠ broad cloud credentials sent: ${[...new Set(broad)].join(", ")} — revoke by re-deporting without them (--with) if unintended.\n`,
+            );
+          }
           return;
         }
-        process.stdout.write(`Secrets transmitted to ${sessionId} (live, names only):\n`);
-        if (entries.length === 0) {
+
+        const sessions = await listRemoteSessions(url);
+        process.stdout.write(`Transmitted secrets per project @ ${url}:\n`);
+        if (sessions.length === 0) {
           process.stdout.write("  (none)\n");
           return;
         }
-        for (const e of entries) {
+        for (const s of sessions) {
           process.stdout.write(
-            `  ${e.path}${e.tool !== "?" ? `  [${e.tool}]` : ""}${e.broad ? "  ⚠ account-wide cloud credential" : ""}\n`,
+            `  ${projectName(s).padEnd(22)} ${secretsSummary(s.id)}   (${s.id})\n`,
           );
         }
-        const broad = entries.filter((e) => e.broad).map((e) => e.tool);
-        if (broad.length > 0) {
-          process.stdout.write(
-            `\n⚠ broad cloud credentials sent: ${[...new Set(broad)].join(", ")} — revoke by re-deporting without them (--with) if unintended.\n`,
-          );
-        }
-        return;
-      }
-
-      const sessions = await listRemoteSessions(url);
-      process.stdout.write(`Transmitted secrets per project @ ${url}:\n`);
-      if (sessions.length === 0) {
-        process.stdout.write("  (none)\n");
-        return;
-      }
-      for (const s of sessions) {
         process.stdout.write(
-          `  ${projectName(s).padEnd(22)} ${secretsSummary(s.id)}   (${s.id})\n`,
+          "\n(⚠ = account-wide cloud cred. Detail: remote secrets status <sessionId>.)\n",
         );
-      }
-      process.stdout.write(
-        "\n(⚠ = account-wide cloud cred. Detail: remote secrets status <sessionId>.)\n",
-      );
-    });
+      },
+    );
 
   // ---------------------------------------------------------------------------
   // diff — is the remote session aligned with the local one?
@@ -2398,21 +2546,28 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--files",
       "compare the git state of the workspace instead: HEAD, branch, modified file names (local cwd vs Pod $WORKSPACE_PATH)",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .action(
       async (
         sessionId: string | undefined,
         opts: { session?: boolean; files?: boolean; remote?: string },
       ) => {
         if (opts.session && opts.files) {
-          process.stderr.write("[remote] --session and --files are mutually exclusive\n");
+          process.stderr.write(
+            "[remote] --session and --files are mutually exclusive\n",
+          );
           process.exitCode = 1;
           return;
         }
         const url = getConfiguredRemote(opts.remote);
         await ensureConnected(url);
         const all = await listRemoteSessions(url);
-        const sessions = sessionId ? all.filter((s) => s.id === sessionId) : all;
+        const sessions = sessionId
+          ? all.filter((s) => s.id === sessionId)
+          : all;
         if (sessions.length === 0) {
           process.stdout.write("[remote] no matching session\n");
           return;
@@ -2467,11 +2622,19 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option("--files", "not automated — use git on both sides")
     .option("--force", "override the ahead-guard (a backup is still taken)")
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .action(
       async (
         sessionId: string,
-        opts: { session?: string; files?: boolean; force?: boolean; remote?: string },
+        opts: {
+          session?: string;
+          files?: boolean;
+          force?: boolean;
+          remote?: string;
+        },
       ) => {
         if (opts.files) {
           process.stderr.write(
@@ -2490,7 +2653,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const direction: SyncDirection = opts.session;
         const url = getConfiguredRemote(opts.remote);
         await ensureConnected(url);
-        const session = (await listRemoteSessions(url)).find((s) => s.id === sessionId);
+        const session = (await listRemoteSessions(url)).find(
+          (s) => s.id === sessionId,
+        );
         if (!session?.workspacePath) {
           process.stderr.write(
             `[remote] no session ${sessionId} with a workspace path\n`,
@@ -2512,7 +2677,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         if (result.backup) {
           process.stderr.write(`[remote] backup: ${result.backup}\n`);
         }
-        const lines = direction === "pull" ? result.lines.remote : result.lines.local;
+        const lines =
+          direction === "pull" ? result.lines.remote : result.lines.local;
         process.stderr.write(
           `[remote] ${direction === "pull" ? "pulled" : "pushed"} ${result.convId} (${lines} lines) → ${result.written}\n`,
         );
@@ -2534,7 +2700,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Expose a port of a session Pod on localhost via kubectl port-forward — reach a web UI running in the Pod (UAT/mail control, dev server) at http://localhost:<localPort>. Foreground until Ctrl-C.",
     )
     .option("--address <addr>", "local bind address (default 127.0.0.1)")
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .action(
       async (
         sessionId: string,
@@ -2552,7 +2721,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         if (localPort !== undefined) {
           local = Number(localPort);
           if (!Number.isInteger(local) || local < 1 || local > 65535) {
-            process.stderr.write(`[remote] invalid local port "${localPort}"\n`);
+            process.stderr.write(
+              `[remote] invalid local port "${localPort}"\n`,
+            );
             process.exitCode = 1;
             return;
           }
@@ -2609,7 +2780,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         let localPort: number | undefined;
         if (opts.localPort !== undefined) {
           localPort = Number(opts.localPort);
-          if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535) {
+          if (
+            !Number.isInteger(localPort) ||
+            localPort < 1 ||
+            localPort > 65535
+          ) {
             process.stderr.write(
               `[remote] invalid local port "${opts.localPort}"\n`,
             );
@@ -2673,7 +2848,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "creates a remote session, and hands off this terminal to it. " +
         "Press Ctrl+P Ctrl+Q to detach without stopping the remote session.",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .option(
       "--workspace <id>",
       "workspace id to bind (defaults to .remote/workspace.json or creates a new workspace)",
@@ -2724,8 +2902,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const guardConvId =
           typeof opts.resume === "string"
             ? opts.resume
-            : opts.resume === true &&
-                coerceCliProfileName(profile) === "claude"
+            : opts.resume === true && coerceCliProfileName(profile) === "claude"
               ? localConvStat(process.cwd())?.convId
               : undefined;
         if (guardConvId !== undefined) {
@@ -2880,7 +3057,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Pull the remote workspace and conversation state back to local, stop the remote session, " +
         "and print the command to resume the CLI locally. Does NOT spawn the local CLI.",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
     .option(
       "--workspace <id>",
       "workspace id to pull (defaults to .remote/workspace.json)",
@@ -2924,7 +3104,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .command("add <pkgOrName>")
     .description(
       "Register a plugin propagated to sessions. npm (default): `npm i -g <pkg>` + register its MCP server(s) with claude + codex + agy. " +
-        "--curl <url> / --install \"<shell>\": a NON-npm tool, installed in each Pod on sync by piping an https script or running a shell command (e.g. a Go binary's install.sh). " +
+        '--curl <url> / --install "<shell>": a NON-npm tool, installed in each Pod on sync by piping an https script or running a shell command (e.g. a Go binary\'s install.sh). ' +
         "Without --mcp, every npm bin ending in -mcp is registered (track-mcp -> track), as `node <realpath>`.",
     )
     .option(
@@ -2933,22 +3113,33 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       (value: string, prev: string[]) => [...prev, value],
       [] as string[],
     )
-    .option("--curl <url>", "install in Pods via `curl -fsSL <url> | bash` (non-npm)")
-    .option("--install <shell>", "install in Pods by running this shell command (non-npm)")
+    .option(
+      "--curl <url>",
+      "install in Pods via `curl -fsSL <url> | bash` (non-npm)",
+    )
+    .option(
+      "--install <shell>",
+      "install in Pods by running this shell command (non-npm)",
+    )
     .action(
       (
         pkgOrName: string,
         opts: { mcp: string[]; curl?: string; install?: string },
       ) => {
         if (opts.curl !== undefined && opts.install !== undefined) {
-          process.stderr.write("[remote] pass only one of --curl / --install\n");
+          process.stderr.write(
+            "[remote] pass only one of --curl / --install\n",
+          );
           process.exitCode = 1;
           return;
         }
         if (opts.curl !== undefined) {
           pluginAddInstaller(pkgOrName, { method: "curl", spec: opts.curl });
         } else if (opts.install !== undefined) {
-          pluginAddInstaller(pkgOrName, { method: "script", spec: opts.install });
+          pluginAddInstaller(pkgOrName, {
+            method: "script",
+            spec: opts.install,
+          });
         } else {
           pluginAdd(pkgOrName, opts.mcp);
         }
@@ -2960,8 +3151,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "List configured plugins: pkg, version, MCP servers, and where they are installed (local ok/missing; REMOTE = real per-Pod drift status when connected, else ?)",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
-    .option("--no-remote-check", "skip the live per-Pod drift probe (offline; REMOTE shows ?)")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .option(
+      "--no-remote-check",
+      "skip the live per-Pod drift probe (offline; REMOTE shows ?)",
+    )
     .action(async (opts: { remote?: string; remoteCheck?: boolean }) => {
       // Real REMOTE status needs a connected control-plane + tunnel; offline it
       // falls back to `?`. --no-remote-check forces the offline/fast path.
@@ -2985,8 +3182,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Install every configured plugin into each live REMOTE session Pod (kubectl exec -> npm i -g) and register its MCP servers for the Pod's profile (claude/codex; others: TODO). " +
         "--check: do NOT converge — print a per-Pod drift report (ok/version-drift/missing/mcp-unregistered) and exit 1 on any drift. Needs the configured tunnel.",
     )
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
-    .option("--check", "read-only drift report (no convergence); exit 1 on any drift")
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .option(
+      "--check",
+      "read-only drift report (no convergence); exit 1 on any drift",
+    )
     .action(async (opts: { remote?: string; check?: boolean }) => {
       const url = getConfiguredRemote(opts.remote);
       await ensureConnected(url);
@@ -3007,24 +3210,40 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .option("--pod <name>", "sync a single session (by id or session-<id>)")
     .option("--all", "sync every live session Pod")
     .option("--dry-run", "print the tar/exec plan; transfer nothing")
-    .option("--remote <url>", "control-plane URL (defaults to configured remote)")
-    .action(async (opts: { pod?: string; all?: boolean; dryRun?: boolean; remote?: string }) => {
-      const url = getConfiguredRemote(opts.remote);
-      await ensureConnected(url);
-      const syncOpts: { pod?: string; all?: boolean; dryRun?: boolean } = {};
-      if (opts.pod !== undefined) syncOpts.pod = opts.pod;
-      if (opts.all !== undefined) syncOpts.all = opts.all;
-      if (opts.dryRun !== undefined) syncOpts.dryRun = opts.dryRun;
-      await syncSkills(url, syncOpts);
-    });
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .action(
+      async (opts: {
+        pod?: string;
+        all?: boolean;
+        dryRun?: boolean;
+        remote?: string;
+      }) => {
+        const url = getConfiguredRemote(opts.remote);
+        await ensureConnected(url);
+        const syncOpts: { pod?: string; all?: boolean; dryRun?: boolean } = {};
+        if (opts.pod !== undefined) syncOpts.pod = opts.pod;
+        if (opts.all !== undefined) syncOpts.all = opts.all;
+        if (opts.dryRun !== undefined) syncOpts.dryRun = opts.dryRun;
+        await syncSkills(url, syncOpts);
+      },
+    );
 
   program
     .command("run <profile> [path]")
     .description(
       "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd). Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
     )
-    .option("--attach", "attach immediately after starting (default: start detached)")
-    .option("-r, --resume <convId>", "resume a specific conversation in the CLI")
+    .option(
+      "--attach",
+      "attach immediately after starting (default: start detached)",
+    )
+    .option(
+      "-r, --resume <convId>",
+      "resume a specific conversation in the CLI",
+    )
     .option(
       "--force",
       "start even if the conversation already has a live writer (risk: conversation .jsonl corruption)",
@@ -3039,7 +3258,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option(
       "--h2a",
-      "also start the h2a MCP server in a side tmux window \"h2a\" (launcher contract: agent reachable/wakeable via ~/h2a-workspace/.h2a); config key `h2a: {enabled, command}` makes it the default",
+      'also start the h2a MCP server in a side tmux window "h2a" (launcher contract: agent reachable/wakeable via ~/h2a-workspace/.h2a); config key `h2a: {enabled, command}` makes it the default',
     )
     .action(
       async (
@@ -3065,7 +3284,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         if (opts.count !== undefined) {
           count = Number(opts.count);
           if (!Number.isInteger(count) || count < 1) {
-            process.stderr.write(`[remote] --count must be a whole number ≥ 1\n`);
+            process.stderr.write(
+              `[remote] --count must be a whole number ≥ 1\n`,
+            );
             process.exitCode = 1;
             return;
           }
@@ -3099,6 +3320,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         }
         const command = localCliCommand(profile);
         const args = opts.resume ? localResumeArgs(profile, opts.resume) : [];
+        if (opts.resume && args.length === 0) {
+          process.stderr.write(
+            `[remote] profile "${profile}" has no verified local resume argv; start it without -r/--resume\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
         const h2a = getH2aConfig();
         // count==1 keeps the exact prior behaviour (label = opts.name, which may
         // be undefined → slug derives from cwd). count>1 fans out distinct
@@ -3150,7 +3378,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           attachLocalSession(only.name);
           return;
         }
-        process.stderr.write(`[remote] attach with: remote attach ${only.slug}\n`);
+        process.stderr.write(
+          `[remote] attach with: remote attach ${only.slug}\n`,
+        );
       },
     );
 
@@ -3223,7 +3453,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
         const jobType: DelegateType = type;
-        const jobId = opts.name ?? `${jobType}-${Math.random().toString(36).slice(2, 8)}`;
+        const jobId =
+          opts.name ?? `${jobType}-${Math.random().toString(36).slice(2, 8)}`;
         // Parent h2a instance to notify on done + answer decisions (best-effort).
         const callbackTo = opts.onDone ?? opts.parent;
         try {
@@ -3239,7 +3470,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         // guard, à la Hermes max_spawn_depth). Top-level: the requested
         // --max-depth (clamped 1–3) is the budget.
         const requestedDepth =
-          opts.maxDepth !== undefined ? Number.parseInt(opts.maxDepth, 10) : undefined;
+          opts.maxDepth !== undefined
+            ? Number.parseInt(opts.maxDepth, 10)
+            : undefined;
         const depthBudget = inheritedDepthBudget(requestedDepth, process.env);
         if (!canDelegateAtDepth(depthBudget)) {
           process.stderr.write(
@@ -3256,7 +3489,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const cap =
           opts.maxConcurrent !== undefined
             ? Number.parseInt(opts.maxConcurrent, 10)
-            : getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT;
+            : (getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT);
         const effectiveCap =
           Number.isFinite(cap) && cap > 0 ? cap : DEFAULT_MAX_CONCURRENT;
 
@@ -3386,7 +3619,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           // it so it doesn't occupy a slot forever (conductor would otherwise
           // only reclaim it on a later reconcile pass).
           if (claimed) advanceJob(jobId, "failed");
-          process.stderr.write(`[remote] failed to start job ${jobId}: ${result.error}\n`);
+          process.stderr.write(
+            `[remote] failed to start job ${jobId}: ${result.error}\n`,
+          );
           process.exitCode = 1;
           return;
         }
@@ -3436,7 +3671,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   // state. Skipped silently when the job carries no `trackWp` or track is absent.
   const realizeTrackMirror = (job: RegistryEntry): void => {
     if (!job.trackWp) return;
-    runTrackMirror(trackItemRealizeArgs({ id: job.id }), job.originCwd ?? process.cwd());
+    runTrackMirror(
+      trackItemRealizeArgs({ id: job.id }),
+      job.originCwd ?? process.cwd(),
+    );
   };
 
   // Reliability slice 1 — read the LAST ~60 lines of a HEADLESS job's output.log
@@ -3444,10 +3682,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   // unreadable log returns "" (→ no throttle). Bounded read for the tail only.
   const readJobLogTail = (job: RegistryEntry): string => {
     try {
-      const logPath = join(jobDir(job.originCwd ?? process.cwd(), job.id), "output.log");
+      const logPath = join(
+        jobDir(job.originCwd ?? process.cwd(), job.id),
+        "output.log",
+      );
       const full = readFileSync(logPath, "utf8");
       const lines = full.split(/\r?\n/);
-      return lines.slice(Math.max(0, lines.length - THROTTLE_TAIL_LINES)).join("\n");
+      return lines
+        .slice(Math.max(0, lines.length - THROTTLE_TAIL_LINES))
+        .join("\n");
     } catch {
       return "";
     }
@@ -3476,7 +3719,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       nowMs,
       // attempts is 0-based for the backoff (first throttle → attempt 0).
       delayMs: jitteredBackoffMs(prior?.attempts ?? 0),
-      ...(verdict.signature !== undefined ? { signature: verdict.signature } : {}),
+      ...(verdict.signature !== undefined
+        ? { signature: verdict.signature }
+        : {}),
     });
     if (step.action === "fail") {
       const advanced = advanceJob(job.id, "failed");
@@ -3495,7 +3740,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       attempts: step.attempts,
       firstAt: step.firstAt,
       nextRetryAt: step.nextRetryAt,
-      ...(step.signature !== undefined ? { lastSignature: step.signature } : {}),
+      ...(step.signature !== undefined
+        ? { lastSignature: step.signature }
+        : {}),
     };
     const path = resolveRegistryPath();
     const ok = withRegistryLock(path, (entries) => {
@@ -3581,7 +3828,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       if (advanced) {
         emitJobDone(advanced, {
           state: advanced.jobState ?? "failed",
-          ...(result?.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+          ...(result?.exitCode !== undefined
+            ? { exitCode: result.exitCode }
+            : {}),
         });
         realizeTrackMirror(advanced);
       }
@@ -3589,9 +3838,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     // Remote: reconcile against the control-plane session list. Skip `pending`
     // (queued, no Pod yet) — only RUNNING remote jobs are checked against live.
     const remoteJobs = listJobs().filter(
-      (j) =>
-        j.kind === "remote" &&
-        (j.jobState ?? "pending") === "running",
+      (j) => j.kind === "remote" && (j.jobState ?? "pending") === "running",
     );
     if (remoteJobs.length > 0) {
       try {
@@ -3764,7 +4011,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       // H2 — output.log lives under the job's ORIGIN cwd, not this process's cwd.
-      const logPath = join(jobDir(job.originCwd ?? process.cwd(), id), "output.log");
+      const logPath = join(
+        jobDir(job.originCwd ?? process.cwd(), id),
+        "output.log",
+      );
       if (existsSync(logPath)) {
         process.stdout.write(readFileSync(logPath, "utf8"));
         return;
@@ -3845,7 +4095,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       const from = opts.from ?? parentInstance(job) ?? "remote:cli";
-      const envelope = buildDecisionReply({ job, parentInstance: from, answer });
+      const envelope = buildDecisionReply({
+        job,
+        parentInstance: from,
+        answer,
+      });
       try {
         const { path, written } = dropEnvelope(
           envelope,
@@ -3874,11 +4128,17 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   // breaker: each job that has a `throttle` record contributes its most recent
   // throttle moment — `lastSeenAt` while it is still `throttled` (the instant it
   // entered), else `throttle.firstAt`. The pure `aimdEffectiveCap` windows them.
-  const recentThrottleEvents = (jobs: ReadonlyArray<RegistryEntry>): string[] => {
+  const recentThrottleEvents = (
+    jobs: ReadonlyArray<RegistryEntry>,
+  ): string[] => {
     const out: string[] = [];
     for (const j of jobs) {
       if (j.role !== "job" || !j.throttle) continue;
-      out.push((j.jobState ?? "pending") === "throttled" ? j.lastSeenAt : j.throttle.firstAt);
+      out.push(
+        (j.jobState ?? "pending") === "throttled"
+          ? j.lastSeenAt
+          : j.throttle.firstAt,
+      );
     }
     return out;
   };
@@ -3912,7 +4172,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     const nowMs = Date.now();
     let resumed = 0;
     for (const job of after) {
-      if (job.role !== "job" || (job.jobState ?? "pending") !== "throttled") continue;
+      if (job.role !== "job" || (job.jobState ?? "pending") !== "throttled")
+        continue;
       if (!isThrottleResumeDue(job.throttle, nowMs)) continue;
       // TODO(phase-2): an interactive throttled job would resume via send-keys
       // (attached-pane guard), and a remote one via the control-plane — both out
@@ -3997,9 +4258,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const capRaw =
           opts.maxConcurrent !== undefined
             ? Number.parseInt(opts.maxConcurrent, 10)
-            : getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT;
+            : (getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT);
         const cap =
-          Number.isFinite(capRaw) && capRaw > 0 ? capRaw : DEFAULT_MAX_CONCURRENT;
+          Number.isFinite(capRaw) && capRaw > 0
+            ? capRaw
+            : DEFAULT_MAX_CONCURRENT;
         // `--max-depth` here clamps the budget the conductor re-stamps on the
         // jobs it starts (a job enrolled by a parent already carries its budget;
         // this only matters for jobs the conductor may re-stamp). Validate it.
@@ -4128,8 +4391,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       cooldownMs,
     });
     if (!gate.launch) {
-      if (confirm) markLaunchEnvelopeProcessed(env.path, `skip: ${gate.reason}`);
-      process.stderr.write(`[remote] conductor-launch: SKIP — ${gate.reason}\n`);
+      if (confirm)
+        markLaunchEnvelopeProcessed(env.path, `skip: ${gate.reason}`);
+      process.stderr.write(
+        `[remote] conductor-launch: SKIP — ${gate.reason}\n`,
+      );
       return { launched: false, detail: gate.reason };
     }
 
@@ -4189,7 +4455,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     recordLaunchAt(request.workspaceId);
     markLaunchEnvelopeProcessed(
       env.path,
-      result.started ? `launched ${host} ${slug}` : `launch-failed: ${result.error}`,
+      result.started
+        ? `launched ${host} ${slug}`
+        : `launch-failed: ${result.error}`,
     );
     if (!result.started) {
       advanceJob(slug, "failed");
@@ -4239,12 +4507,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "minimum minutes between launches for the SAME workspace (default 30)",
     )
     .action(
-      async (opts: { confirm?: boolean; watch?: string; cooldown?: string }) => {
+      async (opts: {
+        confirm?: boolean;
+        watch?: string;
+        cooldown?: string;
+      }) => {
         const confirm = opts.confirm === true;
         const cooldownMin =
           opts.cooldown !== undefined ? Number(opts.cooldown) : 30;
         if (!Number.isFinite(cooldownMin) || cooldownMin < 0) {
-          throw new Error("--cooldown must be a non-negative number of minutes");
+          throw new Error(
+            "--cooldown must be a non-negative number of minutes",
+          );
         }
         const cooldownMs = cooldownMin * 60_000;
         const minutes =
@@ -4276,7 +4550,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Relaunch the CLI in local tmux sessions whose CLI dropped to a shell, in situ (windows kept), each resuming ITS OWN conversation from the registry. Running sessions are left alone. Dry-run by default; --apply to do it. [filter] = only sessions whose slug contains it.",
     )
-    .option("--apply", "actually relaunch (default: dry-run, just print the plan)")
+    .option(
+      "--apply",
+      "actually relaunch (default: dry-run, just print the plan)",
+    )
     .action((filter: string | undefined, opts: { apply?: boolean }) => {
       if (!tmuxAvailable()) {
         process.stderr.write("[remote] tmux is not installed locally\n");
@@ -4415,8 +4692,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       // hash) is NOT corroborated (conservative: wait one pass before nudging).
       const idle = localSessionIdle(session.name);
       const prev = prevTailHash.get(session.name);
-      stalledMap[session.name] =
-        idle || (prev !== undefined && prev === tail);
+      stalledMap[session.name] = idle || (prev !== undefined && prev === tail);
       prevTailHash.set(session.name, tail);
     }
     // Drop bookkeeping for sessions that are gone (don't leak across a fleet's life).
@@ -4425,7 +4701,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     for (const key of [...prevTailHash.keys()])
       if (!liveNames.has(key)) prevTailHash.delete(key);
 
-    const throttleStateObj: Record<string, InteractiveThrottleInfo | undefined> = {};
+    const throttleStateObj: Record<
+      string,
+      InteractiveThrottleInfo | undefined
+    > = {};
     for (const [k, v] of throttleState) throttleStateObj[k] = v;
 
     const plan = planInteractiveResume({
@@ -4470,7 +4749,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "Auto-resume RATE-LIMITED INTERACTIVE local tmux sessions (claude/codex/agy). Detects the provider's transient rate-limit in each pane, and nudges ONLY a DETACHED, stalled session back to life (a minimal `continue`) — staggered (AIMD cap, oldest-first, backoff). NEVER touches a pane a human is attached to. DRY-RUN by default; --apply to actually nudge, or --watch to loop. [filter] = only sessions whose slug contains it.",
     )
-    .option("--apply", "actually send the resume nudge (default: dry-run, just print what it WOULD do)")
+    .option(
+      "--apply",
+      "actually send the resume nudge (default: dry-run, just print what it WOULD do)",
+    )
     .option(
       "--watch <minutes>",
       "loop in the FOREGROUND every <minutes> (implies --apply); Ctrl-C to stop. Run it in a dedicated tmux window",
@@ -4492,9 +4774,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const capRaw =
           opts.maxConcurrent !== undefined
             ? Number.parseInt(opts.maxConcurrent, 10)
-            : getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT;
+            : (getMaxConcurrent() ?? DEFAULT_MAX_CONCURRENT);
         const cap =
-          Number.isFinite(capRaw) && capRaw > 0 ? capRaw : DEFAULT_MAX_CONCURRENT;
+          Number.isFinite(capRaw) && capRaw > 0
+            ? capRaw
+            : DEFAULT_MAX_CONCURRENT;
         const minutes =
           opts.watch === undefined ? undefined : parseWatchMinutes(opts.watch);
         // --watch implies --apply (a dry-run loop would be pointless).
@@ -4532,7 +4816,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(
           `[remote] resume-throttled watching (cap ${cap}, every ${minutes} min) — Ctrl-C to stop\n`,
         );
-        process.exitCode = await watchRefreshLoop(minutes, async () => runOnce());
+        process.exitCode = await watchRefreshLoop(minutes, async () =>
+          runOnce(),
+        );
       },
     );
 
@@ -4545,6 +4831,72 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .description(
       "h2a agent-network helpers (local file store: ~/h2a-workspace/.h2a)",
     );
+  h2aCommand
+    .command("ping <instance>")
+    .description(
+      "Drop an `h2a.ping` envelope into the local h2a inbox for <instance> (e.g. codex:remote:sess-1). Use --bridge to push it to a remote session immediately.",
+    )
+    .option("--from <instance>", "sender h2a instance", "remote:cli")
+    .option("-m, --message <text>", "ping message body", "ping")
+    .option("--root <path>", "local h2a root (default: ~/h2a-workspace/.h2a)")
+    .option(
+      "--bridge [sessionId]",
+      "after queuing the ping, run one h2a bridge pass for this remote session (defaults from <instance> when it is <tool>:remote:<sessionId>)",
+    )
+    .action(
+      async (
+        instance: string,
+        opts: {
+          from?: string;
+          message?: string;
+          root?: string;
+          bridge?: string | boolean;
+        },
+      ) => {
+        const ping = sendH2aPing({
+          to: instance,
+          ...(opts.from !== undefined ? { from: opts.from } : {}),
+          ...(opts.message !== undefined ? { message: opts.message } : {}),
+          cwd: process.cwd(),
+          ...(opts.root !== undefined ? { localRoot: opts.root } : {}),
+        });
+        process.stderr.write(
+          `[remote] h2a ping ${ping.written ? "queued" : "already queued"} for ${instance}: ${ping.path}\n`,
+        );
+        if (opts.bridge === undefined) return;
+
+        const sessionId =
+          typeof opts.bridge === "string"
+            ? opts.bridge
+            : remoteSessionIdFromInstance(instance);
+        if (!sessionId) {
+          process.stderr.write(
+            "[remote] --bridge needs a session id, or an instance shaped like <tool>:remote:<sessionId>\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const url = getConfiguredRemote();
+        await ensureConnected(url);
+        const profile = (await getRemoteSession(url, sessionId)).session
+          .profile;
+        const { bridgeSession } = await import("./h2a-bridge.js");
+        try {
+          const r = await bridgeSession(sessionId, { profile });
+          process.stderr.write(
+            `[remote] h2a bridge ${sessionId} (${profile}) pulled=${r.pulled} pushed=${r.pushed} skipped=${r.skipped}` +
+              `${r.failed > 0 ? ` failed=${r.failed}` : ""}\n`,
+          );
+          if (r.failed > 0) process.exitCode = 1;
+        } catch (error) {
+          process.stderr.write(
+            `[remote] h2a bridge ${sessionId} failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}\n`,
+          );
+          process.exitCode = 1;
+        }
+      },
+    );
+
   h2aCommand
     .command("bridge [sessionId]")
     .description(
@@ -4603,7 +4955,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           if (bridgeTunnel) {
             const liveness = checkPodLiveness(bridgeTunnel, `session-${s.id}`);
             if (!liveness.executable) {
-              process.stderr.write(`${deadPodAdvisory(s.id, liveness.phase)}\n`);
+              process.stderr.write(
+                `${deadPodAdvisory(s.id, liveness.phase)}\n`,
+              );
               continue;
             }
           }
@@ -4635,7 +4989,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   program
     .command("restore [group]")
     .description(
-      "Relance les sessions dev dans leur layout (fenêtre par groupe, onglet par session). Sans argument: tous les groupes. Avec [group]: ce lot seulement (ex: `remote restore \"full remote\"`). Groupes LOCAUX = claude/codex sous ~/src/* (tmux via `remote run`); groupes REMOTE = sessions SCW (`remote attach <id> --exec`). Layout: champ `layout` de la config.",
+      'Relance les sessions dev dans leur layout (fenêtre par groupe, onglet par session). Sans argument: tous les groupes. Avec [group]: ce lot seulement (ex: `remote restore "full remote"`). Groupes LOCAUX = claude/codex sous ~/src/* (tmux via `remote run`); groupes REMOTE = sessions SCW (`remote attach <id> --exec`). Layout: champ `layout` de la config.',
     )
     .option("--dry-run", "affiche le layout calculé sans ouvrir de terminaux")
     .action(async (group: string | undefined, opts: { dryRun?: boolean }) => {
@@ -4647,7 +5001,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       const norm = (s: string) =>
-        s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+        s
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "");
       const cfg = getLayoutConfig();
       const needRemote = cfg.groups.some(
         (g) => g.remote && (!group || norm(g.title) === norm(group)),
@@ -4712,8 +5069,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "settings.json path for --install-hooks (default: ~/.claude/settings.json)",
     )
     .option("--tool <tool>", "manual mode: claude | codex | agy")
-    .option("--cwd <dir>", "manual mode: session working directory (default: cwd)")
-    .option("--conv <id>", "manual mode: conversation id (used by restore --resume)")
+    .option(
+      "--cwd <dir>",
+      "manual mode: session working directory (default: cwd)",
+    )
+    .option(
+      "--conv <id>",
+      "manual mode: conversation id (used by restore --resume)",
+    )
     .option("--pid <pid>", "manual mode: process id used for liveness checks")
     .option("--label <label>", "manual mode: display label")
     .action(
@@ -4754,7 +5117,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
               );
             }
           } catch (error) {
-            process.stderr.write(`[remote] enroll hook ignored: ${String(error)}\n`);
+            process.stderr.write(
+              `[remote] enroll hook ignored: ${String(error)}\n`,
+            );
           }
           return;
         }
@@ -4778,11 +5143,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   const layoutCommand = program
     .command("layout")
-    .description("Layout auto-enregistré par `remote restore` (layout-last.json)");
+    .description(
+      "Layout auto-enregistré par `remote restore` (layout-last.json)",
+    );
 
   layoutCommand
     .command("show")
-    .description("Affiche le dernier layout lancé (fenêtres, onglets, commandes)")
+    .description(
+      "Affiche le dernier layout lancé (fenêtres, onglets, commandes)",
+    )
     .action(() => {
       const last = readLastLayout();
       if (!last) {
@@ -4939,10 +5308,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             // (or laptop sleep) the port-forward dies and every pass would
             // otherwise fail with "fetch failed". ensureConnected is idempotent
             // and rebuilds a stale-but-alive tunnel.
-            process.exitCode = await watchRefreshLoop(watchMinutes, async () => {
-              await ensureConnected(url);
-              return softRefreshAllSessions(url, opts, hashes);
-            });
+            process.exitCode = await watchRefreshLoop(
+              watchMinutes,
+              async () => {
+                await ensureConnected(url);
+                return softRefreshAllSessions(url, opts, hashes);
+              },
+            );
             return;
           }
           const { failed } = await softRefreshAllSessions(url, opts, hashes);
@@ -4971,13 +5343,16 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         if (opts.soft) {
           await ensureConnected(url);
           const profile =
-            opts.profile ?? (await getRemoteSession(url, sessionId)).session.profile;
+            opts.profile ??
+            (await getRemoteSession(url, sessionId)).session.profile;
           const resolved = coerceCliProfileName(profile);
           if (!resolved) throw new Error(`Unknown profile "${profile}"`);
           if (opts.authRefresh !== false) {
             const fresh = await ensureProfileAuthFresh(resolved);
             if (fresh.checked)
-              process.stderr.write(`[remote] auth status ok: ${fresh.command}\n`);
+              process.stderr.write(
+                `[remote] auth status ok: ${fresh.command}\n`,
+              );
           }
           await softRefreshSession(sessionId, resolved);
           return;
@@ -4988,7 +5363,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   program
     .command("ls [url]")
-    .description("List sessions — LOCAL (tmux) and REMOTE (control-plane) — uniformly")
+    .description(
+      "List sessions — LOCAL (tmux) and REMOTE (control-plane) — uniformly",
+    )
     .option("--local", "list only local tmux sessions (no control-plane call)")
     .action(async (url: string | undefined, opts: { local?: boolean }) => {
       const w = (s: string, n: number) => s.padEnd(n);
@@ -5009,7 +5386,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
 
       if (opts.local) {
-        if (local.length === 0) process.stderr.write("[remote] no local sessions\n");
+        if (local.length === 0)
+          process.stderr.write("[remote] no local sessions\n");
         return;
       }
 

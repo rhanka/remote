@@ -35,7 +35,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { attach, createRemoteSession, stopRemoteSession } from "./attach.js";
-import { coerceCliProfileName, resolveProfile, resumeArgsFor } from "./profiles.js";
+import {
+  coerceCliProfileName,
+  resolveProfile,
+  resumeArgsFor,
+} from "./profiles.js";
 import { collectProfileAuth } from "./auth-bundle.js";
 import { collectToolAuth } from "./auth-tools.js";
 import {
@@ -188,9 +192,7 @@ async function resolveOrCreateWorkspace(
   const ws = await createWorkspace(remoteUrl, {}, fetchImpl);
   const marker: WorkspaceMarker = { remote: remoteUrl, workspaceId: ws.id };
   writeWorkspaceMarker(cwd, marker);
-  stderr.write(
-    `[remote] created workspace ${ws.id} and linked to ${cwd}\n`,
-  );
+  stderr.write(`[remote] created workspace ${ws.id} and linked to ${cwd}\n`);
   return marker;
 }
 
@@ -346,7 +348,13 @@ async function pushWorkspace(
   fetchImpl: typeof fetch,
   stderr: NodeJS.WriteStream,
 ): Promise<Buffer> {
-  await acquireWorkspaceLock(remoteUrl, workspaceId, lockHolderId(), 300, fetchImpl);
+  await acquireWorkspaceLock(
+    remoteUrl,
+    workspaceId,
+    lockHolderId(),
+    300,
+    fetchImpl,
+  );
   try {
     stderr.write(`[remote] packing ${cwd} (respecting .gitignore)\n`);
     const archive = await buildWorkspaceArchive(cwd);
@@ -392,7 +400,13 @@ async function pullWorkspace(
   fetchImpl: typeof fetch,
   stderr: NodeJS.WriteStream,
 ): Promise<{ remoteArchive: Buffer | null; hasConflicts: boolean }> {
-  await acquireWorkspaceLock(remoteUrl, workspaceId, lockHolderId(), 300, fetchImpl);
+  await acquireWorkspaceLock(
+    remoteUrl,
+    workspaceId,
+    lockHolderId(),
+    300,
+    fetchImpl,
+  );
   try {
     const session = await createRemoteSession(
       remoteUrl,
@@ -416,7 +430,12 @@ async function pullWorkspace(
         await new Promise<void>((r) => setTimeout(r, 1000));
       }
     } finally {
-      await stopRemoteSession(remoteUrl, session.id, "pull-complete", fetchImpl);
+      await stopRemoteSession(
+        remoteUrl,
+        session.id,
+        "pull-complete",
+        fetchImpl,
+      );
     }
 
     if (!remoteArchive) {
@@ -456,7 +475,8 @@ async function pullWorkspace(
         remoteArchive,
         onConflict,
       });
-      const touched = r.restored.length + r.backedUp.length + r.conflicts.length;
+      const touched =
+        r.restored.length + r.backedUp.length + r.conflicts.length;
       if (touched === 0 && r.keptLocal.length === 0) continue;
       stderr.write(
         `[remote] sessions(${profile}): ${r.restored.length} restored, ${r.backedUp.length} backed-up, ${r.keptLocal.length} kept, ${r.conflicts.length} conflict\n`,
@@ -509,7 +529,7 @@ export async function migrateForward(
   const profile = coerceCliProfileName(profileName);
   if (!profile) {
     throw new Error(
-      `Unknown profile "${profileName}". Known: codex, claude, agy, opencode, shell`,
+      `Unknown profile "${profileName}". Known: codex, claude, agy, gemini, mistral, opencode, shell`,
     );
   }
 
@@ -568,12 +588,16 @@ export async function migrateForward(
   // the migrated CLI is authenticated in-pod, mirroring the `remote <profile>`
   // run path. Missing creds are tolerated (the session still starts; shell /
   // opencode need none) — we warn rather than hard-fail.
-  const authFiles: Record<string, string> = { ...(await collectProfileAuth(profile)) };
+  const authFiles: Record<string, string> = {
+    ...(await collectProfileAuth(profile)),
+  };
   // Also bundle the auth of selected tool CLIs (scw, gh, aws, gcloud, az) so
   // they work inside the Pod — opt-in via `tools`.
   let bundledTools: string[] = [];
   if (options.tools && options.tools.length > 0) {
-    const { bundle: toolBundle, bundled } = await collectToolAuth(options.tools);
+    const { bundle: toolBundle, bundled } = await collectToolAuth(
+      options.tools,
+    );
     Object.assign(authFiles, toolBundle);
     bundledTools = bundled;
   }
@@ -735,7 +759,9 @@ export async function migrateBack(
     ? `remote run ${finalProfile} -r ${resumeConvId}`
     : `remote run ${finalProfile}`;
 
-  stdout.write(`\n[remote] local state restored from workspace ${workspaceId}\n`);
+  stdout.write(
+    `\n[remote] local state restored from workspace ${workspaceId}\n`,
+  );
   stdout.write(`[remote] resume your session with:\n\n  ${resumeCommand}\n\n`);
 
   return {

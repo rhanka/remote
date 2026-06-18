@@ -33,18 +33,21 @@ describe("ensureProfileAuthFresh", () => {
     expect(calls).toEqual([{ command: "claude", args: ["auth", "status"] }]);
   });
 
-  it("returns no-status-command for profiles without a noninteractive auth status", async () => {
-    const result = await ensureProfileAuthFresh("agy", {
-      async runCommand() {
-        throw new Error("should not be called");
-      },
-    });
+  it.each(["agy", "gemini", "mistral"] as const)(
+    "returns no-status-command for %s without a noninteractive auth status",
+    async (profile) => {
+      const result = await ensureProfileAuthFresh(profile, {
+        async runCommand() {
+          throw new Error("should not be called");
+        },
+      });
 
-    expect(result).toEqual({
-      checked: false,
-      reason: "no-status-command",
-    });
-  });
+      expect(result).toEqual({
+        checked: false,
+        reason: "no-status-command",
+      });
+    },
+  );
 
   it("throws an actionable refresh error when the status command fails", async () => {
     const runCommand: RunCommand = async () => ({

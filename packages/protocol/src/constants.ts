@@ -10,6 +10,8 @@ export const CLI_PROFILES = [
   "opencode",
   "claude",
   "agy",
+  "gemini",
+  "mistral",
 ] as const;
 
 export const SESSION_TARGETS = [
