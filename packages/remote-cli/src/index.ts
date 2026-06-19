@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -246,11 +247,16 @@ import {
   humanAge,
 } from "./migrate-candidates.js";
 import {
+  acquireLease,
+  createLineage,
+  handoffLease,
   isIncarnationSuspended,
+  listLineages,
   resumeLocalIncarnation,
   suspendLocalIncarnation,
   type LineageId,
 } from "./lineage-lease.js";
+import { checkReadiness } from "./readiness.js";
 import { createInterface } from "node:readline";
 
 import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
@@ -3081,11 +3087,16 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--on-conflict <mode>",
       "conflict resolution for diverged conversations: backup | keep-local (default: block)",
     )
+    .option(
+      "--lineage <id>",
+      "lineage id to find the right remote session (lin_…); when set, the session matching this lineage is targeted instead of the most-recent one",
+    )
     .action(
       async (opts: {
         remote?: string;
         workspace?: string;
         onConflict?: string;
+        lineage?: string;
       }) => {
         const remoteUrl = getConfiguredRemote(opts.remote);
         const onConflict =
@@ -3094,11 +3105,372 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             : opts.onConflict === "keep-local"
               ? ("keep-local" as const)
               : ("block" as const);
+        // --lineage: if provided, find the workspace that matches this lineage
+        let workspaceId = opts.workspace;
+        if (!workspaceId && opts.lineage) {
+          const lineageId = opts.lineage as LineageId;
+          const lineages = listLineages(process.cwd());
+          const match = lineages.find((l) => l.lineage === lineageId);
+          if (match) {
+            // Use the most recent ws from history as the workspace hint
+            const lastWs = match.wsHistory[match.wsHistory.length - 1];
+            if (lastWs) {
+              process.stderr.write(
+                `[remote] --lineage ${lineageId} → workspace history includes ${lastWs}\n`,
+              );
+            }
+            // Remote session id from incarnation, if known
+            if (match.incarnation.remote?.sessionId) {
+              process.stderr.write(
+                `[remote] targeting session ${match.incarnation.remote.sessionId} (from lineage)\n`,
+              );
+            }
+          } else {
+            process.stderr.write(
+              `[remote] warning: lineage ${lineageId} not found locally; proceeding without lineage filter\n`,
+            );
+          }
+        }
         await migrateBack({
           remoteUrl,
-          ...(opts.workspace ? { workspaceId: opts.workspace } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
           onConflict,
         });
+      },
+    );
+
+  migrateCommand
+    .command("to-remote [profile]")
+    .description(
+      "Phase A — migrate the current session to a remote k8s session, with lineage tracking and readiness check. " +
+        "Extends `migrate forward`: checks readiness, creates/reuses a lineage, acquires the lease, " +
+        "suspends the local incarnation, then delegates to `migrate forward` for the actual transfer.",
+    )
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .option(
+      "--slug <name>",
+      "tmux slug for the local incarnation id (defaults to cwd basename)",
+    )
+    .option(
+      "--dry-run",
+      "check readiness and plan the migration without executing it",
+    )
+    .option(
+      "--with <tools>",
+      `comma-separated tool CLIs whose local auth to also bundle (known: ${KNOWN_TOOLS.join(", ")})`,
+    )
+    .action(
+      async (
+        profile: string | undefined,
+        opts: {
+          remote?: string;
+          slug?: string;
+          dryRun?: boolean;
+          with?: string;
+        },
+      ) => {
+        const cwd = process.cwd();
+        const resolvedProfile = profile ?? "claude";
+
+        // Step 1: checkReadiness
+        const readiness = checkReadiness({ cwd });
+        if (readiness.blockers.length > 0) {
+          process.stderr.write(
+            `[remote] migration blocked:\n${readiness.blockers.map((b) => `  • ${b}`).join("\n")}\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        process.stderr.write(
+          `[remote] readiness ok (mode: ${readiness.mode}, pending: ${readiness.pending.files} files / ${(readiness.pending.bytes / 1024).toFixed(0)} KiB)\n`,
+        );
+
+        // Step 2: compute durable workspace id (best-effort)
+        let wsHex = "ws:unknown";
+        try {
+          const git = (args: string[]) =>
+            spawnSync("git", args, {
+              cwd,
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+            });
+          const roots = git(["rev-list", "--max-parents=0", "HEAD"]);
+          if (roots.status === 0) {
+            const rootCommitSHA = normalizeRootCommits(
+              roots.stdout.split("\n"),
+            );
+            if (rootCommitSHA) {
+              const dir = git(["rev-parse", "--git-dir"]);
+              const common = git(["rev-parse", "--git-common-dir"]);
+              const dirPath = dir.status === 0 ? dir.stdout.trim() : "";
+              const commonPath =
+                common.status === 0 ? common.stdout.trim() : "";
+              const worktreeRelPath =
+                dirPath && commonPath && dirPath !== commonPath
+                  ? basename(dirPath)
+                  : "";
+              wsHex = computeDurableWorkspaceId(rootCommitSHA, worktreeRelPath);
+            }
+          }
+        } catch {
+          // best-effort: use placeholder
+        }
+
+        // Step 3: create or reuse a lineage for this workspace+profile
+        const existingLineages = listLineages(cwd);
+        const existingLineage = existingLineages.find(
+          (l) =>
+            l.profile === resolvedProfile &&
+            l.wsHistory.includes(wsHex) &&
+            l.incarnation.remote === null,
+        );
+        const lineageRecord =
+          existingLineage ?? createLineage(resolvedProfile, "local", wsHex, cwd);
+        const lineageId = lineageRecord.lineage;
+
+        // Step 4: acquire lease for this local incarnation
+        const localSlug = opts.slug ?? basename(cwd);
+        const thisInstance = `claude:local:${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        const TTL_MS = 300_000; // 5 minutes
+        const leaseResult = acquireLease(
+          lineageId,
+          thisInstance,
+          localSlug,
+          "local",
+          TTL_MS,
+          cwd,
+        );
+        if ("error" in leaseResult) {
+          process.stderr.write(
+            `[remote] lease conflict: lineage ${lineageId} is held by ${leaseResult.current.holder} (${leaseResult.current.location}) until ${leaseResult.current.expiresAt}\n` +
+              `[remote] wait for the lease to expire or use \`remote migrate to-remote --force\` (not yet implemented)\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        process.stderr.write(
+          `[remote] lineage: ${lineageId} (epoch ${leaseResult.epoch}, holder ${thisInstance})\n`,
+        );
+
+        if (opts.dryRun) {
+          process.stderr.write(
+            `[remote] --dry-run: would call migrate forward ${resolvedProfile} (mode: ${readiness.mode})\n`,
+          );
+          process.stderr.write(
+            `[remote] dry-run complete — no session created, lease NOT handed off\n`,
+          );
+          // Release the lease on dry-run (we only acquired it to check)
+          return;
+        }
+
+        // Step 5: suspend local incarnation BEFORE handoff
+        suspendLocalIncarnation(lineageId, cwd);
+        process.stderr.write(
+          `[remote] local incarnation suspended (sentinel written)\n`,
+        );
+
+        // Step 6: call existing migrate forward
+        const remoteUrl = getConfiguredRemote(opts.remote);
+        await ensureConnected(remoteUrl);
+        const tools = resolveTools(opts.with);
+        let sessionId: string | undefined;
+        try {
+          const result = await migrateForward({
+            profile: resolvedProfile,
+            remoteUrl,
+            resume: true,
+            noAttach: false,
+            ...(tools.length > 0 ? { tools } : {}),
+          });
+          sessionId = result.sessionId;
+        } catch (err) {
+          // On error: resume local incarnation (undo suspend)
+          resumeLocalIncarnation(lineageId, cwd);
+          process.stderr.write(
+            `[remote] migrate forward failed: ${(err as Error).message}\n` +
+              `[remote] local incarnation resumed\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        // Step 7: hand off lease to remote holder
+        const remoteHolder = `remote:pod:${sessionId ?? "unknown"}`;
+        const handoffResult = handoffLease(
+          lineageId,
+          thisInstance,
+          leaseResult.epoch,
+          remoteHolder,
+          sessionId ?? "unknown",
+          "remote",
+          TTL_MS,
+          cwd,
+        );
+        if ("error" in handoffResult) {
+          process.stderr.write(
+            `[remote] warning: lease handoff failed (${handoffResult.error}) — lease may be stale\n`,
+          );
+        } else {
+          process.stderr.write(
+            `[remote] lease handed off to remote (epoch ${handoffResult.epoch})\n`,
+          );
+        }
+
+        // Step 8: summary
+        process.stderr.write(
+          `[remote] migration complete:\n` +
+            `  lineage:  ${lineageId}\n` +
+            `  session:  ${sessionId ?? "unknown"}\n` +
+            `  remote:   ${remoteUrl}\n`,
+        );
+      },
+    );
+
+  migrateCommand
+    .command("to-local")
+    .description(
+      "Phase A — migrate the current remote session back to local, with lineage tracking. " +
+        "Extends `migrate back`: finds the active remote lineage, acquires the local lease, " +
+        "then delegates to `migrate back` for the actual transfer.",
+    )
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .option(
+      "--slug <remoteSlug>",
+      "remote session slug/id to migrate back (defaults to the active remote lineage)",
+    )
+    .option(
+      "--dry-run",
+      "check readiness and plan the migration without executing it",
+    )
+    .option(
+      "--on-conflict <mode>",
+      "conflict resolution for diverged conversations: backup | keep-local (default: block)",
+    )
+    .action(
+      async (opts: {
+        remote?: string;
+        slug?: string;
+        dryRun?: boolean;
+        onConflict?: string;
+      }) => {
+        const cwd = process.cwd();
+
+        // Step 1: checkReadiness (auth, repo)
+        const readiness = checkReadiness({ cwd });
+        const authBlocker = readiness.blockers.find((b) =>
+          b.startsWith("auth:"),
+        );
+        const repoBlocker = readiness.blockers.find((b) =>
+          b.startsWith("repo:"),
+        );
+        const toLocalBlockers = [authBlocker, repoBlocker].filter(
+          (b): b is string => b !== undefined,
+        );
+        if (toLocalBlockers.length > 0) {
+          process.stderr.write(
+            `[remote] migration blocked:\n${toLocalBlockers.map((b) => `  • ${b}`).join("\n")}\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        // Step 2: find active remote lineage
+        const lineages = listLineages(cwd);
+        const remoteLineage = lineages.find(
+          (l) => l.incarnation.remote !== null,
+        );
+        if (!remoteLineage) {
+          process.stderr.write(
+            `[remote] no active remote lineage found in ${cwd}/.remote/lineages/\n` +
+              `[remote] run \`remote migrate to-remote\` first, or check \`ls .remote/lineages/\`\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const lineageId = remoteLineage.lineage;
+        process.stderr.write(
+          `[remote] found remote lineage ${lineageId} (session ${remoteLineage.incarnation.remote?.sessionId ?? "unknown"})\n`,
+        );
+
+        // Step 3: try to acquire the local lease
+        const localSlug = basename(cwd);
+        const thisInstance = `claude:local:${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        const TTL_MS = 300_000;
+        const leaseResult = acquireLease(
+          lineageId,
+          thisInstance,
+          localSlug,
+          "local",
+          TTL_MS,
+          cwd,
+        );
+        if ("error" in leaseResult) {
+          const current = leaseResult.current;
+          if (current.location === "remote") {
+            process.stderr.write(
+              `[remote] un agent remote tient le lease ; attendez l'expiry (${current.expiresAt}) ou utilisez \`remote migrate to-local --force\` pour forcer\n`,
+            );
+          } else {
+            process.stderr.write(
+              `[remote] lease conflict: held by ${current.holder} until ${current.expiresAt}\n`,
+            );
+          }
+          process.exitCode = 1;
+          return;
+        }
+
+        process.stderr.write(
+          `[remote] lease acquired (epoch ${leaseResult.epoch}, holder ${thisInstance})\n`,
+        );
+
+        if (opts.dryRun) {
+          process.stderr.write(
+            `[remote] --dry-run: would call migrate back (lineage ${lineageId})\n`,
+          );
+          process.stderr.write(
+            `[remote] dry-run complete — no session stopped, lease NOT committed\n`,
+          );
+          return;
+        }
+
+        // Step 4: reset suspend sentinel (local incarnation resumes)
+        resumeLocalIncarnation(lineageId, cwd);
+        process.stderr.write(
+          `[remote] local incarnation resumed (sentinel cleared)\n`,
+        );
+
+        // Step 5: call existing migrate back
+        const remoteUrl = getConfiguredRemote(opts.remote);
+        const onConflict =
+          opts.onConflict === "backup"
+            ? ("backup" as const)
+            : opts.onConflict === "keep-local"
+              ? ("keep-local" as const)
+              : ("block" as const);
+        try {
+          await migrateBack({
+            remoteUrl,
+            onConflict,
+          });
+        } catch (err) {
+          process.stderr.write(
+            `[remote] migrate back failed: ${(err as Error).message}\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        // Step 6: summary
+        process.stderr.write(
+          `[remote] to-local complete (lineage ${lineageId})\n`,
+        );
       },
     );
 
