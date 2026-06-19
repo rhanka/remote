@@ -11,13 +11,21 @@
  *  5. git ok + auth ok + small working set → mode: "full", pending counts
  */
 
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SpawnSyncReturns } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { checkReadiness } from "./readiness.js";
+
+// Scratch dir under the package, never /tmp (project policy)
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "readiness",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -26,7 +34,7 @@ import { checkReadiness } from "./readiness.js";
 let testRoot: string;
 
 beforeEach(() => {
-  testRoot = mkdtempSync(join(tmpdir(), "readiness-test-"));
+  testRoot = mkdtempSync(join(SCRATCH_ROOT, "test-"));
 });
 
 afterEach(() => {

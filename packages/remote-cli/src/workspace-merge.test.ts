@@ -7,16 +7,24 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { mergeWorkspaceArchive } from "./workspace-merge.js";
 
+// Scratch dir under the package, never /tmp (project policy)
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "workspace-merge",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 const tmps: string[] = [];
 function tdir(): string {
-  const d = mkdtempSync(join(tmpdir(), "merge-test-"));
+  const d = mkdtempSync(join(SCRATCH_ROOT, "merge-"));
   tmps.push(d);
   return d;
 }
