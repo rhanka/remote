@@ -260,6 +260,7 @@ import {
   listLineages,
   resumeLocalIncarnation,
   suspendLocalIncarnation,
+  updateLineage,
   type LineageId,
 } from "./lineage-lease.js";
 import { checkReadiness } from "./readiness.js";
@@ -3624,7 +3625,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
 
-        // Step 7: hand off lease to remote holder
+        // Step 7: hand off lease to remote holder + persist remote incarnation
         const remoteHolder = `remote:pod:${sessionId ?? "unknown"}`;
         const handoffResult = handoffLease(
           lineageId,
@@ -3644,6 +3645,24 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.stderr.write(
             `[remote] lease handed off to remote (epoch ${handoffResult.epoch})\n`,
           );
+        }
+        // Persist remote session id in the lineage record so `migrate back
+        // --lineage <id>` can target it without listing all sessions.
+        if (sessionId) {
+          try {
+            updateLineage(
+              lineageId,
+              {
+                incarnation: {
+                  local: null,
+                  remote: { sessionId },
+                },
+              },
+              cwd,
+            );
+          } catch {
+            // best-effort: lineage may not exist yet on first migration
+          }
         }
 
         // Step 8: summary
