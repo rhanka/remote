@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -4623,21 +4624,57 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   }
 
   /**
+   * Read every wake-request envelope under `<localRoot>/inbox/**` (one dir level
+   * deep, the h2a layout) WITH their file paths, skipping already-processed ones
+   * (sibling `.processed` stamp, same contract as readLaunchEnvelopes). Used to
+   * support idempotent `.processed` marking after a successful wake.
+   */
+  const readWakeEnvelopeFiles = (
+    localRoot: string,
+  ): Array<{ path: string; env: unknown }> => {
+    const inbox = join(localRoot, "inbox");
+    if (!existsSync(inbox)) return [];
+    const out: Array<{ path: string; env: unknown }> = [];
+    for (const dir of readdirSync(inbox, { withFileTypes: true })) {
+      if (!dir.isDirectory()) continue;
+      const dirPath = join(inbox, dir.name);
+      for (const f of readdirSync(dirPath, { withFileTypes: true })) {
+        if (!f.isFile() || !f.name.endsWith(".json")) continue;
+        const path = join(dirPath, f.name);
+        if (existsSync(`${path}.processed`)) continue; // already handled
+        let raw: string;
+        try {
+          raw = readFileSync(path, "utf8");
+        } catch {
+          continue;
+        }
+        try {
+          out.push({ path, env: JSON.parse(raw) });
+        } catch {
+          // malformed JSON → skip
+        }
+      }
+    }
+    return out;
+  };
+
+  /**
    * One pass of the wake-request handler:
-   *  1. Read all h2a inbox envelopes.
+   *  1. Read all h2a inbox envelopes (with paths, skipping .processed ones).
    *  2. Filter those with topic === "wake-request".
-   *  3. For each: idempotence check → resolve pane → send-keys double nudge.
+   *  3. For each: idempotence check → resolve pane → send-keys instruction nudge
+   *     → mark envelope .processed.
    * Returns the count of panes woken this pass.
    */
   const wakeRequestPass = (localRoot: string): number => {
-    const envelopes = readInboxEnvelopes(localRoot);
+    const envelopeFiles = readWakeEnvelopeFiles(localRoot);
     let woken = 0;
     const now = Date.now();
-    for (const env of envelopes) {
+    for (const { path: envelopePath, env } of envelopeFiles) {
       const parsed = parseWakeRequestEnvelope(env);
       if (!parsed) continue;
       const { target, reason } = parsed;
-      // Idempotence: skip if we already woke this target within 60s.
+      // Idempotence: skip if we already woke this target within 60s (belt).
       const lastWake = readWakeStampMs(localRoot, target);
       if (lastWake !== undefined && now - lastWake < WAKE_REQUEST_IDEMPOTENCE_MS) {
         process.stderr.write(
@@ -4652,13 +4689,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         );
         continue;
       }
-      // Double nudge: two empty Enter presses, identical to the local-tmux wake.
-      spawnSync("tmux", ["send-keys", "-t", pane, "", "Enter"], {
+      // F1: send a real instruction line via -l (literal, no shell expansion) then
+      // Enter — Codex ignores empty send-keys submits; a real instruction forces a
+      // read of the h2a inbox so the agent picks up the wake.
+      const instructionLine = "h2a inbox read";
+      spawnSync("tmux", ["send-keys", "-t", pane, "-l", instructionLine], {
         stdio: "ignore",
       });
-      spawnSync("tmux", ["send-keys", "-t", pane, "", "Enter"], {
+      spawnSync("tmux", ["send-keys", "-t", pane, "Enter"], {
         stdio: "ignore",
       });
+      // F2: mark envelope processed so it does not re-fire on future passes.
+      markLaunchEnvelopeProcessed(envelopePath, `woke ${target}`);
       writeWakeStampMs(localRoot, target, now);
       woken += 1;
       process.stderr.write(

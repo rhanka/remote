@@ -4,10 +4,10 @@
  * Strategy: mock `node:child_process` to intercept all spawnSync calls (both
  * the tmux list-sessions / show-options reads and the send-keys nudge), write
  * wake-request envelopes into a real tmpdir inbox, and assert on the resulting
- * spawnSync calls.
+ * spawnSync calls and on-disk .processed stamps.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -200,7 +200,9 @@ describe("remote wake-request", () => {
 
     expect(exitCode).toBe(0);
 
-    // Verify send-keys was called twice (double nudge) targeting pane %42
+    // Verify send-keys was called twice targeting pane %42:
+    //  call 0: send-keys -t %42 -l "h2a inbox read"  (instruction line)
+    //  call 1: send-keys -t %42 Enter                 (submit)
     const sendKeysCalls = spawnSyncMock.mock.calls.filter(
       (c) => c[0] === "tmux" && Array.isArray(c[1]) && c[1][0] === "send-keys",
     );
@@ -208,10 +210,19 @@ describe("remote wake-request", () => {
     for (const call of sendKeysCalls) {
       expect(call[1]).toContain("%42");
     }
+    // First call must use -l flag with the instruction line (not an empty string).
+    expect(sendKeysCalls[0]![1]).toEqual(["send-keys", "-t", "%42", "-l", "h2a inbox read"]);
+    expect(sendKeysCalls[1]![1]).toEqual(["send-keys", "-t", "%42", "Enter"]);
 
     const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
     expect(out).toContain(`woke ${target}`);
     expect(out).toContain("%42");
+
+    // F2: a .processed stamp must exist next to the envelope file.
+    const inboxDir = join(root, "inbox", "remote__cli");
+    const envelopes = readdirSync(inboxDir).filter((f) => f.endsWith(".json") && !f.endsWith(".processed"));
+    expect(envelopes.length).toBe(1);
+    expect(existsSync(join(inboxDir, `${envelopes[0]}.processed`))).toBe(true);
   });
 
   it("is a no-op when no pane is known for the target (agent not launched by remote)", async () => {
@@ -240,15 +251,15 @@ describe("remote wake-request", () => {
     expect(out).toContain("no agent pane");
   });
 
-  it("skips a second wake-request for the same target received within 60s (idempotence via stamp file)", async () => {
+  it("skips a second wake-request for the same target: .processed stamp prevents re-fire", async () => {
     // Two separate invocations of `wake-request --root <same-dir>` for the same
-    // target — the second within 60s must be idempotent (stamp file is written on
-    // first pass and read on second pass).
+    // target — the second pass must be a no-op because F2 marks the envelope
+    // .processed on the first pass, so readWakeEnvelopeFiles skips it entirely.
     const target = "codex:remote:abc123";
     writeEnvelope(root, "wake-env-3", makeWakeEnvelope(target));
     arrangeSession("remote", "codex", "%7");
 
-    // First pass: wakes the pane (writes the stamp file into root).
+    // First pass: wakes the pane, writes .processed stamp.
     await main(["node", "remote", "wake-request", "--root", root]);
 
     spawnSyncMock.mockClear();
@@ -257,7 +268,8 @@ describe("remote wake-request", () => {
     // Re-arrange so tmux is still "available" for the second pass.
     arrangeSession("remote", "codex", "%7");
 
-    // Second pass: same envelope, same root — stamp file exists → skipped.
+    // Second pass: envelope is already .processed → file is skipped entirely →
+    // zero send-keys calls and "0 pane(s) woken" in stderr.
     await main(["node", "remote", "wake-request", "--root", root]);
 
     const sendKeysCalls = spawnSyncMock.mock.calls.filter(
@@ -266,6 +278,8 @@ describe("remote wake-request", () => {
     expect(sendKeysCalls.length).toBe(0);
 
     const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
-    expect(out).toContain("already woken");
+    // The .processed guard skips at the file level — no "already woken" message,
+    // just the "0 pane(s) woken" summary from the command action.
+    expect(out).toContain("0 pane(s) woken");
   });
 });
