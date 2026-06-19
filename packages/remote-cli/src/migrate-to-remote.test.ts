@@ -14,8 +14,7 @@
  * These tests are pure filesystem tests — no pods, no network, no CLI.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -34,10 +33,18 @@ import {
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "migrate-to-remote",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 let testRoot: string;
 
 beforeEach(() => {
-  testRoot = mkdtempSync(join(tmpdir(), "migrate-to-remote-test-"));
+  testRoot = mkdtempSync(join(SCRATCH_ROOT, "migrate-to-remote-test-"));
 });
 
 afterEach(() => {

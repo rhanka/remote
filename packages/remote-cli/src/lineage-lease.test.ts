@@ -15,8 +15,7 @@
  *  8. createLineage → readLineage → updateLineage → listLineages
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -42,10 +41,18 @@ import {
 // Test root — fresh temp dir for every test
 // ---------------------------------------------------------------------------
 
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "lineage-lease",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 let testRoot: string;
 
 beforeEach(() => {
-  testRoot = mkdtempSync(join(tmpdir(), "lineage-lease-test-"));
+  testRoot = mkdtempSync(join(SCRATCH_ROOT, "lineage-lease-test-"));
 });
 
 afterEach(() => {

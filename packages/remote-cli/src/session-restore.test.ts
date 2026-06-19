@@ -7,16 +7,23 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { restoreSessionsToLocal } from "./session-restore.js";
 
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "session-restore",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 const tmps: string[] = [];
 function tdir(): string {
-  const d = mkdtempSync(join(tmpdir(), "restore-test-"));
+  const d = mkdtempSync(join(SCRATCH_ROOT, "restore-test-"));
   tmps.push(d);
   return d;
 }

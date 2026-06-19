@@ -12,8 +12,7 @@
  *  6. Release idempotent
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -32,10 +31,18 @@ import {
 // Test root — fresh temp dir per test
 // ---------------------------------------------------------------------------
 
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "lineage-crash",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 let testRoot: string;
 
 beforeEach(() => {
-  testRoot = mkdtempSync(join(tmpdir(), "lineage-crash-test-"));
+  testRoot = mkdtempSync(join(SCRATCH_ROOT, "lineage-crash-test-"));
 });
 
 afterEach(() => {
