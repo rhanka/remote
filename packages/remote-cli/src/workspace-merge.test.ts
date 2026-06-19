@@ -157,4 +157,36 @@ describe("mergeWorkspaceArchive", () => {
     const files = readdirSync(cwd);
     expect(files.some((f) => f.startsWith("mixed.bin.bak-"))).toBe(true);
   });
+
+  it("remote deleted a file: keeps the local version (no clobber)", () => {
+    const base = tgz({ "kept.txt": "original\n" });
+    const cwd = cwdWith({ "kept.txt": "original\n" });
+    // remote archive has NO kept.txt (remote deleted it)
+    const remote = tgz({ "other.txt": "unrelated\n" });
+    const result = mergeWorkspaceArchive({
+      cwd,
+      remoteArchive: remote,
+      baseArchive: base,
+    });
+    // Local file must still be present
+    expect(readFileSync(join(cwd, "kept.txt"), "utf8")).toBe("original\n");
+    expect(result.keptLocal).toContain("kept.txt");
+    expect(result.conflicts).toHaveLength(0);
+  });
+
+  it("identical content on both sides: no-op, no conflict", () => {
+    const base = tgz({ "same.txt": "unchanged\n" });
+    const cwd = cwdWith({ "same.txt": "unchanged\n" });
+    const remote = tgz({ "same.txt": "unchanged\n" });
+    const result = mergeWorkspaceArchive({
+      cwd,
+      remoteArchive: remote,
+      baseArchive: base,
+    });
+    expect(readFileSync(join(cwd, "same.txt"), "utf8")).toBe("unchanged\n");
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.tookRemote).toHaveLength(0);
+    expect(result.keptLocal).toHaveLength(0);
+    expect(result.merged).toHaveLength(0);
+  });
 });
