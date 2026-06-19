@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -51,6 +52,13 @@ function readOrNull(root: string, rel: string): Buffer | null {
 function eq(a: Buffer | null, b: Buffer | null): boolean {
   if (a === null || b === null) return a === b;
   return a.equals(b);
+}
+
+// Heuristic: a file is binary if it contains a NUL byte in the first 8 KiB.
+// git merge-file corrupts binary content — route binary conflicts to .bak instead.
+function isBinary(buf: Buffer): boolean {
+  const probe = buf.slice(0, 8192);
+  return probe.includes(0);
 }
 
 function writeLocal(cwd: string, rel: string, content: Buffer): void {
@@ -120,7 +128,17 @@ export function mergeWorkspaceArchive(args: {
         keptLocal.push(rel);
         continue;
       }
-      // both diverged from base (or no base) → 3-way line merge
+      // both diverged from base (or no base) — binary files must not go through
+      // git merge-file (it produces garbage). Back up local, take remote, mark conflict.
+      if (isBinary(local) || isBinary(remote)) {
+        const epoch = Math.floor(Date.now() / 1000);
+        const abs = join(args.cwd, rel);
+        copyFileSync(abs, `${abs}.bak-${epoch}`);
+        writeLocal(args.cwd, rel, remote);
+        conflicts.push(rel);
+        continue;
+      }
+      // 3-way line merge for text files
       const mt = mkdtempSync(join(tmp, "f-"));
       const lf = join(mt, "local");
       const bf = join(mt, "base");
