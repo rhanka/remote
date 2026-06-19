@@ -2981,6 +2981,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.stderr.write(
             `[remote] sync-files: bootstrap complete, base=${headSha}\n`,
           );
+          const { writeSyncStatus, emptyMetrics: em } = await import("./sync-status.js");
+          writeSyncStatus(sessionId, {
+            state: "synced",
+            safeToClose: true,
+            updatedAt: new Date().toISOString(),
+            conv: em(),
+            hot: em(),
+            cold: em(),
+          });
         } else {
           // Incremental push.
           process.stderr.write(
@@ -3035,6 +3044,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.stderr.write(
             `[remote] sync-files: incremental complete, base=${headSha}\n`,
           );
+          const { writeSyncStatus: wss, emptyMetrics: em2 } = await import("./sync-status.js");
+          wss(sessionId, {
+            state: "synced",
+            safeToClose: true,
+            updatedAt: new Date().toISOString(),
+            conv: em2(),
+            hot: em2(),
+            cold: em2(),
+          });
         }
       },
     );
