@@ -372,18 +372,36 @@ describe("h2aReportsLiveConductor", () => {
     expect(h2aReportsLiveConductor("ws:sha256:x", () => undefined)).toBeUndefined();
   });
 
-  it("returns true when discover mentions a conductor for the workspace", () => {
+  it("returns true when discover reports an active conductor for the workspace", () => {
     expect(
       h2aReportsLiveConductor(
         "ws:sha256:x",
-        () => "ws:sha256:x  role=conductor  alive",
+        () => "ws:sha256:x  role=conductor  connectionConfidence=active",
       ),
     ).toBe(true);
   });
 
   it("returns false when discover ran but mentions no conductor for it", () => {
     expect(
-      h2aReportsLiveConductor("ws:sha256:x", () => "ws:sha256:y conductor\nidle peer"),
+      h2aReportsLiveConductor("ws:sha256:x", () => "ws:sha256:y conductor active\nidle peer"),
+    ).toBe(false);
+  });
+
+  it("returns false when conductor exists but connectionConfidence is idle-uncertain (h2a 0.70.0+)", () => {
+    expect(
+      h2aReportsLiveConductor(
+        "ws:sha256:x",
+        () => "ws:sha256:x  role=conductor  connectionConfidence=idle-uncertain",
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when conductor exists but connectionConfidence is unknown", () => {
+    expect(
+      h2aReportsLiveConductor(
+        "ws:sha256:x",
+        () => "ws:sha256:x  role=conductor  connectionConfidence=unknown",
+      ),
     ).toBe(false);
   });
 });

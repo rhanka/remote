@@ -363,9 +363,15 @@ export function h2aReportsLiveConductor(
 ): boolean | undefined {
   const out = run(["discover"]);
   if (out === undefined) return undefined;
-  // A line mentioning both the workspace id and "conductor" is the signal.
+  // A line mentioning the workspace id, "conductor", AND connectionConfidence=active
+  // is the live signal. idle-uncertain/unknown are not considered live (h2a 0.70.0+).
   for (const line of out.split("\n")) {
-    if (line.includes(workspaceId) && /conductor/i.test(line)) return true;
+    if (
+      line.includes(workspaceId) &&
+      /conductor/i.test(line) &&
+      /\bactive\b/i.test(line)
+    )
+      return true;
   }
   // h2a ran but said nothing about a conductor for this workspace.
   return false;
