@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { SessionDescriptor } from "@sentropic/remote-protocol";
@@ -92,7 +92,9 @@ export class DockerSessionProvisioner implements SessionProvisioner {
   ): { dir: string; paths: string[] } | undefined {
     const paths = Object.keys(credentials);
     if (paths.length === 0) return undefined;
-    const dir = mkdtempSync(join(tmpdir(), `remote-auth-${sessionId}-`));
+    const stagingBase = join(homedir(), ".remote", "docker-auth");
+    mkdirSync(stagingBase, { recursive: true });
+    const dir = mkdtempSync(join(stagingBase, `${sessionId}-`));
     for (const [rel, b64] of Object.entries(credentials)) {
       const abs = join(dir, rel);
       mkdirSync(dirname(abs), { recursive: true });

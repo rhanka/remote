@@ -18,7 +18,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { getTunnel, type TunnelConfig } from "./config.js";
@@ -175,7 +175,8 @@ export function writeConvSyncState(
 ): void {
   const p = convSyncStatePath(convId, home);
   mkdirSync(dirname(p), { recursive: true });
-  const tmp = join(tmpdir(), `conv-sync-${convId}-${Date.now()}.json`);
+  // Atomic write: temp file in the same dir as target so rename is same-fs.
+  const tmp = `${p}.tmp`;
   writeFileSync(tmp, JSON.stringify(state));
   renameSync(tmp, p);
 }
