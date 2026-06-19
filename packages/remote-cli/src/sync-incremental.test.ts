@@ -12,16 +12,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // ---------------------------------------------------------------------------
 // vi.hoisted — evaluated BEFORE any vi.mock factory runs.
 // ---------------------------------------------------------------------------
-const { mockSpawnSync, mockGetTunnel, mockLocalConvStat, mockRemoteConvStat, mockHomedir, TEST_HOME, REAL_TMPDIR } =
+const { mockSpawnSync, mockGetTunnel, mockLocalConvStat, mockRemoteConvStat, mockHomedir, TEST_HOME, SCRATCH_ROOT_TMPDIR } =
   vi.hoisted(() => {
-    // We need tmpdir() from the REAL os module before any mock takes effect.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const realTmpdir: string = require("os").tmpdir() as string;
+    const mkdirSyncReal = require("fs").mkdirSync as (p: string, o: object) => void;
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mkdtempSyncReal = require("fs").mkdtempSync as (prefix: string) => string;
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pathJoin = require("path").join as (...args: string[]) => string;
-    const TEST_HOME = mkdtempSyncReal(pathJoin(realTmpdir, "sync-b1-test-"));
+    // Scratch under the package dir, never /tmp (project policy).
+    // process.cwd() = packages/remote-cli/ when vitest runs.
+    const SCRATCH_ROOT_TMPDIR = pathJoin(process.cwd(), ".test-scratch", "sync-b1");
+    mkdirSyncReal(SCRATCH_ROOT_TMPDIR, { recursive: true });
+    const TEST_HOME = mkdtempSyncReal(pathJoin(SCRATCH_ROOT_TMPDIR, "home-"));
     return {
       mockSpawnSync: vi.fn(),
       mockGetTunnel: vi.fn(),
@@ -29,7 +32,7 @@ const { mockSpawnSync, mockGetTunnel, mockLocalConvStat, mockRemoteConvStat, moc
       mockRemoteConvStat: vi.fn(),
       mockHomedir: vi.fn(() => TEST_HOME),
       TEST_HOME,
-      REAL_TMPDIR: realTmpdir,
+      SCRATCH_ROOT_TMPDIR,
     };
   });
 
@@ -43,7 +46,7 @@ vi.mock("node:child_process", () => ({
 
 vi.mock("node:os", () => ({
   homedir: mockHomedir,
-  tmpdir: () => REAL_TMPDIR,
+  tmpdir: () => SCRATCH_ROOT_TMPDIR,
 }));
 
 vi.mock("./config.js", () => ({
