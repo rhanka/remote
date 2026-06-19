@@ -38,6 +38,7 @@ import type { WSEvents } from "hono/ws";
 import { createWorkspacesRouter } from "./routes/workspaces.js";
 import { SessionEventBus } from "./sessions/events.js";
 import { SessionStore } from "./sessions/store.js";
+import { WorkspaceStore } from "./workspace-store.js";
 import {
   type TenantProvisioner,
   tenantProvisionerFromEnv,
@@ -47,6 +48,7 @@ import { createAjv, type ValidationVars } from "./validation.js";
 export type ControlPlaneOptions = {
   provisioner?: SessionProvisioner;
   store?: SessionStore;
+  workspaceStore?: WorkspaceStore;
   bus?: SessionEventBus;
   registry?: AgentRegistry;
   authenticator?: Authenticator;
@@ -73,6 +75,8 @@ export function createControlPlane(
   const app = new Hono<{ Variables: ValidationVars }>() as ControlPlaneApp;
   const ajv = createAjv();
   const store = options.store ?? new SessionStore(process.env.DATA_DIR);
+  const workspaceStore =
+    options.workspaceStore ?? new WorkspaceStore(process.env.DATA_DIR);
   const bus = options.bus ?? new SessionEventBus();
   const provisioner = options.provisioner ?? new InMemoryProvisioner();
   const registry = options.registry ?? new AgentRegistry();
@@ -191,6 +195,7 @@ export function createControlPlane(
       ajv,
       provisioner,
       tenantProvisioner,
+      workspaceStore,
       sessionStore: store,
     }),
   );
