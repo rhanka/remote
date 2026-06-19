@@ -1,5 +1,5 @@
 /**
- * Tests for the wake-request handler (h2a 0.72.0 out-of-band Codex pane wake).
+ * Tests for the wake-request handler (h2a 0.73.0 out-of-band Codex pane wake).
  *
  * Strategy: mock `node:child_process` to intercept all spawnSync calls (both
  * the tmux list-sessions / show-options reads and the send-keys nudge), write
@@ -111,7 +111,11 @@ const { main } = await import("./index.js");
 // ---------------------------------------------------------------------------
 
 /** Build a wake-request envelope JSON for a target instance. */
-function makeWakeEnvelope(target: string, reason = "stalled"): string {
+function makeWakeEnvelope(
+  target: string,
+  reason = "stalled",
+  instructionLine?: string,
+): string {
   return JSON.stringify({
     protocol: "sentropic.h2a",
     version: "0.1",
@@ -122,7 +126,12 @@ function makeWakeEnvelope(target: string, reason = "stalled"): string {
     body: {
       kind: "message",
       topic: "wake-request",
-      request: { kind: "wake-request", target, reason },
+      request: {
+        kind: "wake-request",
+        target,
+        reason,
+        ...(instructionLine !== undefined ? { instructionLine } : {}),
+      },
     },
     createdAt: new Date().toISOString(),
   });
@@ -201,8 +210,8 @@ describe("remote wake-request", () => {
     expect(exitCode).toBe(0);
 
     // Verify send-keys was called twice targeting pane %42:
-    //  call 0: send-keys -t %42 -l "h2a inbox read"  (instruction line)
-    //  call 1: send-keys -t %42 Enter                 (submit)
+    //  call 0: send-keys -t %42 -l "<instruction line>"  (instruction line)
+    //  call 1: send-keys -t %42 Enter                    (submit)
     const sendKeysCalls = spawnSyncMock.mock.calls.filter(
       (c) => c[0] === "tmux" && Array.isArray(c[1]) && c[1][0] === "send-keys",
     );
@@ -210,8 +219,13 @@ describe("remote wake-request", () => {
     for (const call of sendKeysCalls) {
       expect(call[1]).toContain("%42");
     }
-    // First call must use -l flag with the instruction line (not an empty string).
-    expect(sendKeysCalls[0]![1]).toEqual(["send-keys", "-t", "%42", "-l", "h2a inbox read"]);
+    // Fallback path: no instructionLine in envelope → full command with --instance and --root.
+    const literalLine = sendKeysCalls[0]![1][4] as string;
+    expect(literalLine).toContain("--instance");
+    expect(literalLine).toContain(target);
+    expect(literalLine).toContain("--root");
+    expect(literalLine).toContain(root);
+    expect(sendKeysCalls[0]![1]).toEqual(["send-keys", "-t", "%42", "-l", literalLine]);
     expect(sendKeysCalls[1]![1]).toEqual(["send-keys", "-t", "%42", "Enter"]);
 
     const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
@@ -223,6 +237,25 @@ describe("remote wake-request", () => {
     const envelopes = readdirSync(inboxDir).filter((f) => f.endsWith(".json") && !f.endsWith(".processed"));
     expect(envelopes.length).toBe(1);
     expect(existsSync(join(inboxDir, `${envelopes[0]}.processed`))).toBe(true);
+  });
+
+  it("uses body.request.instructionLine verbatim when provided (h2a 0.73.0)", async () => {
+    const target = "codex:remote:a6694dc87c1d";
+    const customLine = "h2a inbox read --instance codex:x:y --root /custom";
+    writeEnvelope(root, "wake-env-custom", makeWakeEnvelope(target, "stalled", customLine));
+    arrangeSession("remote", "codex", "%99");
+
+    const exitCode = await main(["node", "remote", "wake-request", "--root", root]);
+
+    expect(exitCode).toBe(0);
+
+    const sendKeysCalls = spawnSyncMock.mock.calls.filter(
+      (c) => c[0] === "tmux" && Array.isArray(c[1]) && c[1][0] === "send-keys",
+    );
+    expect(sendKeysCalls.length).toBe(2);
+    // instructionLine from envelope must be used as-is (verbatim).
+    expect(sendKeysCalls[0]![1]).toEqual(["send-keys", "-t", "%99", "-l", customLine]);
+    expect(sendKeysCalls[1]![1]).toEqual(["send-keys", "-t", "%99", "Enter"]);
   });
 
   it("is a no-op when no pane is known for the target (agent not launched by remote)", async () => {

@@ -4692,7 +4692,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       // F1: send a real instruction line via -l (literal, no shell expansion) then
       // Enter — Codex ignores empty send-keys submits; a real instruction forces a
       // read of the h2a inbox so the agent picks up the wake.
-      const instructionLine = "h2a inbox read";
+      // h2a 0.73.0 provides body.request.instructionLine — use it verbatim when
+      // present. Fallback: compose the full command with --instance and --root so
+      // `h2a inbox read` gets the required arguments (rc=1 without them).
+      const instructionLine: string =
+        (env as { body?: { request?: { instructionLine?: string } } }).body
+          ?.request?.instructionLine ??
+        `h2a inbox read --instance ${target} --root ${localRoot}`;
       spawnSync("tmux", ["send-keys", "-t", pane, "-l", instructionLine], {
         stdio: "ignore",
       });
