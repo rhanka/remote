@@ -320,9 +320,18 @@ describe("buildCodexImagePasteBinding", () => {
     expect(line).toContain("image/png");
     expect(line).toContain("image/jpeg");
     expect(line).toContain(".remote/images");
-    expect(line).toContain("send-keys -l");
+    expect(line).toContain("send-keys");
+    expect(line).toContain("-l");
     expect(line).toContain("codex");
     expect(line).toContain("send-keys C-v");
+  });
+
+  it("targets the triggering pane explicitly in the run-shell script (pane_id)", () => {
+    const line = buildCodexImagePasteBinding().join(" ");
+    // #{pane_id} must appear in the script so tmux expands it at binding-fire time,
+    // preventing the background shell from targeting the wrong pane.
+    expect(line).toContain("#{pane_id}");
+    expect(line).toContain("-t");
   });
 });
 

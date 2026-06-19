@@ -327,17 +327,24 @@ export function buildCodexImagePasteBinding(): ReadonlyArray<string> {
   const condition = [
     "command -v wl-paste >/dev/null 2>&1",
     'wl-paste --list-types 2>/dev/null | grep -Eq "^(image/png|image/jpeg)$"',
+    // Check @profile (set by remote run) OR window_name OR pane_current_command.
+    // pane_current_command is often "node" for Codex (not "codex"), so @profile
+    // is the reliable discriminant when the session was started via `remote run`.
     'tmux display-message -p "#{@profile}:#{window_name}:#{pane_current_command}" | grep -Eqi "(^|:)codex(:|$)"',
   ].join(" && ");
+  // #{pane_id} is expanded by tmux at binding-fire time before the shell runs,
+  // so the send-keys always targets the pane that triggered C-v even when the
+  // run-shell -b shell is scheduled after a focus change.
   const script = [
-    'pane_cwd=$(tmux display-message -p "#{pane_current_path}")',
+    'PANE_TARGET="#{pane_id}"',
+    'pane_cwd=$(tmux display-message -p -t "$PANE_TARGET" "#{pane_current_path}")',
     'dir="$pane_cwd/.remote/images"',
     'mkdir -p "$dir"',
     "mime=$(wl-paste --list-types | awk '/^image\\/png$/{print; exit} /^image\\/jpeg$/{print; exit}')",
     'case "$mime" in image/png) ext=png ;; image/jpeg) ext=jpg ;; *) exit 1 ;; esac',
     'file="$dir/paste-$(date +%Y%m%d-%H%M%S)-$$.$ext"',
     'wl-paste -t "$mime" > "$file"',
-    'tmux send-keys -l "$file"',
+    'tmux send-keys -t "$PANE_TARGET" -l "$file"',
   ].join("; ");
   return [
     "bind",
