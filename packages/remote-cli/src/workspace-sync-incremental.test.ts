@@ -2,10 +2,7 @@
  * Phase B2 + B3 — workspace-sync-incremental tests.
  * Exercises: isGitRepo, getHeadSha, sha256Buf, buildIncrementalManifest,
  * buildUntrackedTarball, classifyWorkingSet.
- * All tmp directories are created under the system tmpdir (resolved via the
- * real `os.tmpdir()` before any mock — no /tmp hardcoding per project policy
- * which forbids /tmp; we use mkdtempSync with the real tmpdir here since this
- * is *test* infrastructure, not workspace data).
+ * Scratch dirs: packages/remote-cli/.test-scratch/workspace-sync-incremental/
  */
 
 import {
@@ -19,7 +16,6 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -36,11 +32,20 @@ import {
 // Shared temp git repo, created once for the suite.
 // ---------------------------------------------------------------------------
 
+// Scratch dir under the package, never /tmp
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "workspace-sync-incremental",
+);
+
 let tmpRepo: string;
 let initialSha: string;
 
 beforeAll(() => {
-  tmpRepo = mkdtempSync(join(tmpdir(), "wsync-incr-test-"));
+  mkdirSync(SCRATCH_ROOT, { recursive: true });
+  tmpRepo = mkdtempSync(join(SCRATCH_ROOT, "main-repo-"));
   // Minimal git repo with one commit so HEAD resolves.
   execSync("git init -b main", { cwd: tmpRepo, stdio: "pipe" });
   execSync('git config user.email "test@test.com"', {
@@ -81,12 +86,16 @@ describe("isGitRepo", () => {
   });
 
   it("returns false for a non-git directory", () => {
-    // tmpdir() itself is not a git repo (no .git at its root).
-    // Create an isolated plain dir to be safe.
-    const plainDir = mkdtempSync(join(tmpdir(), "not-git-"));
+    const plainDir = mkdtempSync(join(SCRATCH_ROOT, "not-git-"));
+    // GIT_CEILING_DIRECTORIES prevents git from walking up to the monorepo
+    // root, so a dir without its own .git/ is correctly detected as non-repo.
+    const prev = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.GIT_CEILING_DIRECTORIES = SCRATCH_ROOT;
     try {
       expect(isGitRepo(plainDir)).toBe(false);
     } finally {
+      if (prev === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+      else process.env.GIT_CEILING_DIRECTORIES = prev;
       rmSync(plainDir, { recursive: true, force: true });
     }
   });
@@ -109,10 +118,14 @@ describe("getHeadSha", () => {
   });
 
   it("returns undefined for a non-git directory", () => {
-    const plainDir = mkdtempSync(join(tmpdir(), "not-git-sha-"));
+    const plainDir = mkdtempSync(join(SCRATCH_ROOT, "not-git-sha-"));
+    const prev = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.GIT_CEILING_DIRECTORIES = SCRATCH_ROOT;
     try {
       expect(getHeadSha(plainDir)).toBeUndefined();
     } finally {
+      if (prev === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+      else process.env.GIT_CEILING_DIRECTORIES = prev;
       rmSync(plainDir, { recursive: true, force: true });
     }
   });
@@ -170,7 +183,7 @@ describe("buildIncrementalManifest", () => {
 
   it("tracked is non-empty when a committed change exists since baseSha", () => {
     // Create a second commit in the temp repo.
-    const repoB = mkdtempSync(join(tmpdir(), "wsync-incr-b-"));
+    const repoB = mkdtempSync(join(SCRATCH_ROOT, "repo-b-"));
     try {
       execSync("git init -b main", { cwd: repoB, stdio: "pipe" });
       execSync('git config user.email "t@t.com"', { cwd: repoB, stdio: "pipe" });
@@ -199,7 +212,7 @@ describe("buildIncrementalManifest", () => {
   });
 
   it("untrackedManifest contains untracked files", () => {
-    const repoC = mkdtempSync(join(tmpdir(), "wsync-incr-c-"));
+    const repoC = mkdtempSync(join(SCRATCH_ROOT, "repo-c-"));
     try {
       execSync("git init -b main", { cwd: repoC, stdio: "pipe" });
       execSync('git config user.email "t@t.com"', { cwd: repoC, stdio: "pipe" });
@@ -264,8 +277,8 @@ describe("buildUntrackedTarball", () => {
 
   it("produces a tarball that can be extracted", () => {
     // Use a fresh dir with a known file.
-    const repoD = mkdtempSync(join(tmpdir(), "wsync-incr-d-"));
-    const extractDir = mkdtempSync(join(tmpdir(), "wsync-extract-"));
+    const repoD = mkdtempSync(join(SCRATCH_ROOT, "repo-d-"));
+    const extractDir = mkdtempSync(join(SCRATCH_ROOT, "extract-"));
     try {
       writeFileSync(join(repoD, "payload.txt"), "payload content\n");
       const buf = buildUntrackedTarball(repoD, ["payload.txt"]);
@@ -298,7 +311,7 @@ describe("buildUntrackedTarball", () => {
 
 /** Helper: create a minimal git repo with one initial commit. */
 function makeGitRepo(prefix: string): { dir: string; headSha: string } {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = mkdtempSync(join(SCRATCH_ROOT, prefix));
   execSync("git init -b main", { cwd: dir, stdio: "pipe" });
   execSync('git config user.email "t@t.com"', { cwd: dir, stdio: "pipe" });
   execSync('git config user.name "T"', { cwd: dir, stdio: "pipe" });
