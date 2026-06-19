@@ -2644,6 +2644,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--remote <url>",
       "control-plane URL (defaults to configured remote)",
     )
+    .option(
+      "--watch",
+      "repeat the sync on a loop (Ctrl-C to stop)",
+    )
+    .option(
+      "--interval <seconds>",
+      "seconds between sync passes in --watch mode (default: 30)",
+      (v: string) => Number(v),
+    )
     .action(
       async (
         sessionId: string,
@@ -2652,6 +2661,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           files?: boolean;
           force?: boolean;
           remote?: string;
+          watch?: boolean;
+          interval?: number;
         },
       ) => {
         if (opts.files) {
@@ -2681,30 +2692,79 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.exitCode = 1;
           return;
         }
-        const result = syncConversation({
-          sessionId,
-          workspacePath: session.workspacePath,
-          direction,
-          force: opts.force ?? false,
-        });
-        if (!result.ok) {
-          process.stderr.write(`[remote] refused: ${result.reason}\n`);
-          process.exitCode = 1;
+        const workspacePath = session.workspacePath;
+
+        const runOnce = () => {
+          const result = syncConversation({
+            sessionId,
+            workspacePath,
+            direction,
+            force: opts.force ?? false,
+          });
+          if (!result.ok) {
+            process.stderr.write(`[remote] refused: ${result.reason}\n`);
+            return false;
+          }
+          if (result.backup) {
+            process.stderr.write(`[remote] backup: ${result.backup}\n`);
+          }
+          const lines =
+            direction === "pull" ? result.lines.remote : result.lines.local;
+          const mode = result.incremental ? " [incremental]" : "";
+          process.stderr.write(
+            `[remote] ${direction === "pull" ? "pulled" : "pushed"} ${result.convId} (${lines} lines) → ${result.written}${mode}\n`,
+          );
+          if (direction === "push") {
+            process.stderr.write(
+              `[remote] not relaunching the Pod CLI — relance la session pour charger : remote refresh ${sessionId} --soft\n`,
+            );
+          }
+          return true;
+        };
+
+        if (opts.watch) {
+          const intervalSec = opts.interval ?? 30;
+          process.stderr.write(
+            `[remote] sync --watch: syncing every ${intervalSec}s (Ctrl-C to stop)\n`,
+          );
+          let stopped = false;
+          let wake: (() => void) | undefined;
+          const onSigint = () => {
+            stopped = true;
+            wake?.();
+          };
+          process.on("SIGINT", onSigint);
+          try {
+            while (!stopped) {
+              process.stderr.write(
+                `[remote] sync pass — ${new Date().toISOString()}\n`,
+              );
+              try {
+                runOnce();
+              } catch (err) {
+                process.stderr.write(
+                  `[remote] sync pass error: ${(err as Error).message}\n`,
+                );
+              }
+              if (stopped) break;
+              await new Promise<void>((resolve) => {
+                const timer = setTimeout(resolve, intervalSec * 1000);
+                wake = () => {
+                  clearTimeout(timer);
+                  resolve();
+                };
+              });
+              wake = undefined;
+            }
+          } finally {
+            process.removeListener("SIGINT", onSigint);
+          }
+          process.stderr.write("[remote] sync --watch stopped\n");
           return;
         }
-        if (result.backup) {
-          process.stderr.write(`[remote] backup: ${result.backup}\n`);
-        }
-        const lines =
-          direction === "pull" ? result.lines.remote : result.lines.local;
-        process.stderr.write(
-          `[remote] ${direction === "pull" ? "pulled" : "pushed"} ${result.convId} (${lines} lines) → ${result.written}\n`,
-        );
-        if (direction === "push") {
-          process.stderr.write(
-            `[remote] not relaunching the Pod CLI — relance la session pour charger : remote refresh ${sessionId} --soft\n`,
-          );
-        }
+
+        const ok = runOnce();
+        if (!ok) process.exitCode = 1;
       },
     );
 
