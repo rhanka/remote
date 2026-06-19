@@ -58,7 +58,7 @@ function makeSpawn(responses: {
           stderr: "",
           status: r.status,
           signal: null,
-          error: undefined,
+          // error omitted (exactOptionalPropertyTypes)
         };
       }
       // git rev-parse HEAD
@@ -75,7 +75,7 @@ function makeSpawn(responses: {
           stderr: "",
           status: r.status,
           signal: null,
-          error: undefined,
+          // error omitted (exactOptionalPropertyTypes)
         };
       }
       // git diff --name-only HEAD --
@@ -92,7 +92,7 @@ function makeSpawn(responses: {
           stderr: "",
           status: r.status,
           signal: null,
-          error: undefined,
+          // error omitted (exactOptionalPropertyTypes)
         };
       }
       // git ls-files --others --exclude-standard
@@ -109,7 +109,7 @@ function makeSpawn(responses: {
           stderr: "",
           status: r.status,
           signal: null,
-          error: undefined,
+          // error omitted (exactOptionalPropertyTypes)
         };
       }
       return {
@@ -119,7 +119,7 @@ function makeSpawn(responses: {
         stderr: "",
         status: 0,
         signal: null,
-        error: undefined,
+        // error omitted (exactOptionalPropertyTypes)
       };
     },
   ) as unknown as typeof import("node:child_process").spawnSync;
