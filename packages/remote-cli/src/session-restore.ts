@@ -9,7 +9,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -87,7 +86,10 @@ export function restoreSessionsToLocal(args: {
   remoteArchive: Buffer;
   onConflict: OnConflict;
 }): RestoreResult {
-  const tmp = mkdtempSync(join(tmpdir(), "remote-restore-"));
+  // Use HOME/.remote/tmp/ as staging area — project policy forbids /tmp.
+  const stagingBase = join(args.home, ".remote", "tmp");
+  mkdirSync(stagingBase, { recursive: true });
+  const tmp = mkdtempSync(join(stagingBase, "restore-"));
   const result: RestoreResult = {
     restored: [],
     keptLocal: [],
