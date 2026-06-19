@@ -3,13 +3,15 @@
  *
  * Strategy: mock `node:child_process` to intercept all spawnSync calls (both
  * the tmux list-sessions / show-options reads and the send-keys nudge), write
- * wake-request envelopes into a real tmpdir inbox, and assert on the resulting
+ * wake-request envelopes into a real .test-scratch inbox, and assert on the resulting
  * spawnSync calls and on-disk .processed stamps.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const SCRATCH_ROOT = join(import.meta.dirname ?? process.cwd(), "..", ".test-scratch", "wake-request");
+mkdirSync(SCRATCH_ROOT, { recursive: true });
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -93,7 +95,7 @@ vi.mock("./config.js", () => ({
   setPlugins: () => {},
   DEFAULT_SESSION_TARGET: "scaleway-kapsule",
   authHeaders: () => ({}),
-  resolveConfigPath: () => join(tmpdir(), "remote-wake-test-config.json"),
+  resolveConfigPath: () => join(SCRATCH_ROOT, "remote-wake-test-config.json"),
   getH2aConfig: () => undefined,
   getJobMaxAgeHours: () => 48,
   getMaxConcurrent: () => 4,
@@ -190,7 +192,7 @@ describe("remote wake-request", () => {
   let root: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "remote-wake-test-"));
+    root = mkdtempSync(join(SCRATCH_ROOT, "inbox-"));
     spawnSyncMock.mockReset();
     stderrWrite.mockClear();
     process.exitCode = undefined;

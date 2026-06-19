@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+
+const SCRATCH_ROOT = join(import.meta.dirname ?? process.cwd(), "..", ".test-scratch", "index-test");
+mkdirSync(SCRATCH_ROOT, { recursive: true });
 
 const createRemoteSession = vi.fn();
 const attach = vi.fn();
@@ -969,7 +971,7 @@ describe("main", () => {
     });
 
     it("h2a ping queues an h2a.ping envelope in the requested local root", async () => {
-      const root = mkdtempSync(join(tmpdir(), "remote-h2a-ping-"));
+      const root = mkdtempSync(join(SCRATCH_ROOT, "h2a-ping-"));
       try {
         const exitCode = await main([
           "node",

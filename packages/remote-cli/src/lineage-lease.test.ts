@@ -1,7 +1,7 @@
 /**
  * lineage-lease.test.ts — Phase A0a
  *
- * All tests use a real tmpdir (via vitest's tmp helpers / os.tmpdir()) for the
+ * All tests use a real scratch directory (.test-scratch/lineage-lease/) for the
  * filesystem ops, so they are hermetic and require no mocking.
  *
  * Scenarios covered:
