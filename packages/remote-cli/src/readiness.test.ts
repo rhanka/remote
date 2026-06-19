@@ -16,6 +16,7 @@ import { join } from "node:path";
 import type { SpawnSyncReturns } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { encodeCwd } from "./convsync.js";
 import { checkReadiness } from "./readiness.js";
 
 // Scratch dir under the package, never /tmp (project policy)
@@ -272,5 +273,93 @@ describe("checkReadiness", () => {
     expect(result.ready).toBe(false);
     // Both auth and git will fail (throw caught)
     expect(result.blockers.length).toBeGreaterThan(0);
+  });
+
+  it("always returns warnings array (empty when no profile given)", () => {
+    const spawn = makeSpawn({
+      auth: { status: 0 },
+      gitRevParse: { status: 0 },
+    });
+    const result = checkReadiness({ cwd: testRoot, spawnImpl: spawn });
+    expect(result.warnings).toBeDefined();
+    expect(Array.isArray(result.warnings)).toBe(true);
+    expect(result.warnings).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// conv_resolvable warning (claude profile only)
+// ---------------------------------------------------------------------------
+
+function makePassingSpawn(): typeof import("node:child_process").spawnSync {
+  return makeSpawn({
+    auth: { status: 0 },
+    gitRevParse: { status: 0 },
+    gitDiff: { status: 0, stdout: "" },
+    gitLsFiles: { status: 0, stdout: "" },
+  });
+}
+
+describe("conv_resolvable warning", () => {
+  it("no warning when a conversation jsonl exists for the cwd", () => {
+    // Create fake home with a conversation under .claude/projects/<encoded>/
+    const fakeHome = join(testRoot, "home");
+    const encoded = encodeCwd(testRoot);
+    const convDir = join(fakeHome, ".claude", "projects", encoded);
+    mkdirSync(convDir, { recursive: true });
+    writeFileSync(join(convDir, "abc123.jsonl"), '{"role":"user","content":"hi"}\n');
+
+    const result = checkReadiness({
+      cwd: testRoot,
+      profile: "claude",
+      home: fakeHome,
+      spawnImpl: makePassingSpawn(),
+    });
+
+    expect(result.warnings).toHaveLength(0);
+    expect(result.ready).toBe(true);
+  });
+
+  it("emits conv warning when no conversation directory exists", () => {
+    const fakeHome = join(testRoot, "empty-home");
+    mkdirSync(fakeHome, { recursive: true });
+
+    const result = checkReadiness({
+      cwd: testRoot,
+      profile: "claude",
+      home: fakeHome,
+      spawnImpl: makePassingSpawn(),
+    });
+
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("conv:");
+    expect(result.ready).toBe(true); // conv is non-blocking
+  });
+
+  it("no conv warning when profile is 'codex'", () => {
+    const fakeHome = join(testRoot, "empty-home2");
+    mkdirSync(fakeHome, { recursive: true });
+
+    const result = checkReadiness({
+      cwd: testRoot,
+      profile: "codex",
+      home: fakeHome,
+      spawnImpl: makePassingSpawn(),
+    });
+
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("no conv warning when profile is undefined (migrate-back: no local conv expected)", () => {
+    const fakeHome = join(testRoot, "empty-home3");
+    mkdirSync(fakeHome, { recursive: true });
+
+    const result = checkReadiness({
+      cwd: testRoot,
+      home: fakeHome,
+      spawnImpl: makePassingSpawn(),
+    });
+
+    expect(result.warnings).toHaveLength(0);
   });
 });

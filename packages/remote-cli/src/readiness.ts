@@ -8,8 +8,11 @@
  */
 
 import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+
+import { localConvStat } from "./convsync.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,12 +22,17 @@ export type ReadinessResult = {
   ready: boolean;
   mode: "full" | "lazy";
   blockers: string[];
+  warnings: string[];
   pending: { files: number; bytes: number; est_seconds: number };
 };
 
 export type CheckReadinessOptions = {
   /** Override process.cwd() for tests. */
   cwd?: string;
+  /** Profile being migrated — used for conv_resolvable check (default: "claude"). */
+  profile?: string;
+  /** Override $HOME for tests. */
+  home?: string;
   /** Override spawnSync for tests. */
   spawnImpl?: typeof spawnSync;
 };
@@ -56,9 +64,12 @@ export function checkReadiness(
   opts: CheckReadinessOptions = {},
 ): ReadinessResult {
   const cwd = opts.cwd ?? process.cwd();
+  const profile = opts.profile;
+  const home = opts.home ?? homedir();
   const spawn = opts.spawnImpl ?? spawnSync;
 
   const blockers: string[] = [];
+  const warnings: string[] = [];
   let mode: "full" | "lazy" = "full";
 
   // ------------------------------------------------------------------
@@ -102,8 +113,22 @@ export function checkReadiness(
 
   // ------------------------------------------------------------------
   // conv_resolvable — non-blocking warning
-  // Conversation path check; not all profiles support path-keyed convs.
+  // Claude-profile only: verify a conversation exists for this cwd.
+  // Other profiles (codex/agy) don't use path-keyed conversations.
   // ------------------------------------------------------------------
+  if (profile !== undefined && (profile === "claude" || profile === "claude-code")) {
+    try {
+      const conv = localConvStat(cwd, home);
+      if (!conv) {
+        warnings.push(
+          "conv: no local conversation found for this directory — " +
+            "migrate will proceed but no active context will be transferred",
+        );
+      }
+    } catch {
+      // best-effort: skip on any error
+    }
+  }
 
   // ------------------------------------------------------------------
   // deps_rebuilt — no-op in local mode
@@ -190,6 +215,7 @@ export function checkReadiness(
     ready,
     mode,
     blockers,
+    warnings,
     pending: {
       files: pendingFiles,
       bytes: pendingBytes,

@@ -3526,13 +3526,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const resolvedProfile = profile ?? "claude";
 
         // Step 1: checkReadiness
-        const readiness = checkReadiness({ cwd });
+        const readiness = checkReadiness({ cwd, profile: resolvedProfile });
         if (readiness.blockers.length > 0) {
           process.stderr.write(
             `[remote] migration blocked:\n${readiness.blockers.map((b) => `  • ${b}`).join("\n")}\n`,
           );
           process.exitCode = 1;
           return;
+        }
+        if (readiness.warnings.length > 0) {
+          process.stderr.write(
+            `[remote] readiness warnings:\n${readiness.warnings.map((w) => `  ⚠ ${w}`).join("\n")}\n`,
+          );
         }
         process.stderr.write(
           `[remote] readiness ok (mode: ${readiness.mode}, pending: ${readiness.pending.files} files / ${(readiness.pending.bytes / 1024).toFixed(0)} KiB)\n`,
