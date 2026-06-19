@@ -45,6 +45,7 @@ import {
   type TenantProvisioner,
 } from "../tenancy/tenant-provisioner.js";
 import { ArchiveStaging } from "../archive-staging.js";
+import { requireLeaseToken } from "../middleware/require-lease-token.js";
 import {
   type ValidationVars,
   validateJsonBody,
@@ -188,6 +189,12 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     new ArchiveStaging(process.env.DATA_DIR, "staging-export");
 
   const router = new Hono<{ Variables: ValidationVars }>();
+
+  // leaseRoot: the directory where lineage leases are stored.
+  // Evaluated at request time so tests can set DATA_DIR.
+  function leaseRoot(): string {
+    return process.env.DATA_DIR ?? process.cwd();
+  }
 
   // A per-session service token may act ONLY on the session it was minted for.
   // Returns true (caller should bail with notFound) when a session-bound token
@@ -418,7 +425,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   // Workspace archive staging: the CLI uploads a tar.gz of the cwd here after
   // session creation; the session-agent fetches it (with retry) on startup and
   // extracts it into /workspace. Held in memory, dropped on stop.
-  router.post("/:id/workspace", async (c) => {
+  router.post("/:id/workspace", requireLeaseToken(leaseRoot), async (c) => {
     const id = c.req.param("id");
     if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
@@ -447,7 +454,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
 
   // Workspace export: the session-agent tars /workspace and POSTs it here; the
   // CLI (remote workspace pull) GETs it. Held in memory, dropped on stop.
-  router.post("/:id/workspace/export", async (c) => {
+  router.post("/:id/workspace/export", requireLeaseToken(leaseRoot), async (c) => {
     const id = c.req.param("id");
     if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);

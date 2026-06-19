@@ -395,6 +395,60 @@ export function listLineages(root = process.cwd()): LineageRecord[] {
 }
 
 // ---------------------------------------------------------------------------
+// Incarnation suspension — Phase A0c
+// ---------------------------------------------------------------------------
+
+/**
+ * Path of the sentinel file that signals a local incarnation is suspended.
+ * Written by `suspendLocalIncarnation`, checked by `isIncarnationSuspended`,
+ * removed by `resumeLocalIncarnation`.
+ */
+function suspendedFile(lineageId: LineageId, root: string): string {
+  return join(lineagesDir(root), `${lineageId}.suspended`);
+}
+
+/**
+ * Suspend the local incarnation: write a sentinel file that the agent checks
+ * before starting a new turn. Does NOT kill the process.
+ *
+ * File path: <root>/.remote/lineages/<lineageId>.suspended
+ */
+export function suspendLocalIncarnation(
+  lineageId: LineageId,
+  root = process.cwd(),
+): void {
+  ensureDir(lineagesDir(root));
+  writeFileSync(suspendedFile(lineageId, root), new Date().toISOString(), "utf8");
+}
+
+/**
+ * Returns true when the sentinel file exists (incarnation is suspended).
+ */
+export function isIncarnationSuspended(
+  lineageId: LineageId,
+  root = process.cwd(),
+): boolean {
+  try {
+    // Just check existence — readFileSync throws on ENOENT.
+    readFileSync(suspendedFile(lineageId, root));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resume the local incarnation: remove the sentinel file.
+ * No-op if the file doesn't exist.
+ */
+export function resumeLocalIncarnation(
+  lineageId: LineageId,
+  root = process.cwd(),
+): void {
+  rmSync(suspendedFile(lineageId, root), { force: true });
+}
+
+// ---------------------------------------------------------------------------
 // Re-export ws:<hex> utility (avoid duplication)
 // ---------------------------------------------------------------------------
 

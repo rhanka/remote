@@ -244,6 +244,12 @@ import {
   humanSize,
   humanAge,
 } from "./migrate-candidates.js";
+import {
+  isIncarnationSuspended,
+  resumeLocalIncarnation,
+  suspendLocalIncarnation,
+  type LineageId,
+} from "./lineage-lease.js";
 import { createInterface } from "node:readline";
 
 import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
@@ -5683,6 +5689,39 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         );
       },
     );
+
+  // ---------------------------------------------------------------------------
+  // lineage — local incarnation lifecycle (Phase A0c)
+  // ---------------------------------------------------------------------------
+
+  const lineageCommand = program
+    .command("lineage")
+    .description("Manage local lineage incarnation lifecycle");
+
+  lineageCommand
+    .command("suspend <id>")
+    .description(
+      "Suspend the local incarnation for a lineage: writes a sentinel file that prevents the agent from starting a new turn. Does NOT kill the process.",
+    )
+    .action((id: string) => {
+      suspendLocalIncarnation(id as LineageId);
+      process.stderr.write(`[remote] lineage ${id} suspended\n`);
+    });
+
+  lineageCommand
+    .command("resume <id>")
+    .description(
+      "Resume a previously suspended local incarnation: removes the sentinel file.",
+    )
+    .action((id: string) => {
+      const wasSuspended = isIncarnationSuspended(id as LineageId);
+      resumeLocalIncarnation(id as LineageId);
+      process.stderr.write(
+        wasSuspended
+          ? `[remote] lineage ${id} resumed\n`
+          : `[remote] lineage ${id} was not suspended (no-op)\n`,
+      );
+    });
 
   await program.parseAsync([...argv]);
   const code = process.exitCode;

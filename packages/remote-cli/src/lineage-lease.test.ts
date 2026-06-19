@@ -24,12 +24,15 @@ import {
   acquireLease,
   createLineage,
   handoffLease,
+  isIncarnationSuspended,
   isLeaseExpired,
   listLineages,
   readLease,
   readLineage,
   releaseLease,
   renewLease,
+  resumeLocalIncarnation,
+  suspendLocalIncarnation,
   updateLineage,
   type LineageId,
   type LineageLease,
@@ -378,5 +381,47 @@ describe("isLeaseExpired", () => {
       expiresAt: new Date(Date.now() - 1).toISOString(),
     };
     expect(isLeaseExpired(lease)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// suspendLocalIncarnation / isIncarnationSuspended / resumeLocalIncarnation
+// (Phase A0c)
+// ---------------------------------------------------------------------------
+
+describe("incarnation suspension", () => {
+  it("isIncarnationSuspended returns false before any suspend", () => {
+    expect(isIncarnationSuspended(LIN, testRoot)).toBe(false);
+  });
+
+  it("suspendLocalIncarnation makes isIncarnationSuspended return true", () => {
+    suspendLocalIncarnation(LIN, testRoot);
+    expect(isIncarnationSuspended(LIN, testRoot)).toBe(true);
+  });
+
+  it("resumeLocalIncarnation removes the sentinel; isIncarnationSuspended returns false", () => {
+    suspendLocalIncarnation(LIN, testRoot);
+    expect(isIncarnationSuspended(LIN, testRoot)).toBe(true);
+    resumeLocalIncarnation(LIN, testRoot);
+    expect(isIncarnationSuspended(LIN, testRoot)).toBe(false);
+  });
+
+  it("resumeLocalIncarnation is a no-op when not suspended", () => {
+    expect(isIncarnationSuspended(LIN, testRoot)).toBe(false);
+    // Should not throw.
+    resumeLocalIncarnation(LIN, testRoot);
+    expect(isIncarnationSuspended(LIN, testRoot)).toBe(false);
+  });
+
+  it("suspending LIN does not affect LIN2", () => {
+    suspendLocalIncarnation(LIN, testRoot);
+    expect(isIncarnationSuspended(LIN2, testRoot)).toBe(false);
+  });
+
+  it("suspend is idempotent (double suspend does not throw)", () => {
+    suspendLocalIncarnation(LIN, testRoot);
+    // Second suspend overwrites the file with a fresh timestamp — no error.
+    suspendLocalIncarnation(LIN, testRoot);
+    expect(isIncarnationSuspended(LIN, testRoot)).toBe(true);
   });
 });
