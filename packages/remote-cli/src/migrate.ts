@@ -704,17 +704,14 @@ export async function migrateBack(
   try {
     const { listRemoteSessions } = await import("./attach.js");
     const sessions = await listRemoteSessions(remoteUrl, fetchImpl);
-    // The session-agent sets cliSessionId or we can match by workspace
-    // via the session list. The workspace id is not currently returned in the
-    // list response, so we stop the most-recent session for any profile that
-    // has a cliSessionId matching. As a best-effort, we stop the newest
-    // session for any profile (user should have only one open per workspace).
     if (sessions.length > 0) {
       // Sort by createdAt descending (ISO strings sort lexicographically).
       const sorted = [...sessions].sort((a, b) =>
         b.createdAt.localeCompare(a.createdAt),
       );
-      const target = sorted[0]!;
+      // Prefer the session bound to our workspace; fall back to the newest.
+      const target =
+        sorted.find((s) => s.workspaceId === workspaceId) ?? sorted[0]!;
       await stopRemoteSession(remoteUrl, target.id, "migrate-back", fetchImpl);
       stoppedSessionId = target.id;
       stderr.write(`[remote] stopped remote session ${target.id}\n`);
