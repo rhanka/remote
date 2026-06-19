@@ -32,6 +32,7 @@ import {
   buildAgentSocketEvents,
   type AgentSocketDeps,
 } from "./routes/agent-ws.js";
+import { createLineageLeasesRouter } from "./routes/lineage-leases.js";
 import { createSessionsRouter } from "./routes/sessions.js";
 import type { WSEvents } from "hono/ws";
 import { createWorkspacesRouter } from "./routes/workspaces.js";
@@ -177,6 +178,8 @@ export function createControlPlane(
   app.use("/sessions/:id", requireAuth);
   app.use("/workspaces", requireAuth);
   app.use("/workspaces/*", requireAuth);
+  app.use("/lineage-leases", requireAuth);
+  app.use("/lineage-leases/*", requireAuth);
 
   app.route("/sessions", sessionsRouter);
 
@@ -191,6 +194,8 @@ export function createControlPlane(
       sessionStore: store,
     }),
   );
+
+  app.route("/lineage-leases", createLineageLeasesRouter({ ajv }));
 
   app.injectWebSocket = nodeWs.injectWebSocket;
   app.buildAgentSocketEvents = (sessionId: string, userId = "default") => {

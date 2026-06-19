@@ -44,6 +44,7 @@ import {
   StubTenantProvisioner,
   type TenantProvisioner,
 } from "../tenancy/tenant-provisioner.js";
+import { ArchiveStaging } from "../archive-staging.js";
 import {
   type ValidationVars,
   validateJsonBody,
@@ -167,6 +168,8 @@ export type SessionsRouterDeps = {
   readonly provisioner?: SessionProvisioner;
   readonly registry?: AgentRegistry;
   readonly tenantProvisioner?: TenantProvisioner;
+  readonly archiveStaging?: ArchiveStaging;
+  readonly exportStaging?: ArchiveStaging;
 };
 
 export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
@@ -177,6 +180,12 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   const registry = deps.registry ?? new AgentRegistry();
   const tenantProvisioner =
     deps.tenantProvisioner ?? new StubTenantProvisioner();
+  const archiveStaging =
+    deps.archiveStaging ??
+    new ArchiveStaging(process.env.DATA_DIR, "staging");
+  const exportStaging =
+    deps.exportStaging ??
+    new ArchiveStaging(process.env.DATA_DIR, "staging-export");
 
   const router = new Hono<{ Variables: ValidationVars }>();
 
@@ -191,8 +200,6 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     return auth.sessionId !== undefined && auth.sessionId !== id;
   }
 
-  const workspaceArchives = new Map<string, Uint8Array>();
-  const workspaceExports = new Map<string, Uint8Array>();
   // Owner + tenant namespace captured at create time so the terminal.exited
   // cascade (which fires outside any request) can destroy in the right
   // namespace and delete from the right user partition.
@@ -315,8 +322,8 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     if (!store.get(id, userId)) return false;
     store.delete(id, userId);
     sessionTenant.delete(id);
-    workspaceArchives.delete(id);
-    workspaceExports.delete(id);
+    archiveStaging.clearStagedArchive(id);
+    exportStaging.clearStagedArchive(id);
     void provisioner
       .destroy(id, emit, tenant?.namespace)
       .catch((error: unknown) => {
@@ -422,7 +429,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
         400,
       );
     }
-    workspaceArchives.set(id, body);
+    archiveStaging.stageArchive(id, Buffer.from(body));
     return c.json({ sessionId: id, bytes: body.byteLength, accepted: true });
   });
 
@@ -430,7 +437,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     const id = c.req.param("id");
     if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
-    const archive = workspaceArchives.get(id);
+    const archive = archiveStaging.readStagedArchive(id);
     if (!archive) return notFound(c);
     return new Response(archive as unknown as BodyInit, {
       status: 200,
@@ -445,7 +452,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
     const body = new Uint8Array(await c.req.arrayBuffer());
-    workspaceExports.set(id, body);
+    exportStaging.stageArchive(id, Buffer.from(body));
     return c.json({ sessionId: id, bytes: body.byteLength, accepted: true });
   });
 
@@ -453,7 +460,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     const id = c.req.param("id");
     if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
     if (!store.get(id, c.var.auth!.userId)) return notFound(c);
-    const archive = workspaceExports.get(id);
+    const archive = exportStaging.readStagedArchive(id);
     if (!archive) return notFound(c);
     return new Response(archive as unknown as BodyInit, {
       status: 200,
