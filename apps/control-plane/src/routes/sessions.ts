@@ -175,7 +175,8 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   const bus = deps.bus ?? new SessionEventBus();
   const provisioner = deps.provisioner ?? new InMemoryProvisioner();
   const registry = deps.registry ?? new AgentRegistry();
-  const tenantProvisioner = deps.tenantProvisioner ?? new StubTenantProvisioner();
+  const tenantProvisioner =
+    deps.tenantProvisioner ?? new StubTenantProvisioner();
 
   const router = new Hono<{ Variables: ValidationVars }>();
 
@@ -195,7 +196,10 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   // Owner + tenant namespace captured at create time so the terminal.exited
   // cascade (which fires outside any request) can destroy in the right
   // namespace and delete from the right user partition.
-  const sessionTenant = new Map<string, { userId: string; namespace: string }>();
+  const sessionTenant = new Map<
+    string,
+    { userId: string; namespace: string }
+  >();
 
   // Durability seam: an agent re-announce repopulates the store + sessionTenant
   // after a control-plane restart. Idempotent for an already-known session so a
@@ -226,7 +230,10 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
       // erases one. Everything else AND the owner stay untouched (put without
       // userId preserves the existing owner: the agent WS auth may resolve to
       // "default").
-      if (announce.displayName !== undefined && existing.displayName === undefined)
+      if (
+        announce.displayName !== undefined &&
+        existing.displayName === undefined
+      )
         patch.displayName = announce.displayName;
       if (announce.labels !== undefined && existing.labels === undefined)
         patch.labels = announce.labels;
@@ -303,7 +310,8 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     const tenant = sessionTenant.get(id);
     // Enforce ownership when a userId is supplied (request-scoped stop). The
     // terminal.exited cascade calls without one (system-scoped).
-    if (userId !== undefined && tenant && tenant.userId !== userId) return false;
+    if (userId !== undefined && tenant && tenant.userId !== userId)
+      return false;
     if (!store.get(id, userId)) return false;
     store.delete(id, userId);
     sessionTenant.delete(id);
@@ -484,6 +492,33 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     if (!session) return notFound(c);
     const response: GetSessionResponse = { session };
     return c.json(response);
+  });
+
+  router.patch("/:id", async (c) => {
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    const userId = c.var.auth!.userId;
+    const session = store.get(id, userId);
+    if (!session) return notFound(c);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      displayName?: string;
+    };
+    if (
+      typeof body.displayName !== "string" ||
+      body.displayName.trim() === ""
+    ) {
+      return c.json(
+        { error: "displayName is required and must be non-empty" },
+        400,
+      );
+    }
+    const newDisplayName = body.displayName.trim();
+    store.put({ ...session, displayName: newDisplayName }, userId);
+    return c.json({
+      sessionId: id,
+      displayName: newDisplayName,
+      accepted: true,
+    });
   });
 
   router.post(

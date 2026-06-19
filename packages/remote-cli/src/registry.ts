@@ -333,7 +333,10 @@ export function enroll(
  * over the array (no fs); shared by `enroll` (under the lock) and the atomic
  * check-cap-and-enroll helper. The lock is held by the caller.
  */
-function applyEnroll(entries: RegistryEntry[], input: EnrollInput): RegistryEntry {
+function applyEnroll(
+  entries: RegistryEntry[],
+  input: EnrollInput,
+): RegistryEntry {
   const now = new Date().toISOString();
   const idx = entries.findIndex((e) => e.id === input.id);
   const prev = idx >= 0 ? entries[idx] : undefined;
@@ -545,7 +548,9 @@ function defaultPidAlive(pid: number): boolean {
  */
 function defaultProcessCmdline(pid: number): string | undefined {
   try {
-    return readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8")
+      .replace(/\0/g, " ")
+      .trim();
   } catch {
     return undefined;
   }
@@ -628,7 +633,8 @@ export function prune(maxAgeHours: number, opts: RegistryOpts = {}): number {
       const last = Date.parse(e.endedAt ?? e.lastSeenAt);
       return Number.isFinite(last) && last >= cutoff;
     });
-    if (kept.length === entries.length) return { entries, result: 0, save: false };
+    if (kept.length === entries.length)
+      return { entries, result: 0, save: false };
     return { entries: kept, result: entries.length - kept.length };
   });
 }
@@ -685,6 +691,8 @@ export type LocalLsRow = {
   path: string;
   /** "registry" = enrolled (reliable cwd/convId); "guess" = tmux-only. */
   badge: "registry" | "guess";
+  /** custom display name set via `remote rename`, shown in PROJECT column */
+  displayName?: string;
 };
 
 /**
@@ -704,9 +712,7 @@ export function listLocalForLs(opts: RegistryOpts = {}): LocalLsRow[] {
   const rows: LocalLsRow[] = [];
   const matched = new Set<string>();
   for (const s of listLocalSessions()) {
-    const entry = live.find(
-      (e) => e.tmuxSession === s.name || e.id === s.slug,
-    );
+    const entry = live.find((e) => e.tmuxSession === s.name || e.id === s.slug);
     if (entry) matched.add(entry.id);
     rows.push({
       slug: s.slug,
@@ -714,6 +720,7 @@ export function listLocalForLs(opts: RegistryOpts = {}): LocalLsRow[] {
       state: s.attached ? "attached" : "detached",
       path: s.path,
       badge: entry ? "registry" : "guess",
+      ...(s.displayName !== undefined ? { displayName: s.displayName } : {}),
     });
   }
   for (const e of live) {

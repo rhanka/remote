@@ -6,6 +6,7 @@ import {
   getRemoteSession,
   listRemoteSessions,
   refreshRemoteSession,
+  renameRemoteSession,
   stopRemoteSession,
 } from "./attach.js";
 
@@ -576,8 +577,44 @@ describe("attach", () => {
       sessionId: "sess-refresh",
       accepted: true,
     });
-    expect(captured!.url).toBe("http://localhost:8080/sessions/sess-refresh/credentials");
+    expect(captured!.url).toBe(
+      "http://localhost:8080/sessions/sess-refresh/credentials",
+    );
     const body = JSON.parse(captured!.body) as Record<string, string>;
     expect(body).toEqual({ ".codex/auth.json": "YXV0aA==" });
+  });
+
+  it("renameRemoteSession PATCHes /sessions/:id with displayName and returns response", async () => {
+    let captured: { url: string; method: string; body: string } | null = null;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      captured = {
+        url: url.toString(),
+        method: init?.method ?? "GET",
+        body: init?.body as string,
+      };
+      return new Response(
+        JSON.stringify({
+          sessionId: "sess-rename",
+          displayName: "my-new-name",
+          accepted: true,
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const result = await renameRemoteSession(
+      "http://localhost:8080",
+      "sess-rename",
+      "my-new-name",
+      fetchImpl,
+    );
+    expect(result).toEqual({
+      sessionId: "sess-rename",
+      displayName: "my-new-name",
+      accepted: true,
+    });
+    expect(captured!.url).toBe("http://localhost:8080/sessions/sess-rename");
+    expect(captured!.method).toBe("PATCH");
+    const body = JSON.parse(captured!.body) as { displayName: string };
+    expect(body).toEqual({ displayName: "my-new-name" });
   });
 });

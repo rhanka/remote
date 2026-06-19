@@ -279,7 +279,8 @@ export async function attach(options: AttachOptions): Promise<AttachResult> {
               const envelope = JSON.parse(ev.data) as RemoteEventEnvelope;
               if (envelope.type === "terminal.output") {
                 const payload = envelope.payload as { data?: string };
-                if (typeof payload.data === "string") stdout.write(payload.data);
+                if (typeof payload.data === "string")
+                  stdout.write(payload.data);
               } else if (envelope.type === "terminal.exited") {
                 await close();
                 return;
@@ -448,6 +449,38 @@ export async function refreshRemoteSession(
 }
 
 /**
+ * Rename a session's display name in the store without touching the Pod.
+ * Calls PATCH /sessions/:id with body { displayName }.
+ */
+export async function renameRemoteSession(
+  baseUrl: string,
+  sessionId: string,
+  displayName: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ sessionId: string; displayName: string; accepted: boolean }> {
+  const response = await fetchImpl(joinUrl(baseUrl, `/sessions/${sessionId}`), {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ displayName }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `renameRemoteSession: ${response.status} ${response.statusText}`,
+    );
+  }
+  const json = (await response.json()) as {
+    sessionId: string;
+    displayName: string;
+    accepted: boolean;
+  };
+  return {
+    sessionId: json.sessionId,
+    displayName: json.displayName,
+    accepted: json.accepted,
+  };
+}
+
+/**
  * Probe whether a session's terminal can receive input (i.e. the session-agent
  * is connected). Sends an empty (no-op) input frame: 202 = agent connected,
  * 503 = no agent (deaf/zombie), anything else = unknown.
@@ -463,7 +496,11 @@ export async function sessionTerminalHealth(
       {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ terminalId: sessionId, data: "", encoding: "utf8" }),
+        body: JSON.stringify({
+          terminalId: sessionId,
+          data: "",
+          encoding: "utf8",
+        }),
       },
     );
     if (response.status === 202) return "ready";

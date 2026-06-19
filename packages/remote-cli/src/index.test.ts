@@ -8,6 +8,7 @@ const attach = vi.fn();
 const getRemoteSession = vi.fn();
 const listRemoteSessions = vi.fn();
 const refreshRemoteSession = vi.fn();
+const renameRemoteSession = vi.fn();
 const stopRemoteSession = vi.fn();
 const getDefaultRemote = vi.fn();
 const setDefaultRemote = vi.fn();
@@ -30,6 +31,7 @@ vi.mock("./attach.js", () => ({
   listRemoteSessions,
   stopRemoteSession,
   refreshRemoteSession,
+  renameRemoteSession,
 }));
 
 vi.mock("./auth-refresh.js", () => ({
@@ -94,6 +96,12 @@ vi.mock("./h2a-bridge.js", () => ({
   instanceInboxDir: (instance: string) => instance.replace(/:/g, "__"),
 }));
 
+const ensureConnected = vi.fn();
+vi.mock("./tunnel.js", () => ({
+  ensureConnected,
+  stopTunnel: vi.fn(),
+}));
+
 const stderrWrite = vi
   .spyOn(process.stderr, "write")
   .mockImplementation(() => true);
@@ -117,6 +125,7 @@ describe("main", () => {
     getRemoteSession.mockReset();
     listRemoteSessions.mockReset();
     refreshRemoteSession.mockReset();
+    renameRemoteSession.mockReset();
     stopRemoteSession.mockReset();
     ensureProfileAuthFresh.mockReset();
     collectProfileAuth.mockReset();
@@ -144,6 +153,8 @@ describe("main", () => {
       convId: "conv-1",
       respawned: true,
     });
+    ensureConnected.mockReset();
+    ensureConnected.mockResolvedValue(undefined);
     process.exitCode = undefined;
     stderrWrite.mockClear();
     stdoutWrite.mockClear();
@@ -163,6 +174,11 @@ describe("main", () => {
     stopRemoteSession.mockResolvedValue({
       accepted: true,
       sessionId: "sess-stop",
+    });
+    renameRemoteSession.mockResolvedValue({
+      sessionId: "sess-rename",
+      displayName: "mynewname",
+      accepted: true,
     });
     ensureProfileAuthFresh.mockResolvedValue({
       checked: true,
@@ -543,6 +559,32 @@ describe("main", () => {
       expect.any(Function),
       undefined,
     );
+  });
+
+  it("R3: hard refresh calls ensureConnected before refreshing", async () => {
+    // Regression guard: after a control-plane rollout or laptop sleep the tunnel
+    // is stale; ensureConnected must be called on the hard path too (not just
+    // --soft / --all / --watch).
+    const callOrder: string[] = [];
+    ensureConnected.mockImplementation(async () => {
+      callOrder.push("ensureConnected");
+    });
+    refreshRemoteSession.mockImplementation(async () => {
+      callOrder.push("refreshRemoteSession");
+      return { accepted: true, sessionId: "sess-refresh" };
+    });
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "refresh",
+      "http://localhost:8080",
+      "sess-refresh",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(ensureConnected).toHaveBeenCalledWith("http://localhost:8080");
+    expect(callOrder).toEqual(["ensureConnected", "refreshRemoteSession"]);
   });
 
   it("uses configured default remote for attach when URL is omitted", async () => {
@@ -1038,6 +1080,25 @@ describe("main", () => {
       expect(exitCode).toBe(1);
       const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
       expect(out).toContain("failed=2");
+    });
+  });
+
+  describe("remote rename", () => {
+    it("calls renameRemoteSession with the resolved url and new name", async () => {
+      getDefaultRemote.mockReturnValue("http://localhost:8080");
+      const exitCode = await main([
+        "node",
+        "remote",
+        "rename",
+        "sess-abc",
+        "mynewname",
+      ]);
+      expect(exitCode).toBe(0);
+      expect(renameRemoteSession).toHaveBeenCalledWith(
+        "http://localhost:8080",
+        "sess-abc",
+        "mynewname",
+      );
     });
   });
 });

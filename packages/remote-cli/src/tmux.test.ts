@@ -12,8 +12,10 @@ import {
   buildSessionWindowArgs,
   buildTmuxGlobalOptions,
   fanoutLabels,
+  getLocalSessionDisplayName,
   localRelaunchCommand,
   sessionAttachedCount,
+  setLocalSessionDisplayName,
   startLocalSession,
   startH2aWindow,
 } from "./tmux.js";
@@ -431,5 +433,66 @@ describe("sessionAttachedCount (the detached-only HARD guard source)", () => {
   it("returns undefined on non-numeric output", () => {
     spawnSyncMock.mockReturnValue({ status: 0, stdout: "??\n" });
     expect(sessionAttachedCount("remote-a")).toBeUndefined();
+  });
+});
+
+describe("setLocalSessionDisplayName / getLocalSessionDisplayName (R1 — allow-rename coexistence)", () => {
+  beforeEach(() => spawnSyncMock.mockReset());
+
+  it("stores display name via set-option @display_name WITHOUT calling rename-window", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "" });
+
+    const ok = setLocalSessionDisplayName("remote-surch", "My Project");
+
+    expect(ok).toBe(true);
+    // Must use set-option with the exact session target and @display_name key.
+    expect(spawnSyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["set-option", "-t", "=remote-surch", "@display_name", "My Project"],
+      { stdio: "ignore" },
+    ]);
+    // Must NEVER call rename-window (which would disable allow-rename per-window).
+    const renameWindowCalls = spawnSyncMock.mock.calls.filter(
+      (c) =>
+        c[0] === "tmux" && Array.isArray(c[1]) && c[1][0] === "rename-window",
+    );
+    expect(renameWindowCalls).toHaveLength(0);
+  });
+
+  it("returns false when set-option fails (session gone)", () => {
+    spawnSyncMock.mockReturnValue({ status: 1, stdout: "" });
+    expect(setLocalSessionDisplayName("remote-gone", "name")).toBe(false);
+  });
+
+  it("reads back the stored display name via show-options -qv @display_name", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "My Project\n" });
+
+    const v = getLocalSessionDisplayName("remote-surch");
+
+    expect(v).toBe("My Project");
+    expect(spawnSyncMock.mock.calls[0]).toEqual([
+      "tmux",
+      ["show-options", "-qv", "-t", "=remote-surch", "@display_name"],
+      { encoding: "utf8" },
+    ]);
+  });
+
+  it("returns undefined when no display name has been set (empty output)", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "\n" });
+    expect(getLocalSessionDisplayName("remote-surch")).toBeUndefined();
+  });
+
+  it("returns undefined when show-options fails (session gone)", () => {
+    spawnSyncMock.mockReturnValue({ status: 1, stdout: "" });
+    expect(getLocalSessionDisplayName("remote-gone")).toBeUndefined();
+  });
+
+  it("accepts a session name that already has the = prefix (exactSessionTarget idempotent)", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "" });
+    setLocalSessionDisplayName("=remote-surch", "label");
+    const call = spawnSyncMock.mock.calls[0]!;
+    // exactSessionTarget must NOT double-prefix with ==
+    // args: ["set-option", "-t", <target>, "@display_name", <value>]
+    expect((call[1] as string[])[2]).toBe("=remote-surch");
   });
 });

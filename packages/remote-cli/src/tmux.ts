@@ -116,6 +116,8 @@ export type LocalSession = {
   path: string;
   /** is a client currently attached */
   attached: boolean;
+  /** custom display name set via `remote rename`, if any */
+  displayName?: string;
 };
 
 export function tmuxAvailable(): boolean {
@@ -154,7 +156,7 @@ export function listLocalSessions(): LocalSession[] {
     [
       "list-sessions",
       "-F",
-      "#{session_name}\t#{session_attached}\t#{session_path}\t#{@profile}",
+      "#{session_name}\t#{session_attached}\t#{session_path}\t#{@profile}\t#{@display_name}",
     ],
     { encoding: "utf8" },
   );
@@ -162,15 +164,19 @@ export function listLocalSessions(): LocalSession[] {
   const out: LocalSession[] = [];
   for (const line of r.stdout.split("\n")) {
     if (!line) continue;
-    const [name, attached, path, profile] = line.split("\t");
+    const [name, attached, path, profile, displayName] = line.split("\t");
     if (!name || !name.startsWith(LOCAL_PREFIX)) continue;
-    out.push({
+    const session: LocalSession = {
       name,
       slug: name.slice(LOCAL_PREFIX.length),
       profile: profile || "?",
       path: path || "",
       attached: attached === "1",
-    });
+    };
+    if (displayName && displayName.trim()) {
+      session.displayName = displayName.trim();
+    }
+    out.push(session);
   }
   return out;
 }
@@ -179,6 +185,50 @@ export function listLocalSessions(): LocalSession[] {
 export function findLocalSession(target: string): LocalSession | undefined {
   const sessions = listLocalSessions();
   return sessions.find((s) => s.name === target || s.slug === target);
+}
+
+/**
+ * Store a custom display name on a local tmux session WITHOUT calling
+ * `rename-window`. This avoids tmux's per-window `allow-rename off` side-effect
+ * that an explicit `rename-window` triggers — keeping the window name free to
+ * follow the agent's live OSC title (activity status). The name is persisted as a
+ * tmux session option `@display_name` and surfaced by `listLocalSessions` /
+ * `remote ls`.
+ */
+export function setLocalSessionDisplayName(
+  session: string,
+  displayName: string,
+): boolean {
+  const r = spawnSync(
+    TMUX,
+    [
+      "set-option",
+      "-t",
+      exactSessionTarget(session),
+      "@display_name",
+      displayName,
+    ],
+    { stdio: "ignore" },
+  );
+  return r.status === 0;
+}
+
+/**
+ * Read the custom display name stored on a local tmux session via
+ * `setLocalSessionDisplayName`, if any. Returns `undefined` when no display name
+ * has been set or the session cannot be reached.
+ */
+export function getLocalSessionDisplayName(
+  session: string,
+): string | undefined {
+  const r = spawnSync(
+    TMUX,
+    ["show-options", "-qv", "-t", exactSessionTarget(session), "@display_name"],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || r.stdout === undefined) return undefined;
+  const v = r.stdout.trim();
+  return v || undefined;
 }
 
 export type StartLocalResult = { name: string; slug: string };

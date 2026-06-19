@@ -20,6 +20,7 @@ import {
   getRemoteSession,
   listRemoteSessions,
   refreshRemoteSession,
+  renameRemoteSession,
   sessionTerminalHealth,
   stopRemoteSession,
 } from "./attach.js";
@@ -64,6 +65,7 @@ import {
   localSessionName,
   relaunchInSession,
   sessionAttachedCount,
+  setLocalSessionDisplayName,
   startH2aWindow,
   startHeadlessSession,
   startLocalSession,
@@ -256,6 +258,7 @@ export {
   getRemoteSession,
   listRemoteSessions,
   refreshRemoteSession,
+  renameRemoteSession,
   stopRemoteSession,
 } from "./attach.js";
 export type { AttachOptions, AttachResult } from "./attach.js";
@@ -5357,6 +5360,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           await softRefreshSession(sessionId, resolved);
           return;
         }
+        await ensureConnected(url);
         await refreshProfileSession(url, sessionId, opts);
       },
     );
@@ -5379,8 +5383,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           `  ${w("PROJECT", 20)} ${w("PROFILE", 7)} ${w("STATE", 9)} ${w("SOURCE", 10)} PATH\n`,
         );
         for (const s of local) {
+          const label = s.displayName ?? s.slug;
           process.stdout.write(
-            `  ${w(s.slug, 20)} ${w(s.profile, 7)} ${w(s.state, 9)} ${w(`[${s.badge}]`, 10)} ${s.path}\n`,
+            `  ${w(label, 20)} ${w(s.profile, 7)} ${w(s.state, 9)} ${w(`[${s.badge}]`, 10)} ${s.path}\n`,
           );
         }
       }
@@ -5453,6 +5458,51 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         const result = await stopRemoteSession(url, sessionId, opts.reason);
         process.stderr.write(
           `[remote] stop ${result.accepted ? "accepted" : "rejected"} for ${sessionId}\n`,
+        );
+      },
+    );
+
+  program
+    .command("rename <slugOrId> <newName>")
+    .description(
+      "Rename a session's display name without restarting the Pod. Also renames the local tmux window if a matching local session exists.",
+    )
+    .option("--remote <url>", "override the configured remote URL")
+    .action(
+      async (slugOrId: string, newName: string, opts: { remote?: string }) => {
+        // Store display name on the local tmux session (without rename-window,
+        // which would disable allow-rename per-window and break the live
+        // activity-status title forwarded via pane_title / OSC sequence).
+        const local = findLocalSession(slugOrId);
+        if (local) {
+          setLocalSessionDisplayName(local.name, newName);
+          process.stderr.write(
+            `[remote] local session display name set to "${newName}"\n`,
+          );
+        }
+        // Rename on the control-plane.
+        const url = getConfiguredRemote(opts.remote);
+        await ensureConnected(url);
+        // If we found a local session, try to use its session id from the
+        // remote listing; otherwise treat slugOrId as a sessionId directly.
+        let sessionId = slugOrId;
+        if (local) {
+          try {
+            const sessions = await listRemoteSessions(url);
+            const match = sessions.find(
+              (s) =>
+                s.id === local.slug ||
+                s.displayName === local.slug ||
+                s.id === slugOrId,
+            );
+            if (match) sessionId = match.id;
+          } catch {
+            // best-effort — fall back to slugOrId as sessionId
+          }
+        }
+        const result = await renameRemoteSession(url, sessionId, newName);
+        process.stderr.write(
+          `[remote] session ${result.sessionId} renamed to "${result.displayName}" (accepted: ${String(result.accepted)})\n`,
         );
       },
     );
