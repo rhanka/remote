@@ -3,6 +3,8 @@ import { readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
+const FILE_SIZE_LIMIT = 10_000_000; // 10 MB per file
+
 // ---------------------------------------------------------------------------
 // Hashing helpers
 // ---------------------------------------------------------------------------
@@ -156,4 +158,118 @@ export function buildUntrackedTarball(cwd: string, paths: string[]): Buffer {
     );
   }
   return r.stdout as Buffer;
+}
+
+// ---------------------------------------------------------------------------
+// Phase B3 — classifyWorkingSet
+// ---------------------------------------------------------------------------
+
+export type WorkingSetClass = {
+  hot: string[]; // relative paths from cwd
+  cold: string[];
+  estimatedHotBytes: number;
+};
+
+/**
+ * Classifies the working set into hot/cold.
+ *
+ * Hot = git-tracked modified files (git diff --name-only HEAD)
+ *       ∪ untracked recent files (mtime < hotSetMtimeSec seconds ago)
+ *       where size ≤ 10 MB each.
+ * Cap: total hot-set bytes ≤ hotSetMaxBytes (default 50 MB).
+ * Files exceeding the size limit or pushed beyond the cap go to cold.
+ * Within the cap, candidates are sorted by mtime descending (newest first).
+ */
+export async function classifyWorkingSet(args: {
+  cwd: string;
+  hotSetMaxBytes?: number;
+  hotSetMtimeSec?: number;
+}): Promise<WorkingSetClass> {
+  const { cwd } = args;
+  const hotSetMaxBytes = args.hotSetMaxBytes ?? 50_000_000;
+  const hotSetMtimeSec = args.hotSetMtimeSec ?? 86_400;
+  const nowMs = Date.now();
+  const mtimeCutoffMs = nowMs - hotSetMtimeSec * 1000;
+
+  // Tracked modified files (git diff --name-only HEAD)
+  const diffR = spawnSync("git", ["diff", "--name-only", "HEAD"], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const trackedModified =
+    diffR.status === 0
+      ? diffR.stdout
+          .split("\n")
+          .map((p) => p.trim())
+          .filter(Boolean)
+      : [];
+
+  // Untracked files (not ignored by .gitignore)
+  const utR = spawnSync(
+    "git",
+    ["ls-files", "-o", "--exclude-standard", "-z"],
+    { cwd, encoding: "buffer", maxBuffer: 8 * 1024 * 1024 },
+  );
+  const untracked =
+    utR.status === 0
+      ? (utR.stdout as Buffer)
+          .toString("utf8")
+          .split("\0")
+          .map((p) => p.trim())
+          .filter(Boolean)
+      : [];
+
+  // Filter untracked by mtime recency
+  const recentUntracked = untracked.filter((p) => {
+    try {
+      return statSync(join(cwd, p)).mtimeMs >= mtimeCutoffMs;
+    } catch {
+      return false;
+    }
+  });
+
+  // Union: tracked modified + recent untracked, deduplicated
+  const candidateSet = new Set([...trackedModified, ...recentUntracked]);
+  const candidates = Array.from(candidateSet);
+
+  // Build candidate entries with size + mtime, filter out files > 10 MB
+  type Candidate = { path: string; size: number; mtimeMs: number };
+  const entries: Candidate[] = [];
+  const coldFromSize: string[] = [];
+
+  for (const p of candidates) {
+    let st: ReturnType<typeof statSync> | undefined;
+    try {
+      st = statSync(join(cwd, p));
+    } catch {
+      continue; // file disappeared — skip
+    }
+    if (st.size > FILE_SIZE_LIMIT) {
+      coldFromSize.push(p);
+    } else {
+      entries.push({ path: p, size: st.size, mtimeMs: st.mtimeMs });
+    }
+  }
+
+  // Sort by mtime descending (newest first) to prioritize recent files within cap
+  entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  // Apply cap: fill hot up to hotSetMaxBytes, overflow → cold
+  const hot: string[] = [];
+  const coldFromCap: string[] = [];
+  let hotBytes = 0;
+
+  for (const e of entries) {
+    if (hotBytes + e.size <= hotSetMaxBytes) {
+      hot.push(e.path);
+      hotBytes += e.size;
+    } else {
+      coldFromCap.push(e.path);
+    }
+  }
+
+  const cold = [...coldFromSize, ...coldFromCap];
+
+  return { hot, cold, estimatedHotBytes: hotBytes };
 }

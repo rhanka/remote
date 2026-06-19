@@ -563,7 +563,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     // Persist base commit for subsequent incremental pushes.
     incrementalBases.set(id, manifest.base);
 
-    return c.json({ ok: true, baseCommit: manifest.base });
+    return c.json({ ok: true, baseCommit: manifest.base, receivedAt: new Date().toISOString() });
   });
 
   // POST /:id/workspace/incremental/untracked — upload untracked tarball

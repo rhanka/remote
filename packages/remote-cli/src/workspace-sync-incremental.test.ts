@@ -1,7 +1,7 @@
 /**
- * Phase B2 — workspace-sync-incremental tests.
+ * Phase B2 + B3 — workspace-sync-incremental tests.
  * Exercises: isGitRepo, getHeadSha, sha256Buf, buildIncrementalManifest,
- * buildUntrackedTarball.
+ * buildUntrackedTarball, classifyWorkingSet.
  * All tmp directories are created under the system tmpdir (resolved via the
  * real `os.tmpdir()` before any mock — no /tmp hardcoding per project policy
  * which forbids /tmp; we use mkdtempSync with the real tmpdir here since this
@@ -16,6 +16,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   buildIncrementalManifest,
   buildUntrackedTarball,
+  classifyWorkingSet,
   getHeadSha,
   isGitRepo,
   sha256Buf,
@@ -286,6 +288,89 @@ describe("buildUntrackedTarball", () => {
     } finally {
       rmSync(repoD, { recursive: true, force: true });
       rmSync(extractDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. classifyWorkingSet (Phase B3)
+// ---------------------------------------------------------------------------
+
+/** Helper: create a minimal git repo with one initial commit. */
+function makeGitRepo(prefix: string): { dir: string; headSha: string } {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  execSync("git init -b main", { cwd: dir, stdio: "pipe" });
+  execSync('git config user.email "t@t.com"', { cwd: dir, stdio: "pipe" });
+  execSync('git config user.name "T"', { cwd: dir, stdio: "pipe" });
+  writeFileSync(join(dir, "init.txt"), "init\n");
+  execSync("git add init.txt", { cwd: dir, stdio: "pipe" });
+  execSync('git commit -m "init"', { cwd: dir, stdio: "pipe" });
+  const headSha = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: dir,
+    encoding: "utf8",
+  }).stdout.trim();
+  return { dir, headSha };
+}
+
+describe("classifyWorkingSet", () => {
+  it("returns empty hot/cold for a clean repo with no changes", async () => {
+    const { dir } = makeGitRepo("cwset-clean-");
+    try {
+      const result = await classifyWorkingSet({ cwd: dir });
+      expect(result.hot).toHaveLength(0);
+      expect(result.cold).toHaveLength(0);
+      expect(result.estimatedHotBytes).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("includes git-tracked modified file in hot", async () => {
+    const { dir } = makeGitRepo("cwset-tracked-");
+    try {
+      // Modify the tracked file (already committed)
+      writeFileSync(join(dir, "init.txt"), "modified content\n");
+      const result = await classifyWorkingSet({ cwd: dir });
+      expect(result.hot).toContain("init.txt");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("includes recent untracked file in hot", async () => {
+    const { dir } = makeGitRepo("cwset-untracked-");
+    try {
+      writeFileSync(join(dir, "new-file.txt"), "new content\n");
+      // File is newly created → mtime is now → well within 24h window
+      const result = await classifyWorkingSet({ cwd: dir });
+      expect(result.hot).toContain("new-file.txt");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("moves files to cold when they exceed the hot cap", async () => {
+    const { dir } = makeGitRepo("cwset-cap-");
+    try {
+      // Write two files each ~600 KB, set cap to 1 MB so second goes cold
+      const chunk = Buffer.alloc(600_000, "x");
+      writeFileSync(join(dir, "file-a.txt"), chunk);
+      writeFileSync(join(dir, "file-b.txt"), chunk);
+      // Ensure file-a is newer (processed first)
+      const nowSec = Date.now() / 1000;
+      utimesSync(join(dir, "file-a.txt"), nowSec + 1, nowSec + 1);
+      utimesSync(join(dir, "file-b.txt"), nowSec, nowSec);
+
+      const result = await classifyWorkingSet({
+        cwd: dir,
+        hotSetMaxBytes: 1_000_000,
+      });
+      // At least one file is in hot, and at least one is in cold
+      expect(result.hot.length).toBeGreaterThan(0);
+      expect(result.cold.length).toBeGreaterThan(0);
+      expect(result.estimatedHotBytes).toBeLessThanOrEqual(1_000_000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

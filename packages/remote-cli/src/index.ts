@@ -216,6 +216,11 @@ import {
   uploadWorkspaceArchive,
 } from "./workspace-sync.js";
 import {
+  emptyMetrics,
+  readSyncStatus,
+  type SyncStatus,
+} from "./sync-status.js";
+import {
   acquireWorkspaceLock,
   createWorkspace,
   deleteWorkspace,
@@ -2766,6 +2771,71 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
         const ok = runOnce();
         if (!ok) process.exitCode = 1;
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // sync-status — Phase B3: show the local sync status for the current session
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("sync-status")
+    .description("show sync status for the current session (reads ~/.remote/sync-status/<sessionId>.json)")
+    .option("--json", "output raw JSON")
+    .option("--session <id>", "session id (defaults to .remote/workspace.json marker)")
+    .action(
+      (opts: { json?: boolean; session?: string }) => {
+        const marker = readWorkspaceMarker(process.cwd());
+        const sessionId = opts.session ?? marker?.workspaceId;
+        let status: SyncStatus;
+        if (!sessionId) {
+          // No session — synthesize a synced/safe-to-close placeholder
+          status = {
+            state: "synced",
+            safeToClose: true,
+            updatedAt: new Date().toISOString(),
+            conv: emptyMetrics(),
+            hot: emptyMetrics(),
+            cold: emptyMetrics(),
+          };
+        } else {
+          const persisted = readSyncStatus(sessionId);
+          if (!persisted) {
+            status = {
+              state: "synced",
+              safeToClose: true,
+              updatedAt: new Date().toISOString(),
+              conv: emptyMetrics(),
+              hot: emptyMetrics(),
+              cold: emptyMetrics(),
+            };
+          } else {
+            status = persisted;
+          }
+        }
+
+        if (opts.json) {
+          process.stdout.write(JSON.stringify(status, null, 2) + "\n");
+          return;
+        }
+
+        // Human-readable output
+        const safeLabel = status.safeToClose ? "YES" : "NO";
+        const fmtMetrics = (label: string, m: typeof status.conv): string => {
+          if (m.pendingCount === 0) return `  ${label.padEnd(6)} synced`;
+          const kb = (m.pendingBytes / 1024).toFixed(0);
+          return (
+            `  ${label.padEnd(6)} ${m.pendingCount === 0 ? "synced" : "pending"}` +
+            `  ${m.pendingCount} files / ${kb} KB` +
+            (m.oldestPendingAge > 0 ? `  oldest ${m.oldestPendingAge}s` : "") +
+            (m.estimatedCatchup > 0 ? `  ETA ${m.estimatedCatchup}s` : "")
+          );
+        };
+        process.stdout.write(`State: ${status.state}\n`);
+        process.stdout.write(`Safe to close: ${safeLabel}\n`);
+        process.stdout.write(fmtMetrics("Conv:", status.conv) + "\n");
+        process.stdout.write(fmtMetrics("Hot:", status.hot) + "\n");
+        process.stdout.write(fmtMetrics("Cold:", status.cold) + "\n");
       },
     );
 
