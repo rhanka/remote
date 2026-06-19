@@ -72,7 +72,7 @@ export function createControlPlane(
 ): ControlPlaneApp {
   const app = new Hono<{ Variables: ValidationVars }>() as ControlPlaneApp;
   const ajv = createAjv();
-  const store = options.store ?? new SessionStore();
+  const store = options.store ?? new SessionStore(process.env.DATA_DIR);
   const bus = options.bus ?? new SessionEventBus();
   const provisioner = options.provisioner ?? new InMemoryProvisioner();
   const registry = options.registry ?? new AgentRegistry();

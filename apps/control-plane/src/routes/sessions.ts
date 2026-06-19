@@ -475,6 +475,118 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Incremental workspace sync (Phase B2).
+  //
+  // The CLI posts a JSON manifest + optional binary parts (git bundle on first
+  // push, untracked tarball on subsequent pushes).  The CP stores the base
+  // commit SHA in memory so the CLI can query it for the next incremental push.
+  //
+  // Transport: two separate POST bodies — the manifest as JSON, and optionally
+  // the bundle/untracked tarball as raw binary parts identified via the
+  // X-Incremental-Part header ("bundle" | "untracked").
+  //
+  // Prototype: base commit stored in-process Map only (B3 will persist).
+  // ---------------------------------------------------------------------------
+
+  // Per-session base commit for incremental sync (prototype: in-memory only).
+  const incrementalBases = new Map<string, string>();
+
+  // POST /:id/workspace/incremental/bundle — upload git bundle (bootstrap)
+  router.post("/:id/workspace/incremental/bundle", async (c) => {
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
+    const body = new Uint8Array(await c.req.arrayBuffer());
+    if (body.byteLength === 0) {
+      return c.json(
+        {
+          code: "incremental.empty_bundle",
+          message: "Empty bundle",
+          retryable: false,
+        },
+        400,
+      );
+    }
+    // Store the bundle for the pod to fetch (reuse archive staging slot with a
+    // distinct key: "bundle:<id>").  For B2 prototype we stash it in the same
+    // ArchiveStaging under a composite key via a thin in-memory store.
+    // In a real B3 implementation this would write to RWX and exec into the pod.
+    archiveStaging.stageArchive(`bundle:${id}`, Buffer.from(body));
+    return c.json({ sessionId: id, bytes: body.byteLength, accepted: true });
+  });
+
+  // GET /:id/workspace/incremental/bundle — pod fetches the bundle
+  router.get("/:id/workspace/incremental/bundle", (c) => {
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
+    const bundle = archiveStaging.readStagedArchive(`bundle:${id}`);
+    if (!bundle) return notFound(c);
+    return new Response(bundle as unknown as BodyInit, {
+      status: 200,
+      headers: { "content-type": "application/octet-stream" },
+    });
+  });
+
+  // POST /:id/workspace/incremental — push manifest + optional untracked tarball
+  router.post("/:id/workspace/incremental", async (c) => {
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
+
+    // Parse manifest from JSON body.
+    const manifest = (await c.req.json().catch(() => null)) as {
+      base?: string;
+      tracked?: string;
+      untrackedManifest?: Array<{ path: string; sha256: string; size: number }>;
+      deleted?: string[];
+      renames?: Array<{ from: string; to: string }>;
+      modes?: Array<{ path: string; mode: string }>;
+    } | null;
+
+    if (
+      !manifest ||
+      typeof manifest.base !== "string" ||
+      manifest.base.length === 0
+    ) {
+      return c.json(
+        {
+          code: "incremental.invalid_manifest",
+          message: "manifest.base is required",
+          retryable: false,
+        },
+        400,
+      );
+    }
+
+    // Persist base commit for subsequent incremental pushes.
+    incrementalBases.set(id, manifest.base);
+
+    return c.json({ ok: true, baseCommit: manifest.base });
+  });
+
+  // POST /:id/workspace/incremental/untracked — upload untracked tarball
+  router.post("/:id/workspace/incremental/untracked", async (c) => {
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
+    const body = new Uint8Array(await c.req.arrayBuffer());
+    if (body.byteLength > 0) {
+      archiveStaging.stageArchive(`untracked:${id}`, Buffer.from(body));
+    }
+    return c.json({ sessionId: id, bytes: body.byteLength, accepted: true });
+  });
+
+  // GET /:id/workspace/incremental/base — CLI queries the known base commit
+  router.get("/:id/workspace/incremental/base", (c) => {
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    if (!store.get(id, c.var.auth!.userId)) return notFound(c);
+    const baseSha = incrementalBases.get(id);
+    return c.json({ baseSha: baseSha ?? null });
+  });
+
   // The session-agent reports the wrapped CLI's own conversation id once it
   // detects it (newest file in the profile's conversation dir).
   router.post("/:id/cli-session", async (c) => {

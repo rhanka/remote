@@ -27,6 +27,7 @@ import {
   stopRemoteSession,
 } from "./attach.js";
 import {
+  authHeaders,
   clearDefaultRemote,
   getDefaultRemote,
   getDefaultTarget,
@@ -2765,6 +2766,200 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
         const ok = runOnce();
         if (!ok) process.exitCode = 1;
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // sync-files — Phase B2 incremental git-based file sync
+  // ---------------------------------------------------------------------------
+
+  program
+    .command("sync-files")
+    .description(
+      "Push the current git workspace to the session pod incrementally (git bundle on first push, diff on subsequent). " +
+        "Distinct from `remote sync` which syncs conversations.",
+    )
+    .option(
+      "--remote <url>",
+      "control-plane URL (defaults to configured remote)",
+    )
+    .option(
+      "--session <id>",
+      "session id to sync into (defaults to .remote/workspace.json marker)",
+    )
+    .option("--dry-run", "show what would be sent without uploading")
+    .action(
+      async (opts: {
+        remote?: string;
+        session?: string;
+        dryRun?: boolean;
+      }) => {
+        const cwd = process.cwd();
+        const { isGitRepo: checkGit, getHeadSha, buildGitBundle, buildIncrementalManifest, buildUntrackedTarball } =
+          await import("./workspace-sync-incremental.js");
+
+        if (!checkGit(cwd)) {
+          process.stderr.write(
+            "[remote] sync-files: current directory is not a git repo\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        const headSha = getHeadSha(cwd);
+        if (!headSha) {
+          process.stderr.write(
+            "[remote] sync-files: cannot resolve HEAD — make at least one commit\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        const marker = readWorkspaceMarker(cwd);
+        const remote = getConfiguredRemote(opts.remote ?? marker?.remote);
+        // Resolve session id: explicit --session, or from marker
+        const sessionId = opts.session ?? marker?.workspaceId;
+        if (!sessionId) {
+          process.stderr.write(
+            "[remote] sync-files: no session id — pass --session or run `remote workspace link` first\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        await ensureConnected(remote);
+
+        // Query CP for the known base commit.
+        const baseRes = await fetch(
+          `${remote.replace(/\/$/, "")}/sessions/${sessionId}/workspace/incremental/base`,
+          { headers: authHeaders() },
+        );
+        let baseSha: string | null = null;
+        if (baseRes.ok) {
+          const baseJson = (await baseRes.json()) as { baseSha?: string | null };
+          baseSha = baseJson.baseSha ?? null;
+        }
+
+        if (opts.dryRun) {
+          if (baseSha) {
+            process.stderr.write(
+              `[remote] sync-files (dry-run): incremental push HEAD=${headSha} base=${baseSha}\n`,
+            );
+          } else {
+            process.stderr.write(
+              `[remote] sync-files (dry-run): bootstrap push HEAD=${headSha} (no base on CP)\n`,
+            );
+          }
+          return;
+        }
+
+        if (!baseSha) {
+          // Bootstrap: upload full git bundle.
+          process.stderr.write(
+            `[remote] sync-files: bootstrap — building git bundle (HEAD=${headSha})\n`,
+          );
+          const bundle = buildGitBundle(cwd);
+          process.stderr.write(
+            `[remote] sync-files: bundle ${(bundle.byteLength / 1024).toFixed(0)} KiB → ${sessionId}\n`,
+          );
+          const uploadRes = await fetch(
+            `${remote.replace(/\/$/, "")}/sessions/${sessionId}/workspace/incremental/bundle`,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/octet-stream",
+                ...authHeaders(),
+              },
+              body: bundle as unknown as BodyInit,
+            },
+          );
+          if (!uploadRes.ok) {
+            throw new Error(
+              `bundle upload failed: ${uploadRes.status} ${uploadRes.statusText}`,
+            );
+          }
+          // Record HEAD as the new base.
+          const manifestRes = await fetch(
+            `${remote.replace(/\/$/, "")}/sessions/${sessionId}/workspace/incremental`,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                ...authHeaders(),
+              },
+              body: JSON.stringify({
+                base: headSha,
+                tracked: "",
+                untrackedManifest: [],
+                deleted: [],
+                renames: [],
+                modes: [],
+              }),
+            },
+          );
+          if (!manifestRes.ok) {
+            throw new Error(
+              `manifest record failed: ${manifestRes.status} ${manifestRes.statusText}`,
+            );
+          }
+          process.stderr.write(
+            `[remote] sync-files: bootstrap complete, base=${headSha}\n`,
+          );
+        } else {
+          // Incremental push.
+          process.stderr.write(
+            `[remote] sync-files: incremental push base=${baseSha} → HEAD=${headSha}\n`,
+          );
+          const manifest = buildIncrementalManifest(cwd, baseSha);
+          const untrackedPaths = manifest.untrackedManifest.map((e) => e.path);
+          const trackedBytes = Buffer.from(manifest.tracked, "base64").byteLength;
+          process.stderr.write(
+            `[remote] sync-files: tracked diff ${(trackedBytes / 1024).toFixed(1)} KiB, ${untrackedPaths.length} untracked file(s)\n`,
+          );
+
+          // Upload manifest.
+          const manifestRes = await fetch(
+            `${remote.replace(/\/$/, "")}/sessions/${sessionId}/workspace/incremental`,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                ...authHeaders(),
+              },
+              body: JSON.stringify(manifest),
+            },
+          );
+          if (!manifestRes.ok) {
+            throw new Error(
+              `manifest upload failed: ${manifestRes.status} ${manifestRes.statusText}`,
+            );
+          }
+
+          // Upload untracked tarball if any.
+          if (untrackedPaths.length > 0) {
+            const tarball = buildUntrackedTarball(cwd, untrackedPaths);
+            const tarRes = await fetch(
+              `${remote.replace(/\/$/, "")}/sessions/${sessionId}/workspace/incremental/untracked`,
+              {
+                method: "POST",
+                headers: {
+                  "content-type": "application/gzip",
+                  ...authHeaders(),
+                },
+                body: tarball as unknown as BodyInit,
+              },
+            );
+            if (!tarRes.ok) {
+              throw new Error(
+                `untracked upload failed: ${tarRes.status} ${tarRes.statusText}`,
+              );
+            }
+          }
+
+          process.stderr.write(
+            `[remote] sync-files: incremental complete, base=${headSha}\n`,
+          );
+        }
       },
     );
 
