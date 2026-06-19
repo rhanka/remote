@@ -10,7 +10,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
 function extractInto(archive: Buffer, dest: string): void {
@@ -84,7 +83,10 @@ export function mergeWorkspaceArchive(args: {
   remoteArchive: Buffer;
   baseArchive: Buffer | null;
 }): MergeResult {
-  const tmp = mkdtempSync(join(tmpdir(), "remote-merge-"));
+  // Stage under cwd/.remote/tmp — project policy forbids /tmp.
+  const stagingBase = join(args.cwd, ".remote", "tmp");
+  mkdirSync(stagingBase, { recursive: true });
+  const tmp = mkdtempSync(join(stagingBase, "merge-"));
   const remoteDir = join(tmp, "remote");
   const baseDir = join(tmp, "base");
   try {
