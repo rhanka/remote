@@ -112,6 +112,11 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
     // segment trips a `.claude/` ignore rule). This is how a migrated session
     // carries its in-progress conversation onto the remote workspace PVC, where
     // the session-agent restores it into HOME before the CLI starts.
+    //
+    // SECURITY: .claude/settings.local.json is intentionally excluded — it
+    // contains machine-local API keys and MCP secrets that must not transit the
+    // control-plane. The remote session sources credentials via `remote
+    // push-creds` instead.
     const sessionState = await run(
       "git",
       [
@@ -122,7 +127,6 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
         ".remote/sessions",
         ".remote/git.json",
         ".claude/settings.json",
-        ".claude/settings.local.json",
       ],
       cwd,
     );
