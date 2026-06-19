@@ -587,4 +587,30 @@ describe("migrateBack", () => {
       expect.any(Function),
     );
   });
+
+  it("uses provided sessionId directly without listing sessions (D1 fix)", async () => {
+    const stderr = stubStream();
+    const stdout = stubStream();
+
+    mockListRemoteSessions.mockResolvedValue([]);
+
+    const result = await migrateBack({
+      remoteUrl: REMOTE_URL,
+      sessionId: "known-sess-from-lineage",
+      cwd: makeTempCwd("back-known-session"),
+      home: makeTempCwd("back-known-session-home"),
+      stderr,
+      stdout,
+    });
+
+    // listRemoteSessions must NOT have been called when sessionId is provided
+    expect(mockListRemoteSessions).not.toHaveBeenCalled();
+    expect(result.stoppedSessionId).toBe("known-sess-from-lineage");
+    expect(mockStopRemoteSession).toHaveBeenCalledWith(
+      REMOTE_URL,
+      "known-sess-from-lineage",
+      "migrate-back",
+      expect.any(Function),
+    );
+  });
 });
