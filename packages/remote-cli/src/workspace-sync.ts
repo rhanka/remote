@@ -152,9 +152,11 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
       sessionState.status === 0 ? sessionState.stdout : Buffer.alloc(0),
       gitDir,
     ]);
+    // SECURITY: exclude machine-local secrets even if they slip through
+    // git ls-files (e.g. when not in .gitignore). Belt-and-suspenders guard.
     const tar = await runWithStdin(
       "tar",
-      ["-czf", "-", "--null", "-T", "-"],
+      ["-czf", "-", "--exclude=./.claude/settings.local.json", "--null", "-T", "-"],
       cwd,
       fileList,
     );
@@ -168,6 +170,8 @@ export async function buildWorkspaceArchive(cwd: string): Promise<Buffer> {
         "-",
         "--exclude=./.git",
         "--exclude=./node_modules",
+        // SECURITY: exclude machine-local secrets regardless of .gitignore state
+        "--exclude=./.claude/settings.local.json",
         ...rootGitignoreExcludes(cwd),
         ".",
       ],

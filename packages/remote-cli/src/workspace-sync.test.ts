@@ -75,4 +75,21 @@ describe("buildWorkspaceArchive (non-git fallback)", () => {
     expect(names.some((n) => n.includes("node_modules"))).toBe(false);
     expect(names.some((n) => n.includes(".git"))).toBe(false);
   });
+
+  it("SECURITY: never includes .claude/settings.local.json (machine-local API keys)", async () => {
+    write("src/app.ts");
+    write(".claude/settings.json", '{"permissions":{}}');
+    write(".claude/settings.local.json", '{"apiKey":"sk-ant-secret"}');
+
+    const names = listArchive(await buildWorkspaceArchive(scratch));
+
+    expect(names).toContain("./src/app.ts");
+    // settings.json (shared config) should travel with the workspace
+    expect(names).toContain("./.claude/settings.json");
+    // settings.local.json MUST NOT be included — it carries machine-local secrets
+    const hasLocalSettings = names.some((n) =>
+      n.includes("settings.local.json"),
+    );
+    expect(hasLocalSettings).toBe(false);
+  });
 });
