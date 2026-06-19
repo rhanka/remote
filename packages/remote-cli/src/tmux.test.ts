@@ -14,6 +14,7 @@ import {
   fanoutLabels,
   getLocalSessionDisplayName,
   localRelaunchCommand,
+  resolveAgentPaneForInstance,
   sessionAttachedCount,
   setLocalSessionDisplayName,
   startLocalSession,
@@ -494,5 +495,100 @@ describe("setLocalSessionDisplayName / getLocalSessionDisplayName (R1 — allow-
     // exactSessionTarget must NOT double-prefix with ==
     // args: ["set-option", "-t", <target>, "@display_name", <value>]
     expect((call[1] as string[])[2]).toBe("=remote-surch");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveAgentPaneForInstance
+// ---------------------------------------------------------------------------
+
+describe("resolveAgentPaneForInstance", () => {
+  beforeEach(() => {
+    spawnSyncMock.mockReset();
+  });
+
+  /**
+   * Arrange list-sessions to return one session named `remote-<label>` with the
+   * given profile option, then arrange show-options to return the pane id for
+   * @remote_agent_host and @remote_agent_pane reads.
+   */
+  function arrangeSession(
+    label: string,
+    host: string,
+    paneId: string,
+  ): void {
+    spawnSyncMock.mockImplementation(
+      (cmd: string, args: string[], _opts?: unknown) => {
+        if (cmd !== "tmux") return { status: 0, stdout: "" };
+        const sub = Array.isArray(args) ? args[0] : "";
+        // list-sessions: return a matching session
+        if (sub === "list-sessions") {
+          return {
+            status: 0,
+            stdout: `remote-${label}\t0\t/home/u/src/${label}\t${host}\t\n`,
+          };
+        }
+        // show-options: return different values for different options
+        if (sub === "show-options") {
+          const option = args[args.length - 1];
+          if (option === "@remote_agent_host") {
+            return { status: 0, stdout: `${host}\n` };
+          }
+          if (option === "@remote_agent_pane") {
+            return { status: 0, stdout: `${paneId}\n` };
+          }
+          // other options (e.g. @display_name)
+          return { status: 0, stdout: "\n" };
+        }
+        if (sub === "-V") return { status: 0, stdout: "tmux 3.4\n" };
+        return { status: 0, stdout: "" };
+      },
+    );
+  }
+
+  it("resolves host:label[:uuid] → pane when session and host match", () => {
+    arrangeSession("remote", "codex", "%42");
+    const pane = resolveAgentPaneForInstance("codex:remote:a6694dc87c1d");
+    expect(pane).toBe("%42");
+  });
+
+  it("returns undefined when no session matches the label", () => {
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd !== "tmux") return { status: 0, stdout: "" };
+      const sub = Array.isArray(args) ? args[0] : "";
+      if (sub === "-V") return { status: 0, stdout: "tmux 3.4\n" };
+      if (sub === "list-sessions") return { status: 0, stdout: "remote-other\t0\t/tmp\tcodex\t\n" };
+      if (sub === "show-options") return { status: 0, stdout: "\n" };
+      return { status: 0, stdout: "" };
+    });
+    // instance references label "remote" but only "other" exists
+    expect(resolveAgentPaneForInstance("codex:remote:abc")).toBeUndefined();
+  });
+
+  it("returns undefined when host does not match (@remote_agent_host is different)", () => {
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd !== "tmux") return { status: 0, stdout: "" };
+      const sub = Array.isArray(args) ? args[0] : "";
+      if (sub === "-V") return { status: 0, stdout: "tmux 3.4\n" };
+      if (sub === "list-sessions") return { status: 0, stdout: "remote-remote\t0\t/tmp\tclaude\t\n" };
+      if (sub === "show-options") {
+        const option = (args as string[])[args.length - 1];
+        if (option === "@remote_agent_host") return { status: 0, stdout: "claude\n" };
+        return { status: 0, stdout: "\n" };
+      }
+      return { status: 0, stdout: "" };
+    });
+    // instance host is "codex" but session has "claude"
+    expect(resolveAgentPaneForInstance("codex:remote:abc")).toBeUndefined();
+  });
+
+  it("returns undefined for a malformed instance string (no colon)", () => {
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "" });
+    expect(resolveAgentPaneForInstance("codexremote")).toBeUndefined();
+  });
+
+  it("returns undefined when tmux is not available", () => {
+    spawnSyncMock.mockReturnValue({ status: 1, stdout: "" });
+    expect(resolveAgentPaneForInstance("codex:remote:abc")).toBeUndefined();
   });
 });

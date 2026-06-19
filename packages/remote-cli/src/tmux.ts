@@ -636,6 +636,31 @@ function firstNonH2aPane(session: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Resolve the durable agent pane for a given h2a instance.
+ * Parses host:label[:uuid] → finds the matching managed tmux session
+ * (remote-<label>, @remote_agent_host === host) → returns its @remote_agent_pane.
+ * Returns undefined if no pane is known for this instance.
+ */
+export function resolveAgentPaneForInstance(
+  instance: string,
+): string | undefined {
+  const parts = instance.split(":");
+  if (parts.length < 2) return undefined;
+  const host = parts[0];
+  const label = parts[1];
+  if (!host || !label) return undefined;
+  const sessionName = localSessionName(label);
+  const sessions = listLocalSessions();
+  const match = sessions.find(
+    (s) =>
+      s.name === sessionName &&
+      readSessionOption(s.name, AGENT_HOST_OPTION) === host,
+  );
+  if (!match) return undefined;
+  return resolveAgentPane(match.name);
+}
+
 /** Agent pane used as h2a local-tmux wake target, persisted on the tmux session. */
 export function resolveAgentPane(session: string): string | undefined {
   const stored = readSessionOption(session, AGENT_PANE_OPTION);

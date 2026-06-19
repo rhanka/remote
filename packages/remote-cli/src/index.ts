@@ -64,6 +64,7 @@ import {
   localSessionIdle,
   localSessionName,
   relaunchInSession,
+  resolveAgentPaneForInstance,
   sessionAttachedCount,
   setLocalSessionDisplayName,
   startH2aWindow,
@@ -171,6 +172,7 @@ import {
   shouldLaunch,
   type ConductorLaunchRequest,
 } from "./conductor-launch.js";
+import { defaultLocalH2aRoot } from "./h2a-bridge.js";
 import { guardConvWriters } from "./conv-guard.js";
 import {
   handleClaudeHook,
@@ -4541,6 +4543,181 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.exitCode = await conductLoop(minutes, () =>
           launchPass(confirm, cooldownMs),
         );
+      },
+    );
+
+  // ---------------------------------------------------------------------------
+  // wake-request — out-of-band Codex pane wake via h2a 0.72.0 wake-request
+  // ---------------------------------------------------------------------------
+
+  const WAKE_REQUEST_IDEMPOTENCE_MS = 60_000;
+
+  /**
+   * Parse a raw envelope object as a wake-request envelope.
+   * Returns { target, reason } when the envelope matches, undefined otherwise.
+   */
+  function parseWakeRequestEnvelope(
+    env: unknown,
+  ): { target: string; reason: string } | undefined {
+    if (!env || typeof env !== "object") return undefined;
+    const root = env as Record<string, unknown>;
+    const body = root.body;
+    if (!body || typeof body !== "object") return undefined;
+    const b = body as Record<string, unknown>;
+    if (b.kind !== "message" || b.topic !== "wake-request") return undefined;
+    const req = b.request;
+    if (!req || typeof req !== "object") return undefined;
+    const r = req as Record<string, unknown>;
+    const target = r.target;
+    if (typeof target !== "string" || target.length === 0) return undefined;
+    return {
+      target,
+      reason: typeof r.reason === "string" ? r.reason : "",
+    };
+  }
+
+  /**
+   * Idempotence: read/write a per-target stamp file under the h2a root.
+   * Returns the last wake epoch ms, or undefined when no stamp exists.
+   * Best-effort: any fs error → undefined (allows the wake to proceed).
+   */
+  function readWakeStampMs(
+    localRoot: string,
+    target: string,
+  ): number | undefined {
+    try {
+      const safeName = target.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const path = join(localRoot, `wake-stamp-${safeName}.json`);
+      const raw = readFileSync(path, "utf8");
+      const parsed = JSON.parse(raw) as { wokenAt?: unknown };
+      const at = parsed.wokenAt;
+      return typeof at === "number" && Number.isFinite(at) ? at : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function writeWakeStampMs(
+    localRoot: string,
+    target: string,
+    nowMs: number,
+  ): void {
+    try {
+      const safeName = target.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const path = join(localRoot, `wake-stamp-${safeName}.json`);
+      mkdirSync(localRoot, { recursive: true });
+      writeFileSync(
+        path,
+        `${JSON.stringify({ wokenAt: nowMs, target })}\n`,
+        "utf8",
+      );
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
+   * One pass of the wake-request handler:
+   *  1. Read all h2a inbox envelopes.
+   *  2. Filter those with topic === "wake-request".
+   *  3. For each: idempotence check → resolve pane → send-keys double nudge.
+   * Returns the count of panes woken this pass.
+   */
+  const wakeRequestPass = (localRoot: string): number => {
+    const envelopes = readInboxEnvelopes(localRoot);
+    let woken = 0;
+    const now = Date.now();
+    for (const env of envelopes) {
+      const parsed = parseWakeRequestEnvelope(env);
+      if (!parsed) continue;
+      const { target, reason } = parsed;
+      // Idempotence: skip if we already woke this target within 60s.
+      const lastWake = readWakeStampMs(localRoot, target);
+      if (lastWake !== undefined && now - lastWake < WAKE_REQUEST_IDEMPOTENCE_MS) {
+        process.stderr.write(
+          `[remote] wake-request: skipping ${target} (already woken ${Math.round((now - lastWake) / 1000)}s ago)\n`,
+        );
+        continue;
+      }
+      const pane = resolveAgentPaneForInstance(target);
+      if (!pane) {
+        process.stderr.write(
+          `[remote] wake-request: no agent pane for ${target} — not launched by remote, skipping (reason: ${reason || "none"})\n`,
+        );
+        continue;
+      }
+      // Double nudge: two empty Enter presses, identical to the local-tmux wake.
+      spawnSync("tmux", ["send-keys", "-t", pane, "", "Enter"], {
+        stdio: "ignore",
+      });
+      spawnSync("tmux", ["send-keys", "-t", pane, "", "Enter"], {
+        stdio: "ignore",
+      });
+      writeWakeStampMs(localRoot, target, now);
+      woken += 1;
+      process.stderr.write(
+        `[remote] wake-request: woke ${target} → pane ${pane} (reason: ${reason || "none"})\n`,
+      );
+    }
+    return woken;
+  };
+
+  program
+    .command("wake-request")
+    .description(
+      "Handle an h2a `wake-request` envelope: read the local h2a inbox for a wake-request, " +
+        "resolve the target agent pane from launch records, and send tmux send-keys to wake it. " +
+        "No-op if no pane is known for the target (agent not launched by remote). " +
+        "Idempotent: ignores duplicate wake-requests received within 60s. " +
+        "--watch loops in the foreground.",
+    )
+    .option("--root <path>", "h2a root (default: ~/h2a-workspace/.h2a)")
+    .option("--watch", "loop forever, polling every 30s")
+    .option("--interval <seconds>", "poll interval in seconds (default: 30)", "30")
+    .action(
+      async (opts: { root?: string; watch?: boolean; interval?: string }) => {
+        if (!tmuxAvailable()) {
+          process.stderr.write("[remote] tmux is not installed locally\n");
+          process.exitCode = 1;
+          return;
+        }
+        const localRoot = opts.root ?? defaultLocalH2aRoot();
+        const intervalMs =
+          Math.max(1, Number.parseInt(opts.interval ?? "30", 10)) * 1000;
+        if (!opts.watch) {
+          const woken = wakeRequestPass(localRoot);
+          process.stderr.write(
+            `[remote] wake-request: ${woken} pane(s) woken this pass\n`,
+          );
+          return;
+        }
+        process.stderr.write(
+          `[remote] wake-request watching (every ${Math.round(intervalMs / 1000)}s) — Ctrl-C to stop\n`,
+        );
+        let stopped = false;
+        const onSigint = () => {
+          stopped = true;
+        };
+        process.on("SIGINT", onSigint);
+        try {
+          while (!stopped) {
+            const woken = wakeRequestPass(localRoot);
+            process.stderr.write(
+              `[remote] wake-request: ${woken} pane(s) woken — ${new Date().toISOString()}\n`,
+            );
+            if (stopped) break;
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, intervalMs);
+              if (stopped) {
+                clearTimeout(timer);
+                resolve();
+              }
+            });
+          }
+        } finally {
+          process.removeListener("SIGINT", onSigint);
+        }
+        process.stderr.write("[remote] wake-request watch stopped\n");
       },
     );
 
