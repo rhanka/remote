@@ -120,6 +120,9 @@ export type MigrateBackOptions = {
   readonly remoteUrl: string;
   /** Workspace id override; falls back to .remote/workspace.json. */
   readonly workspaceId?: string;
+  /** Known remote session id (from lineage incarnation). When set, skips the
+   * list-sessions round-trip and targets this session directly. */
+  readonly sessionId?: string;
   /**
    * Conflict resolution for diverged conversations: "backup" | "keep-local".
    * Defaults to "block" (leaves diverged files untouched, exits non-zero).
@@ -699,19 +702,25 @@ export async function migrateBack(
   );
 
   // Step 3: stop the remote session for this workspace.
-  // List sessions and find the one bound to our workspace.
   let stoppedSessionId: string | undefined;
   try {
     const { listRemoteSessions } = await import("./attach.js");
-    const sessions = await listRemoteSessions(remoteUrl, fetchImpl);
-    if (sessions.length > 0) {
-      // Sort by createdAt descending (ISO strings sort lexicographically).
-      const sorted = [...sessions].sort((a, b) =>
-        b.createdAt.localeCompare(a.createdAt),
-      );
-      // Prefer the session bound to our workspace; fall back to the newest.
-      const target =
-        sorted.find((s) => s.workspaceId === workspaceId) ?? sorted[0]!;
+    // When the caller knows the session id (from lineage incarnation), use it
+    // directly. Otherwise list sessions and prefer the one bound to our workspace.
+    let target: { id: string } | undefined;
+    if (options.sessionId) {
+      target = { id: options.sessionId };
+    } else {
+      const sessions = await listRemoteSessions(remoteUrl, fetchImpl);
+      if (sessions.length > 0) {
+        const sorted = [...sessions].sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt),
+        );
+        target =
+          sorted.find((s) => s.workspaceId === workspaceId) ?? sorted[0]!;
+      }
+    }
+    if (target !== undefined) {
       await stopRemoteSession(remoteUrl, target.id, "migrate-back", fetchImpl);
       stoppedSessionId = target.id;
       stderr.write(`[remote] stopped remote session ${target.id}\n`);

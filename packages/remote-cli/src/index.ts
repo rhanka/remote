@@ -3430,24 +3430,24 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             : opts.onConflict === "keep-local"
               ? ("keep-local" as const)
               : ("block" as const);
-        // --lineage: if provided, find the workspace that matches this lineage
+        // --lineage: if provided, find the workspace and session that matches
         let workspaceId = opts.workspace;
-        if (!workspaceId && opts.lineage) {
+        let knownSessionId: string | undefined;
+        if (opts.lineage) {
           const lineageId = opts.lineage as LineageId;
           const lineages = listLineages(process.cwd());
           const match = lineages.find((l) => l.lineage === lineageId);
           if (match) {
-            // Use the most recent ws from history as the workspace hint
             const lastWs = match.wsHistory[match.wsHistory.length - 1];
-            if (lastWs) {
+            if (lastWs && !workspaceId) {
               process.stderr.write(
                 `[remote] --lineage ${lineageId} → workspace history includes ${lastWs}\n`,
               );
             }
-            // Remote session id from incarnation, if known
             if (match.incarnation.remote?.sessionId) {
+              knownSessionId = match.incarnation.remote.sessionId;
               process.stderr.write(
-                `[remote] targeting session ${match.incarnation.remote.sessionId} (from lineage)\n`,
+                `[remote] targeting session ${knownSessionId} (from lineage)\n`,
               );
             }
           } else {
@@ -3459,6 +3459,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         await migrateBack({
           remoteUrl,
           ...(workspaceId ? { workspaceId } : {}),
+          ...(knownSessionId ? { sessionId: knownSessionId } : {}),
           onConflict,
         });
       },
