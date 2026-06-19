@@ -2802,9 +2802,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         } else {
           const persisted = readSyncStatus(sessionId);
           if (!persisted) {
+            // No status file yet — unknown state. Default to pending/not-safe
+            // (conservative): if even 1 byte of delta hasn't been ack'd, SAFE
+            // TO CLOSE would be a false positive. The sync loop writes the file
+            // on its first successful round-trip, so this only fires before the
+            // first ack.
             status = {
-              state: "synced",
-              safeToClose: true,
+              state: "pending",
+              safeToClose: false,
               updatedAt: new Date().toISOString(),
               conv: emptyMetrics(),
               hot: emptyMetrics(),
