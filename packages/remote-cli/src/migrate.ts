@@ -31,6 +31,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -48,10 +49,13 @@ import {
   downloadWorkspaceExport,
   lockHolderId,
   readBaseSnapshot,
+  readLineageRecord,
   readWorkspaceMarker,
   releaseWorkspaceLock,
   writeBaseSnapshot,
+  writeLineageRecord,
   writeWorkspaceMarker,
+  type LineageRecord,
   type WorkspaceMarker,
 } from "./workspace.js";
 import {
@@ -591,10 +595,13 @@ export async function migrateForward(
     }
 
     // Step 2 & 3: push workspace, protected by a lineage lease (A0c fencing).
-    // Derive a stable lineageId from the workspaceId (Phase A will add proper
-    // persistence in .remote/lineages/; for now a deterministic derivation is
-    // enough to prevent concurrent pushes to the same workspace).
-    const lineageId = `lin_${marker.workspaceId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
+    // Phase A: read or create a persistent lineageId in .remote/lineages/ so
+    // the same id is reused across forward/back cycles for this workspace.
+    let lineageRec: LineageRecord =
+      readLineageRecord(cwd, marker.workspaceId) ??
+      { lineageId: `lin_${randomUUID().replace(/-/g, "").slice(0, 24)}` };
+    writeLineageRecord(cwd, marker.workspaceId, lineageRec);
+    const lineageId = lineageRec.lineageId;
     const holder = lockHolderId();
     const incarnationId = `${holder}:${process.pid}`;
     let activeLease: import("./lineage-client.js").LineageLease | undefined;
@@ -693,6 +700,21 @@ export async function migrateForward(
   stderr.write(
     `[remote] migrated to remote session ${session.id} on ${remoteUrl} (workspace ${marker.workspaceId})\n`,
   );
+
+  // Phase A: record the active remote session so migrateBack can target it
+  // directly without a list-sessions round-trip.
+  if (!options.reconnect) {
+    // lineageRec may be undefined if the push was skipped (reconnect path) or
+    // if the lease acquisition fell back (old CP). Read fresh to avoid closure issues.
+    const rec = readLineageRecord(cwd, marker.workspaceId);
+    if (rec) {
+      writeLineageRecord(cwd, marker.workspaceId, {
+        ...rec,
+        remoteSessionId: session.id,
+      });
+    }
+  }
+
   // Step 5: hand off terminal — unless --no-attach (bulk / reconnect-yourself).
   if (options.noAttach) {
     stderr.write(
@@ -757,15 +779,23 @@ export async function migrateBack(
     stderr,
   );
 
+  // Phase A: read the lineage record so we can target the exact session that
+  // was created by migrateForward, skipping the list-sessions round-trip.
+  const lineageRec = readLineageRecord(cwd, workspaceId);
+
   // Step 3: stop the remote session for this workspace.
   let stoppedSessionId: string | undefined;
   try {
     const { listRemoteSessions } = await import("./attach.js");
-    // When the caller knows the session id (from lineage incarnation), use it
-    // directly. Otherwise list sessions and prefer the one bound to our workspace.
+    // Priority: explicit sessionId arg > lineage record > list-sessions heuristic.
     let target: { id: string } | undefined;
     if (options.sessionId) {
       target = { id: options.sessionId };
+    } else if (lineageRec?.remoteSessionId) {
+      target = { id: lineageRec.remoteSessionId };
+      stderr.write(
+        `[remote] targeting session ${target.id} from lineage record\n`,
+      );
     } else {
       const sessions = await listRemoteSessions(remoteUrl, fetchImpl);
       if (sessions.length > 0) {
@@ -780,6 +810,10 @@ export async function migrateBack(
       await stopRemoteSession(remoteUrl, target.id, "migrate-back", fetchImpl);
       stoppedSessionId = target.id;
       stderr.write(`[remote] stopped remote session ${target.id}\n`);
+      // Clear the active session from the lineage record — the migration is done.
+      if (lineageRec) {
+        writeLineageRecord(cwd, workspaceId, { lineageId: lineageRec.lineageId });
+      }
     }
   } catch (err) {
     stderr.write(

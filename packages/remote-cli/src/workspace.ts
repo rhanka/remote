@@ -6,6 +6,7 @@ import { authHeaders } from "./config.js";
 const MARKER_DIR = ".remote";
 const MARKER_FILE = "workspace.json";
 const BASE_FILE = "base.tgz";
+const LINEAGES_DIR = ".remote/lineages";
 
 export function baseSnapshotPath(cwd: string): string {
   return join(cwd, MARKER_DIR, BASE_FILE);
@@ -73,6 +74,56 @@ export function writeWorkspaceMarker(
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(marker, null, 2) + "\n", "utf8");
 }
+
+// ---------------------------------------------------------------------------
+// Lineage records — persist lineageId + active remoteSessionId across
+// forward/back cycles so migrateBack can target the exact session.
+// Stored at .remote/lineages/<sanitized-workspaceId>.json
+// ---------------------------------------------------------------------------
+
+export type LineageRecord = {
+  readonly lineageId: string;
+  readonly remoteSessionId?: string;
+};
+
+function lineageFilePath(cwd: string, workspaceId: string): string {
+  const safe = workspaceId.replace(/[^a-zA-Z0-9-]/g, "_");
+  return join(cwd, LINEAGES_DIR, `${safe}.json`);
+}
+
+export function readLineageRecord(
+  cwd: string,
+  workspaceId: string,
+): LineageRecord | undefined {
+  try {
+    const raw = readFileSync(lineageFilePath(cwd, workspaceId), "utf8");
+    const parsed = JSON.parse(raw) as Partial<LineageRecord>;
+    if (parsed && typeof parsed.lineageId === "string") {
+      return {
+        lineageId: parsed.lineageId,
+        ...(typeof parsed.remoteSessionId === "string"
+          ? { remoteSessionId: parsed.remoteSessionId }
+          : {}),
+      };
+    }
+    return undefined;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+}
+
+export function writeLineageRecord(
+  cwd: string,
+  workspaceId: string,
+  record: LineageRecord,
+): void {
+  const path = lineageFilePath(cwd, workspaceId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(record, null, 2) + "\n", "utf8");
+}
+
+// ---------------------------------------------------------------------------
 
 type WorkspaceDescriptor = {
   id: string;

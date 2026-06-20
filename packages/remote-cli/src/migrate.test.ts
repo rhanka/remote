@@ -34,6 +34,8 @@ const mockReleaseWorkspaceLock = vi.fn();
 const mockReadBaseSnapshot = vi.fn();
 const mockWriteBaseSnapshot = vi.fn();
 const mockDownloadWorkspaceExport = vi.fn();
+const mockReadLineageRecord = vi.fn();
+const mockWriteLineageRecord = vi.fn();
 
 vi.mock("./workspace.js", () => ({
   createWorkspace: mockCreateWorkspace,
@@ -44,6 +46,8 @@ vi.mock("./workspace.js", () => ({
   readBaseSnapshot: mockReadBaseSnapshot,
   writeBaseSnapshot: mockWriteBaseSnapshot,
   downloadWorkspaceExport: mockDownloadWorkspaceExport,
+  readLineageRecord: mockReadLineageRecord,
+  writeLineageRecord: mockWriteLineageRecord,
   lockHolderId: () => "test-user@test-host",
 }));
 
@@ -149,6 +153,10 @@ beforeEach(() => {
     expiresAt: new Date(Date.now() + 300_000).toISOString(),
   });
   mockReleaseLineageLease.mockResolvedValue(undefined);
+
+  // Phase A: lineage record defaults (no existing record → new id generated).
+  mockReadLineageRecord.mockReturnValue(undefined);
+  mockWriteLineageRecord.mockReturnValue(undefined);
 
   // push shell session
   mockCreateRemoteSession.mockImplementation(
