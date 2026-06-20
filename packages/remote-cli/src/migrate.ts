@@ -60,6 +60,11 @@ import {
 } from "./workspace-sync.js";
 import { mergeWorkspaceArchive } from "./workspace-merge.js";
 import { restoreSessionsToLocal, type OnConflict } from "./session-restore.js";
+import {
+  acquireLineageLease,
+  leaseHeaders,
+  releaseLineageLease,
+} from "./lineage-client.js";
 
 import { CLI_PROFILES } from "@sentropic/remote-protocol";
 
@@ -350,6 +355,7 @@ async function pushWorkspace(
   workspaceId: string,
   fetchImpl: typeof fetch,
   stderr: NodeJS.WriteStream,
+  leaseHdrs?: Record<string, string>,
 ): Promise<Buffer> {
   await acquireWorkspaceLock(
     remoteUrl,
@@ -375,7 +381,7 @@ async function pushWorkspace(
       },
       fetchImpl,
     );
-    await uploadWorkspaceArchive(remoteUrl, session.id, archive, fetchImpl);
+    await uploadWorkspaceArchive(remoteUrl, session.id, archive, fetchImpl, leaseHdrs);
     const attached = await attach({
       baseUrl: remoteUrl,
       sessionId: session.id,
@@ -583,8 +589,58 @@ export async function migrateForward(
     if (resume !== undefined) {
       captureLiveConversation(cwd, profile, home, stderr);
     }
-    // Step 2 & 3: push workspace.
-    await pushWorkspace(cwd, remoteUrl, marker.workspaceId, fetchImpl, stderr);
+
+    // Step 2 & 3: push workspace, protected by a lineage lease (A0c fencing).
+    // Derive a stable lineageId from the workspaceId (Phase A will add proper
+    // persistence in .remote/lineages/; for now a deterministic derivation is
+    // enough to prevent concurrent pushes to the same workspace).
+    const lineageId = `lin_${marker.workspaceId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
+    const holder = lockHolderId();
+    const incarnationId = `${holder}:${process.pid}`;
+    let activeLease: import("./lineage-client.js").LineageLease | undefined;
+    try {
+      const result = await acquireLineageLease(
+        remoteUrl,
+        { lineageId, holder, incarnationId, location: "local", ttlMs: 300_000 },
+        fetchImpl,
+      );
+      if ("error" in result) {
+        throw new Error(
+          `[remote] workspace is already being migrated (concurrent push detected).\n` +
+          `  Current holder: ${result.current.holder}\n` +
+          `  Wait for the other migration to complete, or release the lease manually.`,
+        );
+      }
+      activeLease = result;
+    } catch (err) {
+      const msg = (err as Error).message;
+      // Graceful fallback: if the CP doesn't have the lineage-leases route yet
+      // (404) or is unreachable, skip enforcement (backward compat).
+      if (msg.includes("acquireLineageLease: 404") || msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND")) {
+        stderr.write(`[remote] lineage lease skipped (CP missing route or unreachable)\n`);
+      } else {
+        throw err;
+      }
+    }
+
+    try {
+      await pushWorkspace(
+        cwd, remoteUrl, marker.workspaceId, fetchImpl, stderr,
+        activeLease ? leaseHeaders(activeLease) : undefined,
+      );
+    } finally {
+      if (activeLease) {
+        // Release the lease now that the push is complete. The remote session
+        // will acquire its own lease when it starts writing (Phase A wires this
+        // into the session-agent). Idempotent — errors are swallowed.
+        await releaseLineageLease(
+          remoteUrl,
+          activeLease.lineageId,
+          { holder, expectedEpoch: activeLease.epoch },
+          fetchImpl,
+        ).catch(() => undefined);
+      }
+    }
   }
 
   // Step 4: create remote session. Bundle the profile's local credentials so

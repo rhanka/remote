@@ -66,6 +66,18 @@ vi.mock("./auth-bundle.js", () => ({
   assertRequiredAuthBundle: vi.fn(),
 }));
 
+const mockAcquireLineageLease = vi.fn();
+const mockReleaseLineageLease = vi.fn();
+
+vi.mock("./lineage-client.js", () => ({
+  leaseHeaders: (lease?: { lineageId: string; epoch: number }) =>
+    lease
+      ? { "X-Lineage-Id": lease.lineageId, "X-Lineage-Epoch": String(lease.epoch) }
+      : {},
+  acquireLineageLease: mockAcquireLineageLease,
+  releaseLineageLease: mockReleaseLineageLease,
+}));
+
 // Import the module under test after all mocks are wired.
 const { migrateForward, migrateBack } = await import("./migrate.js");
 
@@ -126,6 +138,17 @@ beforeEach(() => {
   mockWriteWorkspaceMarker.mockReturnValue(undefined);
   // Default: no local creds (forward path omits credentials, matching prior behavior).
   mockCollectProfileAuth.mockResolvedValue({});
+
+  // A0c: lineage lease happy-path defaults (lease acquired successfully).
+  mockAcquireLineageLease.mockResolvedValue({
+    lineageId: "lin_wsmigrate-test",
+    epoch: 0,
+    holder: "test-user@test-host",
+    incarnationId: "test-user@test-host:1",
+    location: "local" as const,
+    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+  });
+  mockReleaseLineageLease.mockResolvedValue(undefined);
 
   // push shell session
   mockCreateRemoteSession.mockImplementation(

@@ -220,12 +220,17 @@ export async function uploadWorkspaceArchive(
   sessionId: string,
   archive: Buffer,
   fetchImpl: typeof fetch = fetch,
+  extraHeaders?: Record<string, string>,
 ): Promise<void> {
   const response = await fetchImpl(
     `${baseUrl.replace(/\/$/, "")}/sessions/${sessionId}/workspace`,
     {
       method: "POST",
-      headers: { "content-type": "application/gzip", ...authHeaders() },
+      headers: {
+        "content-type": "application/gzip",
+        ...authHeaders(),
+        ...(extraHeaders ?? {}),
+      },
       body: archive as unknown as BodyInit,
     },
   );
