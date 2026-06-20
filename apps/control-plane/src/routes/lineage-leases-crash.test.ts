@@ -10,8 +10,7 @@
  * 10. Chemin sync refuse avec token perime (requireLeaseToken middleware) -> 409
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { Hono } from "hono";
@@ -57,11 +56,20 @@ async function waitForHttpExpiry(
 // Test root setup
 // ---------------------------------------------------------------------------
 
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  "..",
+  ".test-scratch",
+  "lineage-leases-crash",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 let tmpDir: string;
 let app: ReturnType<typeof makeRouter>;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "cp-crash-test-"));
+  tmpDir = mkdtempSync(join(SCRATCH_ROOT, "test-"));
   app = makeRouter(tmpDir);
 });
 

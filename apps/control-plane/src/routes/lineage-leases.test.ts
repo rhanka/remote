@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,8 +6,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAjv } from "../validation.js";
 import { createLineageLeasesRouter } from "./lineage-leases.js";
 
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  "..",
+  ".test-scratch",
+  "lineage-leases-http",
+);
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 function makeTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), "cp-lineage-leases-test-"));
+  return mkdtempSync(join(SCRATCH_ROOT, "test-"));
 }
 
 function makeRouter(dataDir: string) {
