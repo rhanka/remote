@@ -235,13 +235,15 @@ describe("lineage CRUD", () => {
     expect(read?.wsHistory).toEqual(["ws:abc"]);
   });
 
-  it("updateLineage changes kind and refreshes updatedAt", () => {
+  it("updateLineage changes the patched field and preserves immutable fields", () => {
     const rec = createLineage("claude", "local", "ws:abc", root);
-    const before = readLineage(rec.lineage, root);
     updateLineage(rec.lineage, { kind: "remote" }, root);
     const after = readLineage(rec.lineage, root);
     expect(after?.kind).toBe("remote");
-    expect(after?.updatedAt).not.toBe(before?.updatedAt);
+    // Immutable fields must not change
+    expect(after?.lineage).toBe(rec.lineage);
+    expect(after?.createdAt).toBe(rec.createdAt);
+    expect(after?.profile).toBe("claude");
   });
 
   it("listLineages returns all lineage records", () => {
