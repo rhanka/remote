@@ -1,6 +1,8 @@
 import type { SessionDescriptor } from "@sentropic/remote-protocol";
 
 import type {
+  DrainSessionOptions,
+  DrainSessionResult,
   ProvisionerEmit,
   ProvisionOptions,
   SessionProvisioner,
@@ -302,6 +304,126 @@ export class K8sSessionProvisioner implements SessionProvisioner {
         },
       })
       .catch(() => {});
+  }
+
+  /**
+   * Proactively drain a session pod off its current node (node-pressure
+   * evacuation). Reads the pod's nodeName, optionally checks the node's
+   * MemoryPressure/DiskPressure conditions, then deletes the pod and recreates
+   * it with a nodeAffinity that excludes the current node so k8s schedules it
+   * elsewhere.
+   *
+   * `force: true` skips the node-pressure check.
+   */
+  async drainSession(
+    descriptor: SessionDescriptor,
+    emit: ProvisionerEmit,
+    options: DrainSessionOptions = {},
+  ): Promise<DrainSessionResult> {
+    const names = resourceNames(descriptor);
+    const ns = options.namespace ?? this.options.namespace;
+
+    // 1. Read the current pod to find which node it is on.
+    type PodStatus = { spec?: { nodeName?: string } };
+    const podRaw = await this.client.read({
+      apiVersion: "v1",
+      kind: "Pod",
+      metadata: { name: names.pod, namespace: ns },
+    });
+    const pod = podRaw as (PodStatus & typeof podRaw) | undefined;
+
+    if (!pod) {
+      return { migrated: false, reason: "pod_not_found" };
+    }
+
+    const nodeName = (pod as PodStatus).spec?.nodeName;
+    if (!nodeName) {
+      return { migrated: false, reason: "pod_not_scheduled" };
+    }
+
+    // 2. Unless forced, check the node for pressure conditions.
+    if (!options.force) {
+      type NodeStatus = {
+        status?: {
+          conditions?: ReadonlyArray<{ type: string; status: string }>;
+        };
+      };
+      const nodeRaw = await this.client.read({
+        apiVersion: "v1",
+        kind: "Node",
+        // Nodes are cluster-scoped; pass an empty-string namespace.
+        metadata: { name: nodeName, namespace: "" },
+      });
+      const nodeConditions =
+        (nodeRaw as NodeStatus | undefined)?.status?.conditions ?? [];
+      const underPressure = nodeConditions.some(
+        (c) =>
+          (c.type === "MemoryPressure" || c.type === "DiskPressure") &&
+          c.status === "True",
+      );
+      if (!underPressure) {
+        return { migrated: false, reason: "node_not_under_pressure" };
+      }
+    }
+
+    // 3. Delete the existing pod.
+    await this.client
+      .delete({
+        apiVersion: "v1",
+        kind: "Pod",
+        metadata: { name: names.pod, namespace: ns },
+      })
+      .catch(() => {});
+
+    // 4. Rebuild the pod spec with a nodeAffinity that excludes the current node.
+    const opts = { ...this.options, namespace: ns };
+    const credentials = this.credentials.get(descriptor.id) ?? {};
+    const authPaths = Object.keys(credentials);
+    const baseSpec = buildSessionPodSpec(descriptor, opts, authPaths);
+
+    // Merge our node-exclusion affinity with the base spec's existing affinity.
+    const exclusionAffinity = {
+      nodeAffinity: {
+        requiredDuringSchedulingIgnoredDuringExecution: {
+          nodeSelectorTerms: [
+            {
+              matchExpressions: [
+                {
+                  key: "kubernetes.io/hostname",
+                  operator: "NotIn" as const,
+                  values: [nodeName],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const drainSpec = {
+      ...baseSpec,
+      spec: {
+        ...baseSpec.spec,
+        affinity: {
+          ...(baseSpec.spec.affinity ?? {}),
+          ...exclusionAffinity,
+        },
+      },
+    };
+
+    emit(descriptor.id, "session.lifecycle.changed", {
+      previousState: this.phases.get(descriptor.id) ?? "running",
+      nextState: "starting",
+    });
+
+    await this.createAwaitingDeletion(drainSpec);
+
+    this.phases.set(descriptor.id, "starting");
+    emit(descriptor.id, "session.lifecycle.changed", {
+      previousState: "starting",
+      nextState: "ready",
+    });
+
+    return { migrated: true, fromNode: nodeName };
   }
 
   /**

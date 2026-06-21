@@ -2,6 +2,7 @@ import {
   InMemoryProvisioner,
   type ProvisionerEmit,
   type SessionProvisioner,
+  type DrainSessionResult,
 } from "@sentropic/remote-k8s-orchestrator";
 import {
   REMOTE_PROTOCOL_VERSION,
@@ -707,6 +708,53 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
       return c.json(response);
     },
   );
+
+  // POST /sessions/:id/drain-node
+  // Proactively evacuate the session pod off a node under pressure.
+  // ?force=true skips the node-pressure check (unconditional drain).
+  router.post("/:id/drain-node", async (c) => {
+    const id = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    const userId = c.var.auth!.userId;
+    const session = store.get(id, userId);
+    if (!session) return notFound(c);
+
+    if (!("drainSession" in provisioner) || typeof (provisioner as { drainSession?: unknown }).drainSession !== "function") {
+      return c.json(
+        {
+          code: "drain.not_supported",
+          message: "Active provisioner does not support drainSession",
+          retryable: false,
+        },
+        501,
+      );
+    }
+
+    const force = c.req.query("force") === "true";
+    const namespace = sessionTenant.get(id)?.namespace;
+    // Narrow through the optional interface method (guarded above).
+    const drain = (provisioner as Required<Pick<typeof provisioner, "drainSession">>).drainSession;
+
+    let result: DrainSessionResult;
+    try {
+      result = await drain.call(provisioner, session, emit, {
+        force,
+        ...(namespace !== undefined ? { namespace } : {}),
+      });
+    } catch (error: unknown) {
+      console.error(`[control-plane] drain-node failed for ${id}:`, error);
+      return c.json(
+        {
+          code: "drain.failed",
+          message: String(error),
+          retryable: true,
+        },
+        500,
+      );
+    }
+
+    return c.json(result);
+  });
 
   router.post(
     "/:id/stop",

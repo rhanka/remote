@@ -396,6 +396,110 @@ describe("K8sSessionProvisioner", () => {
   });
 });
 
+describe("drainSession", () => {
+  const sess: SessionDescriptor = {
+    id: "sess-drain1",
+    profile: "claude",
+    target: "k3s",
+    workspacePath: "/workspace",
+    createdAt: "2026-06-21T00:00:00.000Z",
+    createdBy: { id: "control-plane", kind: "control-plane", displayName: "Control Plane" },
+  };
+
+  it("drains forced: deletes the pod and recreates it with a nodeAffinity excluding the current node", async () => {
+    const ops: Array<{ op: string; kind: string; name: string }> = [];
+    let createdPodSpec: unknown = null;
+
+    const client: K8sClient = {
+      async create<T extends KubernetesObject>(spec: T): Promise<T> {
+        ops.push({ op: "create", kind: spec.kind ?? "?", name: spec.metadata?.name ?? "?" });
+        if (spec.kind === "Pod") createdPodSpec = spec;
+        return spec;
+      },
+      async delete(ref: K8sResourceRef): Promise<void> {
+        ops.push({ op: "delete", kind: ref.kind, name: ref.metadata.name });
+      },
+      async read<T extends KubernetesObject>(ref: K8sResourceRef): Promise<T | undefined> {
+        if (ref.kind === "Pod") {
+          // Return a mock pod on node "node-1".
+          return { spec: { nodeName: "node-1" } } as unknown as T;
+        }
+        return undefined;
+      },
+    };
+
+    const provisioner = new K8sSessionProvisioner(client, { namespace: "demo-ns" });
+    // Pre-provision so the session is tracked.
+    await provisioner.provision(sess, () => {});
+    ops.length = 0;
+
+    const result = await provisioner.drainSession(sess, () => {}, { force: true });
+
+    expect(result).toEqual({ migrated: true, fromNode: "node-1" });
+    // Must delete then recreate.
+    expect(ops.map((o) => `${o.op}:${o.kind}`)).toEqual([
+      "delete:Pod",
+      "create:Pod",
+    ]);
+    // The recreated pod spec must carry a nodeAffinity excluding node-1.
+    const podSpec = createdPodSpec as {
+      spec: {
+        affinity?: {
+          nodeAffinity?: {
+            requiredDuringSchedulingIgnoredDuringExecution?: {
+              nodeSelectorTerms: Array<{
+                matchExpressions: Array<{ key: string; operator: string; values: string[] }>;
+              }>;
+            };
+          };
+        };
+      };
+    };
+    const nodeSelectorTerms =
+      podSpec.spec.affinity?.nodeAffinity
+        ?.requiredDuringSchedulingIgnoredDuringExecution?.nodeSelectorTerms ?? [];
+    expect(nodeSelectorTerms).toHaveLength(1);
+    expect(nodeSelectorTerms[0]!.matchExpressions[0]).toMatchObject({
+      key: "kubernetes.io/hostname",
+      operator: "NotIn",
+      values: ["node-1"],
+    });
+  });
+
+  it("returns migrated=false when the node is not under pressure (no force)", async () => {
+    const client: K8sClient = {
+      async create<T extends KubernetesObject>(spec: T): Promise<T> {
+        return spec;
+      },
+      async delete(): Promise<void> {},
+      async read<T extends KubernetesObject>(ref: K8sResourceRef): Promise<T | undefined> {
+        if (ref.kind === "Pod") {
+          return { spec: { nodeName: "node-healthy" } } as unknown as T;
+        }
+        if (ref.kind === "Node") {
+          // Node has no pressure conditions.
+          return {
+            status: {
+              conditions: [
+                { type: "MemoryPressure", status: "False" },
+                { type: "DiskPressure", status: "False" },
+                { type: "Ready", status: "True" },
+              ],
+            },
+          } as unknown as T;
+        }
+        return undefined;
+      },
+    };
+
+    const provisioner = new K8sSessionProvisioner(client, { namespace: "demo-ns" });
+    await provisioner.provision(sess, () => {});
+
+    const result = await provisioner.drainSession(sess, () => {});
+    expect(result).toEqual({ migrated: false, reason: "node_not_under_pressure" });
+  });
+});
+
 describe("gcWorkspaces (janitor lifecycle, no cluster)", () => {
   type JanitorClient = K8sClient & { created: KubernetesObject[]; deleted: string[] };
 

@@ -69,6 +69,17 @@ export type K8sPodSpec = {
           readonly podAffinityTerm: K8sPodAffinityTerm;
         }>;
       };
+      readonly nodeAffinity?: {
+        readonly requiredDuringSchedulingIgnoredDuringExecution?: {
+          readonly nodeSelectorTerms: ReadonlyArray<{
+            readonly matchExpressions?: ReadonlyArray<{
+              readonly key: string;
+              readonly operator: 'In' | 'NotIn' | 'Exists' | 'DoesNotExist' | 'Gt' | 'Lt';
+              readonly values?: ReadonlyArray<string>;
+            }>;
+          }>;
+        };
+      };
     };
     readonly topologySpreadConstraints?: ReadonlyArray<{
       readonly maxSkew: number;

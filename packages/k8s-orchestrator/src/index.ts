@@ -82,7 +82,30 @@ export interface SessionProvisioner {
   /** Explicit GC of stale workspace subdirectories on the shared RWX volume
    * via an ephemeral janitor pod (never a cascade — see K8sSessionProvisioner). */
   gcWorkspaces?(opts: WorkspaceGcOptions): Promise<WorkspaceGcReport>;
+  /**
+   * Proactively drain a session pod off its current node (node-pressure
+   * evacuation). Reads the pod, checks node conditions (MemoryPressure /
+   * DiskPressure), then deletes + recreates the pod with a nodeAffinity that
+   * excludes the current node so k8s schedules it elsewhere.
+   *
+   * `force: true` skips the node-pressure check (drain unconditionally).
+   */
+  drainSession?(
+    descriptor: SessionDescriptor,
+    emit: ProvisionerEmit,
+    options?: DrainSessionOptions,
+  ): Promise<DrainSessionResult>;
 }
+
+export type DrainSessionOptions = {
+  /** When true, skip node-pressure check and drain regardless. */
+  readonly force?: boolean;
+  readonly namespace?: string;
+};
+
+export type DrainSessionResult =
+  | { readonly migrated: true; readonly fromNode: string }
+  | { readonly migrated: false; readonly reason: string };
 
 const LIFECYCLE_TRANSITIONS: ReadonlyArray<{ from: string; to: string }> = [
   { from: "requested", to: "provisioning" },
