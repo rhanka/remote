@@ -5434,6 +5434,40 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         );
         continue;
       }
+      // Guard (h2a 0.74.0 parity): defer send-keys if a human was active in the
+      // pane's tmux session within the last 4s (client_activity, agnostic to TUI).
+      // Fail-open: any probe failure (no clients, detached, error) proceeds normally.
+      // The envelope is NOT marked .processed on defer — the watcher retries next tick.
+      {
+        const displayRes = spawnSync(
+          "tmux",
+          ["display-message", "-p", "-t", pane, "#{session_name}"],
+          { encoding: "utf8" },
+        );
+        if (displayRes.status === 0 && displayRes.stdout?.trim()) {
+          const sessionName = displayRes.stdout.trim();
+          const clientsRes = spawnSync(
+            "tmux",
+            ["list-clients", `-t=${sessionName}`, "-F", "#{client_activity}"],
+            { encoding: "utf8" },
+          );
+          if (clientsRes.status === 0 && clientsRes.stdout?.trim()) {
+            const maxActivity = Math.max(
+              ...clientsRes.stdout
+                .trim()
+                .split("\n")
+                .map((s) => Number.parseInt(s.trim(), 10) * 1000)
+                .filter((n) => !Number.isNaN(n)),
+            );
+            if (maxActivity > now - 4000) {
+              process.stderr.write(
+                `[remote] wake-request: deferring ${target} — human active ${Math.round((now - maxActivity) / 1000)}s ago, retrying next pass\n`,
+              );
+              continue;
+            }
+          }
+        }
+      }
       // F1: send a real instruction line via -l (literal, no shell expansion) then
       // Enter — Codex ignores empty send-keys submits; a real instruction forces a
       // read of the h2a inbox so the agent picks up the wake.

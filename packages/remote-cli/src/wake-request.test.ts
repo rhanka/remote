@@ -154,6 +154,8 @@ function writeEnvelope(root: string, name: string, json: string): void {
  *  - `tmux show-options @remote_agent_host` → host
  *  - `tmux show-options @remote_agent_pane` → paneId
  *  - `tmux show-options` for other options → empty
+ *  - `tmux display-message` → session name `remote-<label>`
+ *  - `tmux list-clients` → empty (no attached clients → fail-open, proceed)
  *  - `tmux send-keys` → success
  *  - all other calls → status 0 / empty
  */
@@ -161,6 +163,7 @@ function arrangeSession(
   label: string,
   host: string,
   paneId: string,
+  clientActivityEpochSecs?: number,
 ): void {
   spawnSyncMock.mockImplementation((cmd: string, args: unknown[]) => {
     if (cmd !== "tmux") return { status: 0, stdout: "" };
@@ -178,6 +181,13 @@ function arrangeSession(
       if (opt === "@remote_agent_host") return { status: 0, stdout: `${host}\n` };
       if (opt === "@remote_agent_pane") return { status: 0, stdout: `${paneId}\n` };
       return { status: 0, stdout: "\n" };
+    }
+    if (sub === "display-message") return { status: 0, stdout: `remote-${label}\n` };
+    if (sub === "list-clients") {
+      if (clientActivityEpochSecs !== undefined) {
+        return { status: 0, stdout: `${clientActivityEpochSecs}\n` };
+      }
+      return { status: 0, stdout: "" }; // no clients → fail-open
     }
     if (sub === "send-keys") return { status: 0, stdout: "" };
     return { status: 0, stdout: "" };
@@ -284,6 +294,35 @@ describe("remote wake-request", () => {
 
     const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
     expect(out).toContain("no agent pane");
+  });
+
+  it("defers send-keys when a human client was active within 4s (does not mark .processed)", async () => {
+    const target = "codex:remote:a6694dc87c1d";
+    writeEnvelope(root, "wake-env-defer", makeWakeEnvelope(target));
+    // client_activity 2 seconds ago → within the 4s defer window.
+    const recentEpochSecs = Math.floor((Date.now() - 2000) / 1000);
+    arrangeSession("remote", "codex", "%42", recentEpochSecs);
+
+    const exitCode = await main(["node", "remote", "wake-request", "--root", root]);
+
+    expect(exitCode).toBe(0);
+
+    // No send-keys must have been called.
+    const sendKeysCalls = spawnSyncMock.mock.calls.filter(
+      (c) => c[0] === "tmux" && Array.isArray(c[1]) && c[1][0] === "send-keys",
+    );
+    expect(sendKeysCalls.length).toBe(0);
+
+    // Envelope must NOT be marked .processed — watcher retries next tick.
+    const inboxDir = join(root, "inbox", "remote__cli");
+    const envelopes = readdirSync(inboxDir).filter((f) => f.endsWith(".json") && !f.endsWith(".processed"));
+    expect(envelopes.length).toBe(1);
+    const processedFiles = readdirSync(inboxDir).filter((f) => f.endsWith(".processed"));
+    expect(processedFiles.length).toBe(0);
+
+    const out = stderrWrite.mock.calls.map((c) => String(c[0])).join("");
+    expect(out).toContain("deferring");
+    expect(out).toContain(target);
   });
 
   it("skips a second wake-request for the same target: .processed stamp prevents re-fire", async () => {
