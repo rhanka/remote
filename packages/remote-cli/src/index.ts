@@ -265,6 +265,14 @@ import {
 } from "./lineage-lease.js";
 import { checkReadiness } from "./readiness.js";
 import { createInterface } from "node:readline";
+import {
+  enrollAccount,
+  listAccounts,
+  removeAccount,
+  selectAccount,
+  loadCandidates,
+  type AccountProvider,
+} from "./account-pool.js";
 
 import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
 
@@ -6516,6 +6524,123 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         );
       },
     );
+
+  // ---------------------------------------------------------------------------
+  // account — WP16 Layer-C: local LLM account pool (enroll / ls / rm / select)
+  // ---------------------------------------------------------------------------
+
+  const accountCommand = program
+    .command("account")
+    .description("Manage the local LLM account pool (WP16)");
+
+  accountCommand
+    .command("enroll")
+    .description(
+      "Register an LLM account. Pass the access token via the REMOTE_ACCOUNT_TOKEN " +
+        "env var (never as a flag — that leaks to shell history). " +
+        "Descriptor written to ~/.sentropic/accounts.json (0600); " +
+        "token written to ~/.sentropic/accounts-tokens.json (0600).",
+    )
+    .requiredOption(
+      "--provider <provider>",
+      "LLM provider: claude-code | codex",
+    )
+    .requiredOption("--label <label>", "Human-readable account label")
+    .option(
+      "--id <id>",
+      "Unique account id (default: <provider>-<epoch>)",
+    )
+    .action(
+      (opts: { provider: string; label: string; id?: string }) => {
+        const provider = opts.provider as AccountProvider;
+        if (provider !== "claude-code" && provider !== "codex") {
+          process.stderr.write(
+            `[remote] account enroll: unknown provider "${opts.provider}" (known: claude-code, codex)\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const accessToken = process.env.REMOTE_ACCOUNT_TOKEN ?? "";
+        if (!accessToken.trim()) {
+          process.stderr.write(
+            "[remote] account enroll: REMOTE_ACCOUNT_TOKEN env var is not set or empty\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const result = enrollAccount({
+          provider,
+          label: opts.label,
+          accessToken,
+          ...(opts.id !== undefined ? { id: opts.id } : {}),
+        });
+        if (!result.ok) {
+          process.stderr.write(`[remote] account enroll: ${result.error}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        process.stderr.write(
+          `[remote] account enrolled: ${result.descriptor.id} (${result.descriptor.provider}) "${result.descriptor.label}"\n`,
+        );
+      },
+    );
+
+  accountCommand
+    .command("ls")
+    .description(
+      "List enrolled LLM accounts (descriptors only — no tokens).",
+    )
+    .option("--json", "Output as JSON array")
+    .action((opts: { json?: boolean }) => {
+      const accounts = listAccounts();
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(accounts, null, 2) + "\n");
+        return;
+      }
+      if (accounts.length === 0) {
+        process.stderr.write("[remote] no accounts enrolled\n");
+        return;
+      }
+      for (const a of accounts) {
+        process.stdout.write(
+          `${a.id}\t${a.provider}\t${a.label}\t${a.enrolledAt}\n`,
+        );
+      }
+    });
+
+  accountCommand
+    .command("rm <id>")
+    .description("Remove an enrolled account (descriptor + token).")
+    .action((id: string) => {
+      const result = removeAccount(id);
+      if (!result.ok) {
+        process.stderr.write(`[remote] account rm: ${result.error}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stderr.write(`[remote] account removed: ${result.id}\n`);
+    });
+
+  accountCommand
+    .command("select")
+    .description(
+      "Dry-run: show which account selectAccount() would pick for a new session " +
+        "(round-robin, no I/O, stub planner).",
+    )
+    .option("--provider <provider>", "Filter by provider")
+    .option("--last-used <id>", "Pretend this account was used last")
+    .action((opts: { provider?: string; lastUsed?: string }) => {
+      const provider = opts.provider as AccountProvider | undefined;
+      const candidates = loadCandidates(provider).map(({ accessToken: _t, ...d }) => d);
+      const pick = selectAccount(candidates, opts.lastUsed);
+      if (!pick) {
+        process.stderr.write("[remote] account select: no candidates available\n");
+        return;
+      }
+      process.stdout.write(
+        JSON.stringify({ selected: pick, totalCandidates: candidates.length }, null, 2) + "\n",
+      );
+    });
 
   // ---------------------------------------------------------------------------
   // lineage — local incarnation lifecycle (Phase A0c)
