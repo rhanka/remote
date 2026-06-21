@@ -251,7 +251,7 @@ export const JANITOR_TRASH_DIR = ".trash";
 export const BROWSER_SIDECAR_CONTAINER = "browser-headful";
 /** Default sidecar image (Xvfb + Chromium + x11vnc + websockify + noVNC). Pinned. */
 export const BROWSER_SIDECAR_IMAGE =
-  "ghcr.io/rhanka/sentropic-remote-browser:v0.5.6";
+  "ghcr.io/rhanka/sentropic-remote-browser:v0.5.16";
 /**
  * Pod-local port the sidecar's websockify/noVNC listens on. `remote forward
  * <id> 6080` exposes it to the user. Fixed (matches the bridge NOVNC_POD_PORT

@@ -4,10 +4,11 @@ CLUSTER ?= sentropic-remote
 NAMESPACE ?= sentropic-remote
 CONTROL_PLANE_IMAGE ?= ghcr.io/rhanka/sentropic-remote-control-plane:v0.5.16
 SESSION_AGENT_IMAGE ?= ghcr.io/rhanka/sentropic-remote-session-agent:v0.5.16
+BROWSER_IMAGE ?= ghcr.io/rhanka/sentropic-remote-browser:v0.5.16
 PORT ?= 8080
 
 .PHONY: help install build typecheck test verify format format-write \
-	images images-control-plane images-session-agent \
+	images images-control-plane images-session-agent images-browser \
 	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
 	demo demo-down \
 	scw-deploy scw-undeploy scw-port-forward scw-prepull \
@@ -25,7 +26,8 @@ help:
 	@echo "  cli-build            build @sentropic/remote-cli"
 	@echo "  cli-link             install 'remote' into \$$PATH via npm link"
 	@echo "  cli-unlink           remove the 'remote' link"
-	@echo "  images               build both docker images"
+	@echo "  images               build all 3 docker images (control-plane + session-agent + browser)"
+	@echo "  images-browser       build only the headful-browser sidecar image (WP7 noVNC)"
 	@echo "  k3d-up               create the local k3d cluster ($(CLUSTER))"
 	@echo "  k3d-load             import images into the k3d cluster"
 	@echo "  deploy               apply deploy/k3s manifests"
@@ -61,13 +63,16 @@ format:
 format-write:
 	corepack npm run format:write
 
-images: images-control-plane images-session-agent
+images: images-control-plane images-session-agent images-browser
 
 images-control-plane:
 	docker build -t $(CONTROL_PLANE_IMAGE) -f apps/control-plane/Dockerfile .
 
 images-session-agent:
 	docker build -t $(SESSION_AGENT_IMAGE) -f packages/session-agent/Dockerfile .
+
+images-browser:
+	docker build -t $(BROWSER_IMAGE) -f packages/browser-bridge/docker/Dockerfile .
 
 k3d-up:
 	k3d cluster list | grep -q "^$(CLUSTER)\b" || k3d cluster create $(CLUSTER) --wait
@@ -76,7 +81,7 @@ k3d-down:
 	k3d cluster delete $(CLUSTER)
 
 k3d-load: images
-	k3d image import $(CONTROL_PLANE_IMAGE) $(SESSION_AGENT_IMAGE) -c $(CLUSTER)
+	k3d image import $(CONTROL_PLANE_IMAGE) $(SESSION_AGENT_IMAGE) $(BROWSER_IMAGE) -c $(CLUSTER)
 
 deploy:
 	kubectl apply -f deploy/k3s/
