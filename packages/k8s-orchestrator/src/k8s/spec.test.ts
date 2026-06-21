@@ -246,6 +246,58 @@ describe("k8s spec builders", () => {
     });
   });
 
+  it("includes topologySpreadConstraints to spread sessions evenly across nodes", () => {
+    const pod = buildSessionPodSpec(baseDescriptor);
+    const tsc = pod.spec.topologySpreadConstraints;
+    expect(tsc).toBeDefined();
+    expect(tsc).toHaveLength(1);
+    const constraint = tsc![0]!;
+    expect(constraint.maxSkew).toBe(1);
+    expect(constraint.topologyKey).toBe("kubernetes.io/hostname");
+    expect(constraint.whenUnsatisfiable).toBe("ScheduleAnyway");
+    expect(constraint.labelSelector.matchLabels).toEqual({
+      "app.kubernetes.io/name": "sentropic-remote",
+      "app.kubernetes.io/component": "session-agent",
+    });
+  });
+
+  it("with strictLimits=true, resourceRequests == resourceLimits (Guaranteed QoS)", () => {
+    const pod = buildSessionPodSpec(
+      baseDescriptor,
+      { ...DEFAULT_BUILDER_OPTIONS, strictLimits: true },
+    );
+    const resources = pod.spec.containers[0]!.resources!;
+    // All requested resources must equal their limits (Guaranteed QoS).
+    expect(resources.requests?.memory).toBe(resources.limits?.memory);
+    expect(resources.requests?.["ephemeral-storage"]).toBe(
+      resources.limits?.["ephemeral-storage"],
+    );
+    // memory request must now equal the limit (SESSION_AGENT_MEM_LIMIT), NOT the
+    // low-water-mark request (SESSION_AGENT_MEM_REQUEST).
+    expect(resources.requests?.memory).toBe(SESSION_AGENT_MEM_LIMIT);
+    expect(resources.requests?.["ephemeral-storage"]).toBe(
+      SESSION_AGENT_EPHEMERAL_LIMIT,
+    );
+  });
+
+  it("with strictLimits=false (default), requests remain lower than limits (Burstable QoS)", () => {
+    const pod = buildSessionPodSpec(baseDescriptor);
+    const resources = pod.spec.containers[0]!.resources!;
+    // Requests intentionally lower than limits for denser packing.
+    expect(resources.requests?.memory).toBe(SESSION_AGENT_MEM_REQUEST);
+    expect(resources.limits?.memory).toBe(SESSION_AGENT_MEM_LIMIT);
+    expect(resources.requests?.memory).not.toBe(resources.limits?.memory);
+    expect(resources.requests?.["ephemeral-storage"]).toBe(
+      SESSION_AGENT_EPHEMERAL_REQUEST,
+    );
+    expect(resources.limits?.["ephemeral-storage"]).toBe(
+      SESSION_AGENT_EPHEMERAL_LIMIT,
+    );
+    expect(resources.requests?.["ephemeral-storage"]).not.toBe(
+      resources.limits?.["ephemeral-storage"],
+    );
+  });
+
   it("builds a Pod that mounts the PVC at the workspace path", () => {
     const pod = buildSessionPodSpec(baseDescriptor);
     expect(pod.kind).toBe("Pod");

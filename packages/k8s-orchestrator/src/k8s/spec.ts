@@ -70,6 +70,19 @@ export type K8sPodSpec = {
         }>;
       };
     };
+    readonly topologySpreadConstraints?: ReadonlyArray<{
+      readonly maxSkew: number;
+      readonly topologyKey: string;
+      readonly whenUnsatisfiable: 'DoNotSchedule' | 'ScheduleAnyway';
+      readonly labelSelector: {
+        readonly matchLabels?: Readonly<Record<string, string>>;
+        readonly matchExpressions?: ReadonlyArray<{
+          readonly key: string;
+          readonly operator: 'In' | 'NotIn' | 'Exists' | 'DoesNotExist';
+          readonly values?: ReadonlyArray<string>;
+        }>;
+      };
+    }>;
     readonly containers: ReadonlyArray<K8sContainer>;
     readonly volumes: ReadonlyArray<K8sVolume>;
   };
@@ -133,6 +146,14 @@ export type SpecBuilderOptions = {
   readonly browserSidecarImage?: string;
   readonly controlPlaneEndpoint: string;
   readonly home: string;
+  /**
+   * When true, sets resource request == limit (Guaranteed QoS). The kubelet
+   * only evicts Guaranteed pods when they exceed their own limits, never for
+   * other pods' pressure. Use for long-running sessions where eviction cost is
+   * high. Default false = low-request/high-limit (Burstable QoS, denser
+   * packing).
+   */
+  readonly strictLimits?: boolean;
 };
 
 // HOME-relative conversation/log dir each CLI writes, persisted on the PVC via a
@@ -464,6 +485,11 @@ export function buildSessionPodSpec(
     Object.assign(resourceLimits, { memory: limits.memory });
     Object.assign(resourceRequests, { memory: limits.memory });
   }
+  if (options.strictLimits) {
+    // Guaranteed QoS: request == limit for all resources (kubelet never
+    // evicts Guaranteed pods for resource pressure from other pods).
+    Object.assign(resourceRequests, resourceLimits);
+  }
 
   // Workspace volume: ONE shared RWX PVC with a per-workspace subPath when
   // configured; else the legacy per-workspace PVC; else the per-session PVC.
@@ -580,6 +606,22 @@ export function buildSessionPodSpec(
           ],
         },
       },
+      // Spread session pods evenly across nodes (soft — ScheduleAnyway) while
+      // the podAffinity above still prefers the CP node. Together: prefer CP
+      // node, but spread evenly when multiple nodes exist.
+      topologySpreadConstraints: [
+        {
+          maxSkew: 1,
+          topologyKey: 'kubernetes.io/hostname',
+          whenUnsatisfiable: 'ScheduleAnyway',
+          labelSelector: {
+            matchLabels: {
+              'app.kubernetes.io/name': 'sentropic-remote',
+              'app.kubernetes.io/component': 'session-agent',
+            },
+          },
+        },
+      ],
       containers: [
         {
           name: POD_CONTAINER,
