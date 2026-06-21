@@ -34,6 +34,10 @@ import {
 } from "./routes/agent-ws.js";
 import { createLineageLeasesRouter } from "./routes/lineage-leases.js";
 import { createSessionsRouter } from "./routes/sessions.js";
+import {
+  buildTerminalSocketEvents,
+  resolveTerminalContext,
+} from "./routes/terminal.js";
 import type { WSEvents } from "hono/ws";
 import { createWorkspacesRouter } from "./routes/workspaces.js";
 import { SessionEventBus } from "./sessions/events.js";
@@ -169,6 +173,31 @@ export function createControlPlane(
     }),
   );
 
+  // WP14-B: WebSocket terminal bridge — GET /sessions/:id/terminal
+  // Auth is handled INSIDE the upgradeWebSocket factory (resolveTerminalContext)
+  // so that we can reject with close(1008) rather than an HTTP 401 before the
+  // upgrade. The middleware exemption below keeps the path consistent with how
+  // /agent is handled (both bypass the HTTP-layer requireAuth middleware).
+  app.get(
+    "/sessions/:id/terminal",
+    nodeWs.upgradeWebSocket(async (c) => {
+      const id = c.req.param("id") ?? "";
+      const ctx = await resolveTerminalContext(c.req.raw, id, {
+        store,
+        authenticator,
+      });
+      if (!ctx) {
+        // Return a dummy handler that immediately closes the socket with 1008.
+        return {
+          onOpen(_event, ws) {
+            ws.close(1008, "session.not_found_or_unauthorized");
+          },
+        };
+      }
+      return buildTerminalSocketEvents(id, ctx.namespace);
+    }),
+  );
+
   // Authenticate every session/workspace request before it reaches the
   // routers. The agent WebSocket upgrade (handled above) and the public
   // health/OpenAPI endpoints are intentionally left unauthenticated: the
@@ -177,6 +206,7 @@ export function createControlPlane(
   app.use("/sessions", requireAuth);
   app.use("/sessions/:id/*", (c, next) => {
     if (c.req.path.endsWith("/agent")) return next();
+    if (c.req.path.endsWith("/terminal")) return next();
     return requireAuth(c, next);
   });
   app.use("/sessions/:id", requireAuth);
