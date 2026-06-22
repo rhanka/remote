@@ -723,8 +723,12 @@ export function listLocalForLs(opts: RegistryOpts = {}): LocalLsRow[] {
       ...(s.displayName !== undefined ? { displayName: s.displayName } : {}),
     });
   }
+  // Only surface local-tmux entries that were NOT matched above — these are
+  // orphaned registry records for tmux sessions remote itself created.
+  // kind:"local" entries are Claude Code conversation sessions (UUID ids,
+  // no tmuxSession) — they are internal CC state, not user-facing sessions.
   for (const e of live) {
-    if (e.kind !== "local" || matched.has(e.id)) continue;
+    if (e.kind !== "local-tmux" || matched.has(e.id)) continue;
     rows.push({
       slug: e.label ?? e.id.slice(0, 12),
       profile: e.tool,
