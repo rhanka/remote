@@ -17,8 +17,8 @@ import {
   listAccounts,
   loadCandidates,
   lookupBinding,
-  MESH_GATEWAY_URL,
-  meshGatewayEnv,
+  LLM_GATEWAY_URL,
+  llmGatewayEnv,
   removeAccount,
   selectAccount,
   stickyBind,
@@ -242,12 +242,12 @@ describe("account-pool", () => {
   // Gateway constants
   // -------------------------------------------------------------------------
 
-  it("MESH_GATEWAY_URL is the stable Layer-B ingress", () => {
-    expect(MESH_GATEWAY_URL).toBe("https://mesh.sent-tech.ca");
+  it("LLM_GATEWAY_URL is the stable Layer-B ingress", () => {
+    expect(LLM_GATEWAY_URL).toBe("https://llm.sent-tech.ca");
   });
 
-  it("meshGatewayEnv returns ANTHROPIC_BASE_URL pointing to gateway", () => {
-    const env = meshGatewayEnv();
-    expect(env.ANTHROPIC_BASE_URL).toBe("https://mesh.sent-tech.ca");
+  it("llmGatewayEnv returns ANTHROPIC_BASE_URL pointing to gateway", () => {
+    const env = llmGatewayEnv();
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://llm.sent-tech.ca");
   });
 });

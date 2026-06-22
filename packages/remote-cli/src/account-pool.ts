@@ -268,13 +268,13 @@ export function clearBinding(affinityKey: string, dir?: string): void {
 // Gateway constants (Layer-B wire — stable per architect spec)
 // ---------------------------------------------------------------------------
 
-export const MESH_GATEWAY_URL = "https://mesh.sent-tech.ca";
+export const LLM_GATEWAY_URL = "https://llm.sent-tech.ca";
 
 /**
  * Returns the env vars to inject into a session so it routes through the
- * mesh-gateway. Requires a valid sentropic S2S DPoP token for pod auth
+ * llm-gateway. Requires a valid sentropic S2S DPoP token for pod auth
  * (injected separately by the control-plane auth flow, not here).
  */
-export function meshGatewayEnv(): { ANTHROPIC_BASE_URL: string } {
-  return { ANTHROPIC_BASE_URL: MESH_GATEWAY_URL };
+export function llmGatewayEnv(): { ANTHROPIC_BASE_URL: string } {
+  return { ANTHROPIC_BASE_URL: LLM_GATEWAY_URL };
 }
