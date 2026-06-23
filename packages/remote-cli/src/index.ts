@@ -266,11 +266,16 @@ import {
 import { checkReadiness } from "./readiness.js";
 import { createInterface } from "node:readline";
 import {
+  clearExhaustion,
   enrollAccount,
   listAccounts,
+  listAccountsWithStatus,
+  markExhausted,
   removeAccount,
   selectAccount,
   loadCandidates,
+  QUOTA_WINDOW_5H_MS,
+  QUOTA_WINDOW_WEEK_MS,
   type AccountProvider,
 } from "./account-pool.js";
 
@@ -6609,11 +6614,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   accountCommand
     .command("ls")
     .description(
-      "List enrolled LLM accounts (descriptors only — no tokens).",
+      "List enrolled LLM accounts with quota/exhaustion status (descriptors only — no tokens).",
     )
     .option("--json", "Output as JSON array")
     .action((opts: { json?: boolean }) => {
-      const accounts = listAccounts();
+      const accounts = listAccountsWithStatus();
       if (opts.json) {
         process.stdout.write(JSON.stringify(accounts, null, 2) + "\n");
         return;
@@ -6623,8 +6628,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       for (const a of accounts) {
+        const quota = a.exhausted
+          ? `QUOTA_EXCEEDED (resets ${a.quotaResetsAt ?? "?"})`
+          : "ok";
         process.stdout.write(
-          `${a.id}\t${a.provider}\t${a.label}\t${a.enrolledAt}\n`,
+          `${a.id}\t${a.provider}\t${a.label}\t${quota}\t${a.enrolledAt}\n`,
         );
       }
     });
@@ -6640,6 +6648,46 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       process.stderr.write(`[remote] account removed: ${result.id}\n`);
+    });
+
+  accountCommand
+    .command("exhausted <id>")
+    .description(
+      "Mark an account as quota-exhausted for a given window (default 5h). " +
+        "New sessions skip exhausted accounts; selectAccountWithFallback() " +
+        "tries the next same-provider account then falls back cross-provider.",
+    )
+    .option(
+      "--window <window>",
+      'Exhaustion window: "5h" (default), "week" (7d), or a raw number of hours.',
+      "5h",
+    )
+    .option("--reason <reason>", "Optional reason label (e.g. \"429 rate-limit\")")
+    .action((id: string, opts: { window?: string; reason?: string }) => {
+      const windowMs = (() => {
+        if (!opts.window || opts.window === "5h") return QUOTA_WINDOW_5H_MS;
+        if (opts.window === "week") return QUOTA_WINDOW_WEEK_MS;
+        const h = Number(opts.window.replace(/h$/i, ""));
+        return Number.isFinite(h) && h > 0 ? h * 60 * 60 * 1_000 : QUOTA_WINDOW_5H_MS;
+      })();
+      const rec = markExhausted(id, windowMs, opts.reason);
+      const resetsAt = new Date(new Date(rec.exhaustedAt).getTime() + windowMs).toISOString();
+      process.stderr.write(
+        `[remote] account ${id} marked exhausted — resets at ${resetsAt}` +
+          (opts.reason ? ` (reason: ${opts.reason})` : "") +
+          "\n",
+      );
+    });
+
+  accountCommand
+    .command("clear-quota <id>")
+    .description(
+      "Clear the quota exhaustion for an account (manual override — the account " +
+        "becomes immediately available for selection again).",
+    )
+    .action((id: string) => {
+      clearExhaustion(id);
+      process.stderr.write(`[remote] account ${id} quota cleared — available for selection\n`);
     });
 
   accountCommand
