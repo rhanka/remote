@@ -380,6 +380,25 @@ describe("k8s spec builders", () => {
     ).toBe("1");
   });
 
+  it("injects ANTHROPIC_BASE_URL when llmGatewayUrl is set (WP16 Slice 3)", () => {
+    const absent = buildSessionPodSpec(baseDescriptor);
+    expect(
+      absent.spec.containers[0]!.env.find(
+        (e) => e.name === "ANTHROPIC_BASE_URL",
+      ),
+    ).toBeUndefined();
+
+    const present = buildSessionPodSpec(baseDescriptor, {
+      ...DEFAULT_BUILDER_OPTIONS,
+      llmGatewayUrl: "https://llm.sent-tech.ca",
+    });
+    expect(
+      present.spec.containers[0]!.env.find(
+        (e) => e.name === "ANTHROPIC_BASE_URL",
+      )?.value,
+    ).toBe("https://llm.sent-tech.ca");
+  });
+
   it("sets HOME from descriptor.home, falling back to the builder option", () => {
     const withHome = buildSessionPodSpec({
       ...baseDescriptor,

@@ -276,6 +276,7 @@ export function provisionerFromEnv(): SessionProvisioner {
     nodeSelector?: Record<string, string>;
     controlPlaneEndpoint?: string;
     sharedWorkspacePvc?: string;
+    llmGatewayUrl?: string;
   } = { namespace };
   if (process.env.SESSION_AGENT_IMAGE)
     overrides.image = process.env.SESSION_AGENT_IMAGE;
@@ -305,6 +306,9 @@ export function provisionerFromEnv(): SessionProvisioner {
     overrides.sharedWorkspacePvc = process.env.SESSION_SHARED_WORKSPACE_PVC;
   if (process.env.CONTROL_PLANE_ENDPOINT)
     overrides.controlPlaneEndpoint = process.env.CONTROL_PLANE_ENDPOINT;
+  // WP16 Slice 3: route pods through the LLM gateway (personal-passthrough v0).
+  if (process.env.LLM_GATEWAY_URL)
+    overrides.llmGatewayUrl = process.env.LLM_GATEWAY_URL;
   return new K8sSessionProvisioner(
     KubernetesObjectApiClient.fromDefault(),
     overrides,

@@ -165,6 +165,14 @@ export type SpecBuilderOptions = {
    * packing).
    */
   readonly strictLimits?: boolean;
+  /**
+   * WP16 Slice 3 — LLM gateway URL (e.g. "https://llm.sent-tech.ca"). When
+   * set, pods receive `ANTHROPIC_BASE_URL` pointing to the gateway so every
+   * Anthropic API call routes through the pooled egress gateway instead of
+   * going directly to api.anthropic.com. Unset = direct Anthropic access
+   * (current default, backwards-compatible).
+   */
+  readonly llmGatewayUrl?: string;
 };
 
 // HOME-relative conversation/log dir each CLI writes, persisted on the PVC via a
@@ -681,6 +689,12 @@ export function buildSessionPodSpec(
             // locale-gen needed).
             { name: "LANG", value: "C.UTF-8" },
             { name: "LC_ALL", value: "C.UTF-8" },
+            // WP16 Slice 3: route Anthropic API calls through the pooled LLM
+            // gateway when configured. The session's auth bundle already carries
+            // the user's token; the gateway applies personal-passthrough (v0).
+            ...(options.llmGatewayUrl
+              ? [{ name: "ANTHROPIC_BASE_URL", value: options.llmGatewayUrl }]
+              : []),
             // Run interactive CLIs inside a durable tmux session in the Pod
             // (detach-safe; enables `remote attach --exec`). The agent ignores
             // this for the one-shot `shell` profile.
