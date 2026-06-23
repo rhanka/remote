@@ -351,6 +351,8 @@ type ProfileOpts = {
   count?: number;
   /** Base label for the fan-out fleet names (default: cwd basename). */
   name?: string;
+  /** WP7 — add the headful-browser noVNC sidecar to this session. */
+  browser?: boolean;
 };
 
 type ProfileCliOpts = ProfileOpts & {
@@ -576,6 +578,7 @@ async function runProfile(
       ...(credentials ? { credentials } : {}),
       ...(opts.sync ? { workspaceSync: true } : {}),
       ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+      ...(opts.browser ? { metadata: { browser: true } } : {}),
     });
     if (archive) {
       await uploadWorkspaceArchive(opts.remote, session.id, archive);
@@ -1611,6 +1614,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       .option(
         "--name <label>",
         "base label for the --count fan-out fleet names (default: cwd basename)",
+      )
+      .option(
+        "--browser",
+        "add the headful-browser noVNC sidecar (WP7) — enables 2FA / authenticated-site flows from inside the pod",
       )
       .action(
         async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {
