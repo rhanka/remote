@@ -13,14 +13,23 @@ import {
   accountsTokensPath,
   bindingsPath,
   clearBinding,
+  clearExhaustion,
   enrollAccount,
+  isExhausted,
   listAccounts,
+  listAccountsWithStatus,
   loadCandidates,
   lookupBinding,
   LLM_GATEWAY_URL,
   llmGatewayEnv,
+  markExhausted,
+  pruneExpiredQuota,
+  QUOTA_WINDOW_5H_MS,
+  QUOTA_WINDOW_WEEK_MS,
+  quotaPath,
   removeAccount,
   selectAccount,
+  selectAccountWithFallback,
   stickyBind,
 } from "./account-pool.js";
 
@@ -236,6 +245,132 @@ describe("account-pool", () => {
     stickyBind("key-B", "acc-2", "codex", dir);
     expect(lookupBinding("key-A", dir)?.accountId).toBe("acc-1");
     expect(lookupBinding("key-B", dir)?.accountId).toBe("acc-2");
+  });
+
+  // -------------------------------------------------------------------------
+  // Quota tracking (markExhausted / isExhausted / pruneExpiredQuota)
+  // -------------------------------------------------------------------------
+
+  it("quota: markExhausted persists record; isExhausted returns true within window", () => {
+    enrollAccount({ provider: "claude-code", label: "a", accessToken: "tok", dir });
+    const descs = listAccounts(dir);
+    const id = descs[0]!.id;
+    const rec = markExhausted(id, QUOTA_WINDOW_5H_MS, "429", dir);
+    expect(rec.accountId).toBe(id);
+    const now = Date.now();
+    const quota: Record<string, typeof rec> = { [id]: rec };
+    expect(isExhausted(id, quota, now)).toBe(true);
+    // After the window, no longer exhausted
+    expect(isExhausted(id, quota, now + QUOTA_WINDOW_5H_MS + 1)).toBe(false);
+  });
+
+  it("quota: clearExhaustion removes the record", () => {
+    enrollAccount({ provider: "claude-code", label: "a", accessToken: "tok", dir });
+    const id = listAccounts(dir)[0]!.id;
+    markExhausted(id, QUOTA_WINDOW_5H_MS, undefined, dir);
+    clearExhaustion(id, dir);
+    const status = listAccountsWithStatus(dir);
+    expect(status[0]!.exhausted).toBe(false);
+  });
+
+  it("quota: pruneExpiredQuota removes expired records and returns count", () => {
+    enrollAccount({ provider: "claude-code", label: "a", accessToken: "tok", dir });
+    const id = listAccounts(dir)[0]!.id;
+    markExhausted(id, 1_000 /* 1s window */, undefined, dir);
+    // Still in window
+    expect(pruneExpiredQuota(Date.now(), dir)).toBe(0);
+    // After window
+    expect(pruneExpiredQuota(Date.now() + 2_000, dir)).toBe(1);
+  });
+
+  it("quotaPath: returns expected path inside dir", () => {
+    expect(quotaPath(dir)).toContain("account-quota.json");
+  });
+
+  it("QUOTA_WINDOW constants: 5h and 7d in ms", () => {
+    expect(QUOTA_WINDOW_5H_MS).toBe(5 * 60 * 60 * 1_000);
+    expect(QUOTA_WINDOW_WEEK_MS).toBe(7 * 24 * 60 * 60 * 1_000);
+  });
+
+  // -------------------------------------------------------------------------
+  // listAccountsWithStatus
+  // -------------------------------------------------------------------------
+
+  it("listAccountsWithStatus: shows exhausted=false when no quota record", () => {
+    enrollAccount({ provider: "claude-code", label: "a", accessToken: "tok", dir });
+    const list = listAccountsWithStatus(dir);
+    expect(list[0]!.exhausted).toBe(false);
+    expect(list[0]!.quotaResetsAt).toBeUndefined();
+  });
+
+  it("listAccountsWithStatus: shows exhausted=true + quotaResetsAt within window", () => {
+    enrollAccount({ provider: "claude-code", label: "a", accessToken: "tok", dir });
+    const id = listAccounts(dir)[0]!.id;
+    markExhausted(id, QUOTA_WINDOW_5H_MS, undefined, dir);
+    const list = listAccountsWithStatus(dir);
+    expect(list[0]!.exhausted).toBe(true);
+    expect(list[0]!.quotaResetsAt).toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // selectAccountWithFallback
+  // -------------------------------------------------------------------------
+
+  it("selectAccountWithFallback: returns usable same-provider account", () => {
+    enrollAccount({ provider: "claude-code", label: "c1", accessToken: "tok1", id: "c1", dir });
+    const result = selectAccountWithFallback("claude-code", undefined, dir);
+    expect(result.candidate?.id).toBe("c1");
+    expect("crossProvider" in result && result.crossProvider).toBe(false);
+  });
+
+  it("selectAccountWithFallback: skips exhausted account, picks next same-provider", () => {
+    enrollAccount({ provider: "claude-code", label: "c1", accessToken: "tok1", id: "c1", dir });
+    enrollAccount({ provider: "claude-code", label: "c2", accessToken: "tok2", id: "c2", dir });
+    markExhausted("c1", QUOTA_WINDOW_5H_MS, undefined, dir);
+    const result = selectAccountWithFallback("claude-code", undefined, dir);
+    expect(result.candidate?.id).toBe("c2");
+    expect("crossProvider" in result && result.crossProvider).toBe(false);
+  });
+
+  it("selectAccountWithFallback: falls back to codex when all claude accounts exhausted", () => {
+    enrollAccount({ provider: "claude-code", label: "c1", accessToken: "tok1", id: "c1", dir });
+    enrollAccount({ provider: "codex", label: "cod1", accessToken: "tok2", id: "cod1", dir });
+    markExhausted("c1", QUOTA_WINDOW_5H_MS, undefined, dir);
+    const result = selectAccountWithFallback("claude-code", undefined, dir);
+    expect(result.candidate?.id).toBe("cod1");
+    if ("crossProvider" in result && result.crossProvider) {
+      expect(result.originalProvider).toBe("claude-code");
+    } else {
+      throw new Error("expected crossProvider=true");
+    }
+  });
+
+  it("selectAccountWithFallback: returns allExhausted when all accounts exhausted", () => {
+    enrollAccount({ provider: "claude-code", label: "c1", accessToken: "tok1", id: "c1", dir });
+    enrollAccount({ provider: "codex", label: "cod1", accessToken: "tok2", id: "cod1", dir });
+    markExhausted("c1", QUOTA_WINDOW_5H_MS, undefined, dir);
+    markExhausted("cod1", QUOTA_WINDOW_5H_MS, undefined, dir);
+    const result = selectAccountWithFallback("claude-code", undefined, dir);
+    expect(result.candidate).toBeUndefined();
+    expect("allExhausted" in result && result.allExhausted).toBe(true);
+  });
+
+  it("selectAccountWithFallback: respects sticky binding when account is usable", () => {
+    enrollAccount({ provider: "claude-code", label: "c1", accessToken: "tok1", id: "c1", dir });
+    enrollAccount({ provider: "claude-code", label: "c2", accessToken: "tok2", id: "c2", dir });
+    stickyBind("ws-key", "c2", "claude-code", dir);
+    const result = selectAccountWithFallback("claude-code", "ws-key", dir);
+    expect(result.candidate?.id).toBe("c2");
+  });
+
+  it("selectAccountWithFallback: ignores sticky binding when bound account is exhausted", () => {
+    enrollAccount({ provider: "claude-code", label: "c1", accessToken: "tok1", id: "c1", dir });
+    enrollAccount({ provider: "claude-code", label: "c2", accessToken: "tok2", id: "c2", dir });
+    stickyBind("ws-key", "c2", "claude-code", dir);
+    markExhausted("c2", QUOTA_WINDOW_5H_MS, undefined, dir);
+    const result = selectAccountWithFallback("claude-code", "ws-key", dir);
+    // Should fall through to c1 (round-robin skipping exhausted c2)
+    expect(result.candidate?.id).toBe("c1");
   });
 
   // -------------------------------------------------------------------------

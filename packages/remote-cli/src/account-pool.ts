@@ -265,6 +265,183 @@ export function clearBinding(affinityKey: string, dir?: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Quota tracking — exhaustion windows per account
+//
+// When a CLI session hits a rate-limit / capacity error (429, "too many
+// requests", "Claude.ai capacity"), the caller marks the account exhausted
+// for a window duration (5h default for Claude Code short-window, 7d for
+// weekly). selectAccountWithFallback() skips exhausted accounts and
+// falls back across providers when all same-provider accounts are saturated.
+// ---------------------------------------------------------------------------
+
+/** Duration presets for quota windows. */
+export const QUOTA_WINDOW_5H_MS = 5 * 60 * 60 * 1_000;
+export const QUOTA_WINDOW_WEEK_MS = 7 * 24 * 60 * 60 * 1_000;
+
+export type QuotaRecord = {
+  readonly accountId: string;
+  /** ISO-8601 timestamp when exhaustion was declared. */
+  readonly exhaustedAt: string;
+  /** Window duration in ms. Account is available again after exhaustedAt + windowMs. */
+  readonly windowMs: number;
+  /** Optional human-readable reason (e.g. "429 rate-limit", "weekly cap"). */
+  readonly reason?: string;
+};
+
+export function quotaPath(dir: string = sentropicDir()): string {
+  return join(dir, "account-quota.json");
+}
+
+function loadQuotaMap(dir?: string): Record<string, QuotaRecord> {
+  return readJson<Record<string, QuotaRecord>>(quotaPath(dir)) ?? {};
+}
+
+function saveQuotaMap(map: Record<string, QuotaRecord>, dir?: string): void {
+  writeSecret(quotaPath(dir), map);
+}
+
+/** Mark an account as exhausted for `windowMs` milliseconds. */
+export function markExhausted(
+  accountId: string,
+  windowMs: number = QUOTA_WINDOW_5H_MS,
+  reason?: string,
+  dir?: string,
+): QuotaRecord {
+  const map = loadQuotaMap(dir);
+  const record: QuotaRecord = {
+    accountId,
+    exhaustedAt: new Date().toISOString(),
+    windowMs,
+    ...(reason !== undefined ? { reason } : {}),
+  };
+  map[accountId] = record;
+  saveQuotaMap(map, dir);
+  return record;
+}
+
+/** Clear exhaustion for an account (manual override or after confirmed refresh). */
+export function clearExhaustion(accountId: string, dir?: string): void {
+  const map = loadQuotaMap(dir);
+  delete map[accountId];
+  saveQuotaMap(map, dir);
+}
+
+/** Prune expired quota records (window elapsed). Returns count removed. */
+export function pruneExpiredQuota(nowMs: number = Date.now(), dir?: string): number {
+  const map = loadQuotaMap(dir);
+  let removed = 0;
+  for (const [id, rec] of Object.entries(map)) {
+    if (nowMs >= new Date(rec.exhaustedAt).getTime() + rec.windowMs) {
+      delete map[id];
+      removed++;
+    }
+  }
+  if (removed > 0) saveQuotaMap(map, dir);
+  return removed;
+}
+
+/** True if the account is currently within its exhaustion window. */
+export function isExhausted(
+  accountId: string,
+  quotaMap: Readonly<Record<string, QuotaRecord>>,
+  nowMs: number = Date.now(),
+): boolean {
+  const rec = quotaMap[accountId];
+  if (!rec) return false;
+  return nowMs < new Date(rec.exhaustedAt).getTime() + rec.windowMs;
+}
+
+/** Enriched view of an account descriptor (for `remote account ls`). */
+export type AccountStatus = AccountDescriptor & {
+  exhausted: boolean;
+  quotaResetsAt?: string;
+};
+
+/** List all accounts with their current quota/exhaustion status. */
+export function listAccountsWithStatus(dir?: string): AccountStatus[] {
+  const descs = loadDescriptors(dir);
+  const quota = loadQuotaMap(dir);
+  const now = Date.now();
+  return descs.map((d) => {
+    const rec = quota[d.id];
+    if (!rec) return { ...d, exhausted: false };
+    const resetMs = new Date(rec.exhaustedAt).getTime() + rec.windowMs;
+    if (now >= resetMs) return { ...d, exhausted: false };
+    return {
+      ...d,
+      exhausted: true,
+      quotaResetsAt: new Date(resetMs).toISOString(),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// selectAccountWithFallback — quota-aware, cross-provider fallback
+//
+// Policy (priority order):
+//  1. Sticky binding if it exists AND the bound account is not exhausted.
+//  2. Round-robin from the preferred provider, skipping exhausted accounts.
+//  3. Cross-provider fallback: if ALL preferred-provider accounts are
+//     exhausted, try the other provider (claude-code ↔ codex).
+//  4. undefined if no usable account exists.
+// ---------------------------------------------------------------------------
+
+const FALLBACK_PROVIDER: Record<AccountProvider, AccountProvider> = {
+  "claude-code": "codex",
+  codex: "claude-code",
+};
+
+export type SelectWithFallbackResult =
+  | { candidate: AccountCandidate; crossProvider: false }
+  | { candidate: AccountCandidate; crossProvider: true; originalProvider: AccountProvider }
+  | { candidate: undefined; allExhausted: true };
+
+export function selectAccountWithFallback(
+  preferredProvider: AccountProvider,
+  affinityKey?: string,
+  dir?: string,
+  nowMs: number = Date.now(),
+): SelectWithFallbackResult {
+  pruneExpiredQuota(nowMs, dir);
+  const quota = loadQuotaMap(dir);
+
+  // 1. Honour sticky binding if the bound account is still usable.
+  if (affinityKey) {
+    const binding = lookupBinding(affinityKey, dir);
+    if (binding && binding.provider === preferredProvider) {
+      if (!isExhausted(binding.accountId, quota, nowMs)) {
+        const candidates = loadCandidates(preferredProvider, dir);
+        const match = candidates.find((c) => c.id === binding.accountId);
+        if (match) return { candidate: match, crossProvider: false };
+      }
+    }
+  }
+
+  // 2. Round-robin from preferred provider, skip exhausted.
+  const preferred = loadCandidates(preferredProvider, dir).filter(
+    (c) => !isExhausted(c.id, quota, nowMs),
+  );
+  if (preferred.length > 0) {
+    return { candidate: preferred[0]!, crossProvider: false };
+  }
+
+  // 3. Cross-provider fallback.
+  const fallbackProvider = FALLBACK_PROVIDER[preferredProvider];
+  const fallback = loadCandidates(fallbackProvider, dir).filter(
+    (c) => !isExhausted(c.id, quota, nowMs),
+  );
+  if (fallback.length > 0) {
+    return {
+      candidate: fallback[0]!,
+      crossProvider: true,
+      originalProvider: preferredProvider,
+    };
+  }
+
+  return { candidate: undefined, allExhausted: true };
+}
+
+// ---------------------------------------------------------------------------
 // Gateway constants (Layer-B wire — stable per architect spec)
 // ---------------------------------------------------------------------------
 
