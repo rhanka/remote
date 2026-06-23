@@ -1225,6 +1225,19 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
         ? { id: originMarker.workspaceId }
         : await createWorkspace(url, { displayName: `job-${job.id}` });
       const remoteArgs = buildRemoteDelegate(job.tool, task, headless, job.model, job.effort);
+      // Bundle local CLI credentials (e.g. ~/.claude/.credentials.json for
+      // "claude", ~/.codex/auth.json for "codex") so the pod has them at start.
+      // Best-effort: a missing bundle is not fatal — the session starts without
+      // credentials (user can `remote refresh` the job later if needed).
+      let jobCredentials: Readonly<Record<string, string>> | undefined;
+      if (isCliProfile(remoteArgs.profile)) {
+        try {
+          const bundle = await collectProfileAuth(remoteArgs.profile);
+          if (Object.keys(bundle).length > 0) jobCredentials = bundle;
+        } catch {
+          // best-effort — don't block job launch on auth errors
+        }
+      }
       const session = await createRemoteSession(url, {
         profile: remoteArgs.profile,
         target: getDefaultTarget(),
@@ -1233,6 +1246,7 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
         ...(remoteArgs.startupArgs.length > 0
           ? { startupArgs: remoteArgs.startupArgs }
           : {}),
+        ...(jobCredentials ? { credentials: jobCredentials } : {}),
       });
       enroll({
         id: job.id,
