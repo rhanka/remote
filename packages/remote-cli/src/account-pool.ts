@@ -140,6 +140,20 @@ export function listAccounts(dir?: string): AccountDescriptor[] {
   return loadDescriptors(dir);
 }
 
+/** Returns every enrolled account paired with its access token.
+ * Accounts with no token stored (corrupted enroll) are silently skipped.
+ * Intended for push-cluster only — keep the result out of logs. */
+export function listAccountsWithTokens(
+  dir?: string,
+): Array<AccountDescriptor & { accessToken: string }> {
+  const descs = loadDescriptors(dir);
+  const tokens = loadTokenMap(dir);
+  return descs.flatMap((d) => {
+    const accessToken = tokens[d.id];
+    return accessToken ? [{ ...d, accessToken }] : [];
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Remove
 // ---------------------------------------------------------------------------

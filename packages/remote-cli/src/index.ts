@@ -271,6 +271,7 @@ import {
   clearExhaustion,
   enrollAccount,
   listAccounts,
+  listAccountsWithTokens,
   listAccountsWithStatus,
   listBindings,
   lookupBinding,
@@ -7033,6 +7034,93 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd();
       process.stdout.write([line(header), ...rows.map(line)].join("\n") + "\n");
     });
+
+  // ---------------------------------------------------------------------------
+  // account push-cluster — push local pool to k8s Secret (WP16 Slice 2c)
+  // ---------------------------------------------------------------------------
+
+  const accountPushClusterCommand = accountCommand
+    .command("push-cluster")
+    .description(
+      "Push the local LLM account pool (with tokens) to a Kubernetes Secret " +
+        "(llm-gateway-accounts) so the in-cluster LLM gateway can use the same accounts. " +
+        "Requires kubectl on PATH with write access to the target namespace.",
+    )
+    .option(
+      "--namespace <ns>",
+      "Kubernetes namespace for the Secret (default: sentropic-remote)",
+      "sentropic-remote",
+    )
+    .option(
+      "--secret-name <name>",
+      "Secret name (default: llm-gateway-accounts)",
+      "llm-gateway-accounts",
+    )
+    .option("--dry-run", "Print the YAML to stdout instead of applying it")
+    .option("--json", "Print the accounts JSON only (no kubectl — for debugging)")
+    .action(
+      async (opts: {
+        namespace: string;
+        secretName: string;
+        dryRun?: boolean;
+        json?: boolean;
+      }) => {
+        const accounts = listAccountsWithTokens();
+        if (accounts.length === 0) {
+          process.stderr.write(
+            "[remote] no enrolled accounts with tokens found — run `remote account enroll` first\n",
+          );
+          process.exit(1);
+        }
+
+        // Build the gateway-format JSON (token field, not accessToken)
+        const gatewayAccounts = accounts.map((a) => ({
+          id: a.id,
+          provider: a.provider,
+          label: a.label,
+          token: a.accessToken,
+          enrolledAt: a.enrolledAt,
+        }));
+        const accountsJson = JSON.stringify(gatewayAccounts, null, 2);
+
+        if (opts.json) {
+          process.stdout.write(accountsJson + "\n");
+          return;
+        }
+
+        // Build the Secret YAML (accounts.json under stringData — kubectl encodes to base64)
+        const yaml =
+          `apiVersion: v1\nkind: Secret\nmetadata:\n  name: ${opts.secretName}\n  namespace: ${opts.namespace}\ntype: Opaque\nstringData:\n  accounts.json: |\n` +
+          accountsJson
+            .split("\n")
+            .map((line) => `    ${line}`)
+            .join("\n") +
+          "\n";
+
+        if (opts.dryRun) {
+          process.stdout.write(yaml);
+          return;
+        }
+
+        // Apply via kubectl with YAML on stdin (tokens never appear in process args)
+        const { spawnSync } = await import("node:child_process");
+        const result = spawnSync("kubectl", ["apply", "-f", "-"], {
+          input: yaml,
+          stdio: ["pipe", "inherit", "inherit"],
+          encoding: "utf-8",
+        });
+        if (result.status !== 0) {
+          process.stderr.write(
+            `[remote] kubectl apply failed (exit ${result.status ?? "?"}) — try --dry-run to inspect the YAML\n`,
+          );
+          process.exit(result.status ?? 1);
+        }
+        process.stdout.write(
+          `[remote] pushed ${accounts.length} account(s) to ${opts.namespace}/${opts.secretName}\n`,
+        );
+      },
+    );
+  void accountPushClusterCommand; // suppress unused-var lint
 
   // ---------------------------------------------------------------------------
   // lineage — local incarnation lifecycle (Phase A0c)
