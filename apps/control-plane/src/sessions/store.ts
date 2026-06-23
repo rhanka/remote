@@ -80,6 +80,18 @@ export class SessionStore {
     return all.filter((d) => this.owners.get(d.id) === userId);
   }
 
+  /** Find a single session whose displayName matches `name` (case-insensitive).
+   * Returns undefined when there is no match or multiple matches (ambiguous). */
+  getByDisplayName(
+    name: string,
+    userId?: string,
+  ): SessionDescriptor | undefined {
+    const candidates = this.list(userId).filter(
+      (d) => d.displayName?.toLowerCase() === name.toLowerCase(),
+    );
+    return candidates.length === 1 ? candidates[0] : undefined;
+  }
+
   delete(id: string, userId?: string): boolean {
     if (userId !== undefined && this.owners.get(id) !== userId) return false;
     this.owners.delete(id);

@@ -651,7 +651,9 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   router.get("/:id", (c) => {
     const id = c.req.param("id");
     if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
-    const session = store.get(id, c.var.auth!.userId);
+    const userId = c.var.auth!.userId;
+    const session =
+      store.get(id, userId) ?? store.getByDisplayName(id, userId);
     if (!session) return notFound(c);
     const response: GetSessionResponse = { session };
     return c.json(response);
@@ -688,11 +690,13 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     "/:id/credentials",
     validateJsonBody(ajv, refreshSessionCredentialsRequestSchema),
     async (c) => {
-      const id = c.req.param("id");
-      if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+      const rawId = c.req.param("id");
+      if (sessionTokenMismatch(c.var.auth!, rawId)) return notFound(c);
       const userId = c.var.auth!.userId;
-      const stored = store.get(id, userId);
+      const stored =
+        store.get(rawId, userId) ?? store.getByDisplayName(rawId, userId);
       if (!stored) return notFound(c);
+      const id = stored.id;
       // Optional rename: a `?displayName=` query stamps the descriptor so the
       // recreated Pod gets SESSION_DISPLAY_NAME and `remote ls` shows the real
       // project name. Done here (not the JSON body, which is reserved for the
