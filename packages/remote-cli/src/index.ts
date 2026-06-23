@@ -6921,15 +6921,21 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .option("-n, --last <n>", "Show last N entries (default: 20)")
     .option("--json", "Output raw JSONL")
     .option(
-      "--export-s3 <s3-uri>",
+      "--export-s3 [s3-uri]",
       "Upload the full log to an S3 URI (e.g. s3://my-bucket/session-log.jsonl). " +
-        "Reads AWS_ENDPOINT_URL (SCW: https://s3.fr-par.scw.cloud), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.",
+        "If omitted, reads REMOTE_ACCOUNT_LOG_S3 from the environment. " +
+        "Also reads AWS_ENDPOINT_URL (SCW: https://s3.fr-par.scw.cloud), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.",
     )
-    .action(async (opts: { last?: string; json?: boolean; exportS3?: string }) => {
-      if (opts.exportS3) {
+    .action(async (opts: { last?: string; json?: boolean; exportS3?: string | boolean }) => {
+      if (opts.exportS3 !== undefined) {
+        const uri = typeof opts.exportS3 === "string" ? opts.exportS3 : process.env.REMOTE_ACCOUNT_LOG_S3;
+        if (!uri) {
+          process.stderr.write("[remote] account log --export-s3: no S3 URI provided and REMOTE_ACCOUNT_LOG_S3 is not set\n");
+          process.exit(1);
+        }
         try {
-          await exportSessionLogToS3(opts.exportS3);
-          process.stdout.write(`[remote] session log exported to ${opts.exportS3}\n`);
+          await exportSessionLogToS3(uri);
+          process.stdout.write(`[remote] session log exported to ${uri}\n`);
         } catch (err) {
           process.stderr.write(`[remote] account log --export-s3: ${err instanceof Error ? err.message : String(err)}\n`);
           process.exit(1);

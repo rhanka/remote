@@ -502,7 +502,7 @@ describe("account-pool", () => {
     writeFileSync(sessionLogPath(dir), '{"at":"2026-01-01","jobId":"j1"}\n');
     await exportSessionLogToS3("s3://my-bucket/logs/session-log.jsonl", dir);
     expect(sendMock).toHaveBeenCalledOnce();
-    const cmd = sendMock.mock.calls[0][0] as { params: { Bucket: string; Key: string } };
+    const cmd = sendMock.mock.calls[0]![0] as { params: { Bucket: string; Key: string } };
     expect(cmd.params.Bucket).toBe("my-bucket");
     expect(cmd.params.Key).toBe("logs/session-log.jsonl");
     vi.doUnmock("@aws-sdk/client-s3");
