@@ -1423,9 +1423,31 @@ export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
     return { started: false, error: (err as Error).message };
   }
 
-  // Same env plumbing as startJob (depth budget + REMOTE_JOB_ID for the hooks).
+  // Same env plumbing as startJob (depth budget + REMOTE_JOB_ID + account pool).
+  const preferredProvider: AccountProvider = job.tool === "codex" ? "codex" : "claude-code";
+  const sel = selectAccountWithFallback(preferredProvider, job.id);
+  const accountEnvOverrides: Record<string, string> = {};
+  if (!("allExhausted" in sel) && sel.candidate !== undefined) {
+    if (sel.crossProvider) {
+      const msg = `[remote] account-pool: all ${preferredProvider} accounts exhausted — falling back to ${sel.candidate.provider} (${sel.candidate.label}) for resume`;
+      process.stderr.write(msg + "\n");
+      if (process.env.TMUX) spawnSync("tmux", ["display-message", msg], { stdio: "ignore" });
+    }
+    stickyBind(job.id, sel.candidate.id, sel.candidate.provider);
+    appendSessionLogEntry({ jobId: job.id, preferredProvider, selectedProvider: sel.candidate.provider, accountId: sel.candidate.id, accountLabel: sel.candidate.label, crossProvider: sel.crossProvider });
+    if (sel.candidate.provider === "codex") {
+      accountEnvOverrides["OPENAI_API_KEY"] = sel.candidate.accessToken;
+    } else if (sel.candidate.provider === "claude-code" && sel.candidate.configDir) {
+      accountEnvOverrides["CLAUDE_CONFIG_DIR"] = sel.candidate.configDir;
+    }
+  }
   const prevDepth = process.env[DEPTH_ENV];
   const prevJobId = process.env[JOB_ID_ENV];
+  const prevAccountEnvs: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(accountEnvOverrides)) {
+    prevAccountEnvs[k] = process.env[k];
+    process.env[k] = v;
+  }
   process.env[DEPTH_ENV] = childDepthEnvValue(
     job.depthBudget ?? clampDepth(undefined),
   );
@@ -1449,6 +1471,10 @@ export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
     else process.env[DEPTH_ENV] = prevDepth;
     if (prevJobId === undefined) delete process.env[JOB_ID_ENV];
     else process.env[JOB_ID_ENV] = prevJobId;
+    for (const [k, prev] of Object.entries(prevAccountEnvs)) {
+      if (prev === undefined) delete process.env[k];
+      else process.env[k] = prev;
+    }
   }
 
   // throttled → running, keeping the throttle bookkeeping (attempts/firstAt) so a
