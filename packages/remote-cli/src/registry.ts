@@ -118,6 +118,8 @@ export type RegistryEntry = {
   model?: string;
   /** Effort/reasoning override (claude --effort; not supported by codex). */
   effort?: string;
+  /** Force a specific account from the pool (bypass selectAccountWithFallback). */
+  accountId?: string;
 };
 
 export type EnrollInput = {
@@ -145,6 +147,7 @@ export type EnrollInput = {
   throttle?: ThrottleInfo;
   model?: string;
   effort?: string;
+  accountId?: string;
 };
 
 /** Injectable liveness probes (tests stay deterministic, no tmux/pid needed). */

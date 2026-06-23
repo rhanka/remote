@@ -1271,7 +1271,13 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   const accountEnvOverrides: Record<string, string> = {};
   if (job.tool === "claude" || job.tool === "codex") {
     const preferredProvider: AccountProvider = job.tool === "claude" ? "claude-code" : "codex";
-    const sel = selectAccountWithFallback(preferredProvider, job.id);
+    // Forced account (--account <id>): look it up directly, bypassing the pool.
+    const forcedCandidate = job.accountId !== undefined
+      ? loadCandidates(undefined).find((c) => c.id === job.accountId)
+      : undefined;
+    const sel = forcedCandidate !== undefined
+      ? ({ candidate: forcedCandidate, crossProvider: false } as const)
+      : selectAccountWithFallback(preferredProvider, job.id);
     if (!("allExhausted" in sel) && sel.candidate !== undefined) {
       if (sel.crossProvider) {
         const msg =
@@ -4268,6 +4274,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--effort <level>",
       "reasoning-effort override (claude only: --effort low|medium|high|xhigh|max). Silently ignored for non-claude types.",
     )
+    .option(
+      "--account <id>",
+      "force a specific account from the pool (bypass selectAccountWithFallback). E.g. claude-code-1234567890.",
+    )
     .action(
       async (
         type: string,
@@ -4284,6 +4294,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           track?: string;
           model?: string;
           effort?: string;
+          account?: string;
         },
       ) => {
         if (!isDelegateType(type)) {
@@ -4385,6 +4396,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
             ...(opts.model !== undefined ? { model: opts.model } : {}),
             ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+            ...(opts.account !== undefined ? { accountId: opts.account } : {}),
           });
         } catch {
           // registry hiccup must not break the delegation
@@ -4412,6 +4424,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
           ...(opts.model !== undefined ? { model: opts.model } : {}),
           ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+          ...(opts.account !== undefined ? { accountId: opts.account } : {}),
         };
         let claimed: RegistryEntry | undefined;
         try {
