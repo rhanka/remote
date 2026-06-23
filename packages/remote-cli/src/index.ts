@@ -1215,7 +1215,15 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
     try {
       const url = job.remoteTarget;
       await ensureConnected(url);
-      const ws = await createWorkspace(url, { displayName: `job-${job.id}` });
+      // If originCwd has a workspace marker, reuse that workspace so the pod
+      // finds the repo/files already pushed there (e.g. after `remote workspace
+      // link + push`). Otherwise create a fresh per-job workspace.
+      const originMarker = job.originCwd
+        ? readWorkspaceMarker(job.originCwd)
+        : undefined;
+      const ws = originMarker
+        ? { id: originMarker.workspaceId }
+        : await createWorkspace(url, { displayName: `job-${job.id}` });
       const remoteArgs = buildRemoteDelegate(job.tool, task, headless, job.model, job.effort);
       const session = await createRemoteSession(url, {
         profile: remoteArgs.profile,
