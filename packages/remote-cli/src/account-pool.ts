@@ -263,6 +263,11 @@ export function lookupBinding(
   return loadBindings(dir)[affinityKey];
 }
 
+/** Return all current sticky bindings (for `remote account bindings`). */
+export function listBindings(dir?: string): SessionBinding[] {
+  return Object.values(loadBindings(dir));
+}
+
 /** Remove a binding (explicit rebind path — not silent). */
 export function clearBinding(affinityKey: string, dir?: string): void {
   const bindings = loadBindings(dir);
@@ -361,6 +366,8 @@ export function isExhausted(
 export type AccountStatus = AccountDescriptor & {
   exhausted: boolean;
   quotaResetsAt?: string;
+  /** Reason provided when exhaustion was recorded (e.g. "claude:rate-limited"). */
+  exhaustionReason?: string;
 };
 
 /** List all accounts with their current quota/exhaustion status. */
@@ -377,6 +384,7 @@ export function listAccountsWithStatus(dir?: string): AccountStatus[] {
       ...d,
       exhausted: true,
       quotaResetsAt: new Date(resetMs).toISOString(),
+      ...(rec.reason !== undefined ? { exhaustionReason: rec.reason } : {}),
     };
   });
 }

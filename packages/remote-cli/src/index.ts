@@ -271,6 +271,7 @@ import {
   enrollAccount,
   listAccounts,
   listAccountsWithStatus,
+  listBindings,
   lookupBinding,
   markExhausted,
   readClaudeCredential,
@@ -6791,7 +6792,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         .concat(hasConfigDir ? ["CONFIG-DIR"] : []);
       const rows = accounts.map((a) => {
         const quota = a.exhausted
-          ? `QUOTA_EXCEEDED (resets ${(a.quotaResetsAt ?? "?").slice(0, 19)})`
+          ? `QUOTA_EXCEEDED (resets ${(a.quotaResetsAt ?? "?").slice(0, 19)})${a.exhaustionReason ? ` [${a.exhaustionReason}]` : ""}`
           : "ok";
         return [a.id, a.provider, a.label, quota, a.enrolledAt.slice(0, 19)]
           .concat(hasConfigDir ? [a.configDir ?? ""] : []);
@@ -6959,6 +6960,34 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           )
           .join("\n") + "\n",
       );
+    });
+
+  accountCommand
+    .command("bindings")
+    .description(
+      "List current sticky session→account bindings (~/.sentropic/session-bindings.json). " +
+        "Each running job is bound to one account; the binding is used by selectAccountWithFallback() to honour affinity.",
+    )
+    .option("--json", "Output as JSON array")
+    .action((opts: { json?: boolean }) => {
+      const bindings = listBindings();
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(bindings, null, 2) + "\n");
+        return;
+      }
+      if (bindings.length === 0) {
+        process.stderr.write("[remote] no active bindings (no jobs launched with accounts enrolled)\n");
+        return;
+      }
+      const accounts = listAccounts();
+      const header = ["AFFINITY-KEY", "PROVIDER", "ACCOUNT-LABEL", "BOUND-AT"];
+      const rows = bindings.map((b) => {
+        const label = accounts.find((a) => a.id === b.accountId)?.label ?? b.accountId.slice(0, 8);
+        return [b.affinityKey.slice(0, 20), b.provider, label, b.boundAt.slice(0, 19)];
+      });
+      const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
+      const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd();
+      process.stdout.write([line(header), ...rows.map(line)].join("\n") + "\n");
     });
 
   // ---------------------------------------------------------------------------
