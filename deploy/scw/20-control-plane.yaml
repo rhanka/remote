@@ -53,6 +53,10 @@ spec:
             # wasted ~100G each AND pinned one session per node.
             - name: SESSION_SHARED_WORKSPACE_PVC
               value: "remote-workspaces"
+            # WP16 Slice 3: route all session pods through the pooled LLM
+            # gateway (personal-passthrough v0 — token injected per-session).
+            - name: LLM_GATEWAY_URL
+              value: "https://llm.sent-tech.ca"
           ports:
             - name: http
               containerPort: 8080
