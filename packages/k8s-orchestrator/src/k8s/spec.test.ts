@@ -380,23 +380,39 @@ describe("k8s spec builders", () => {
     ).toBe("1");
   });
 
-  it("injects ANTHROPIC_BASE_URL when llmGatewayUrl is set (WP16 Slice 3)", () => {
+  it("injects ANTHROPIC_BASE_URL+API_KEY only when both llmGatewayUrl and token are set (WP16 Slice 3)", () => {
+    // Neither var when nothing is set
     const absent = buildSessionPodSpec(baseDescriptor);
     expect(
-      absent.spec.containers[0]!.env.find(
-        (e) => e.name === "ANTHROPIC_BASE_URL",
-      ),
+      absent.spec.containers[0]!.env.find((e) => e.name === "ANTHROPIC_BASE_URL"),
     ).toBeUndefined();
 
-    const present = buildSessionPodSpec(baseDescriptor, {
+    // URL only (gateway unreachable at provision time) → neither var injected;
+    // pod falls back to ~/.claude credentials rather than pointing to a gateway
+    // that has no session token for it.
+    const urlOnly = buildSessionPodSpec(baseDescriptor, {
       ...DEFAULT_BUILDER_OPTIONS,
       llmGatewayUrl: "https://llm.sent-tech.ca",
     });
     expect(
-      present.spec.containers[0]!.env.find(
-        (e) => e.name === "ANTHROPIC_BASE_URL",
-      )?.value,
+      urlOnly.spec.containers[0]!.env.find((e) => e.name === "ANTHROPIC_BASE_URL"),
+    ).toBeUndefined();
+    expect(
+      urlOnly.spec.containers[0]!.env.find((e) => e.name === "ANTHROPIC_API_KEY"),
+    ).toBeUndefined();
+
+    // Both URL + token → both vars injected together
+    const both = buildSessionPodSpec(baseDescriptor, {
+      ...DEFAULT_BUILDER_OPTIONS,
+      llmGatewayUrl: "https://llm.sent-tech.ca",
+      llmGatewayToken: "gw-abcdef1234",
+    });
+    expect(
+      both.spec.containers[0]!.env.find((e) => e.name === "ANTHROPIC_BASE_URL")?.value,
     ).toBe("https://llm.sent-tech.ca");
+    expect(
+      both.spec.containers[0]!.env.find((e) => e.name === "ANTHROPIC_API_KEY")?.value,
+    ).toBe("gw-abcdef1234");
   });
 
   it("injects envFrom entries when extraEnvFromSecrets is set", () => {

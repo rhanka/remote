@@ -705,14 +705,19 @@ export function buildSessionPodSpec(
             { name: "LANG", value: "C.UTF-8" },
             { name: "LC_ALL", value: "C.UTF-8" },
             // WP16 Slice 2: route Anthropic API calls through the pooled LLM
-            // gateway. ANTHROPIC_BASE_URL tells the CLI where to send requests;
-            // ANTHROPIC_API_KEY is the per-session opaque bearer (gw-<hex>)
-            // — pods never hold a raw sk-ant-... token when the gateway is active.
-            ...(options.llmGatewayUrl
-              ? [{ name: "ANTHROPIC_BASE_URL", value: options.llmGatewayUrl }]
-              : []),
-            ...(options.llmGatewayToken
-              ? [{ name: "ANTHROPIC_API_KEY", value: options.llmGatewayToken }]
+            // gateway. Both vars are injected together: ANTHROPIC_BASE_URL
+            // points to the gateway; ANTHROPIC_API_KEY is the per-session
+            // opaque bearer (gw-<hex>). If the gateway was unreachable at
+            // provision time (no token), neither var is set so the pod falls
+            // back to direct Anthropic access via ~/.claude credentials.
+            ...(options.llmGatewayUrl && options.llmGatewayToken
+              ? [
+                  {
+                    name: "ANTHROPIC_BASE_URL",
+                    value: options.llmGatewayUrl,
+                  },
+                  { name: "ANTHROPIC_API_KEY", value: options.llmGatewayToken },
+                ]
               : []),
             // Run interactive CLIs inside a durable tmux session in the Pod
             // (detach-safe; enables `remote attach --exec`). The agent ignores
