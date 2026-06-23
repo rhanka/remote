@@ -173,6 +173,10 @@ export type SpecBuilderOptions = {
    * (current default, backwards-compatible).
    */
   readonly llmGatewayUrl?: string;
+  /** Bearer token issued by the LLM gateway for this session (gw-<hex>). When
+   * set, injected as ANTHROPIC_API_KEY so Claude Code/Codex authenticate via
+   * the gateway. Only meaningful when llmGatewayUrl is also set. */
+  readonly llmGatewayToken?: string;
 };
 
 // HOME-relative conversation/log dir each CLI writes, persisted on the PVC via a
@@ -689,11 +693,15 @@ export function buildSessionPodSpec(
             // locale-gen needed).
             { name: "LANG", value: "C.UTF-8" },
             { name: "LC_ALL", value: "C.UTF-8" },
-            // WP16 Slice 3: route Anthropic API calls through the pooled LLM
-            // gateway when configured. The session's auth bundle already carries
-            // the user's token; the gateway applies personal-passthrough (v0).
+            // WP16 Slice 2: route Anthropic API calls through the pooled LLM
+            // gateway. ANTHROPIC_BASE_URL tells the CLI where to send requests;
+            // ANTHROPIC_API_KEY is the per-session opaque bearer (gw-<hex>)
+            // — pods never hold a raw sk-ant-... token when the gateway is active.
             ...(options.llmGatewayUrl
               ? [{ name: "ANTHROPIC_BASE_URL", value: options.llmGatewayUrl }]
+              : []),
+            ...(options.llmGatewayToken
+              ? [{ name: "ANTHROPIC_API_KEY", value: options.llmGatewayToken }]
               : []),
             // Run interactive CLIs inside a durable tmux session in the Pod
             // (detach-safe; enables `remote attach --exec`). The agent ignores

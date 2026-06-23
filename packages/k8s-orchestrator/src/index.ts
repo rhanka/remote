@@ -21,6 +21,10 @@ export type ProvisionOptions = {
   /** Per-session service token (only minted under bearer auth) injected as the
    * REMOTE_TOKEN env so the session-agent can authenticate its callbacks. */
   readonly sessionToken?: string;
+  /** Bearer token issued by the LLM gateway for this session (gw-<hex>). When
+   * set, injected as ANTHROPIC_API_KEY so the pod authenticates via the gateway
+   * instead of holding a raw Anthropic token. */
+  readonly gatewayToken?: string;
 };
 
 export type WorkspaceGcOptions = {

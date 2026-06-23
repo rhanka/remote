@@ -105,7 +105,11 @@ export class K8sSessionProvisioner implements SessionProvisioner {
     });
 
     const ns = options.namespace ?? this.options.namespace;
-    const opts = { ...this.options, namespace: ns };
+    const opts: SpecBuilderOptions = {
+      ...this.options,
+      namespace: ns,
+      ...(options.gatewayToken ? { llmGatewayToken: options.gatewayToken } : {}),
+    };
 
     const credentials = options.credentials ?? {};
     const authPaths = Object.keys(credentials);

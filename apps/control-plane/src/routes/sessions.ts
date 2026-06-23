@@ -172,11 +172,16 @@ export type SessionsRouterDeps = {
   readonly tenantProvisioner?: TenantProvisioner;
   readonly archiveStaging?: ArchiveStaging;
   readonly exportStaging?: ArchiveStaging;
+  /** WP16 Slice 2: LLM gateway base URL. When set, the sessions router calls
+   * POST <url>/v1/session before provisioning to obtain a per-session bearer
+   * (gw-<hex>) that is injected as ANTHROPIC_API_KEY in the pod. */
+  readonly llmGatewayUrl?: string;
 };
 
 export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   const ajv = deps.ajv;
   const store = deps.store ?? new SessionStore();
+  const llmGatewayUrl = deps.llmGatewayUrl;
   const bus = deps.bus ?? new SessionEventBus();
   const provisioner = deps.provisioner ?? new InMemoryProvisioner();
   const registry = deps.registry ?? new AgentRegistry();
@@ -386,6 +391,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
         workspaceExport?: boolean;
         namespace?: string;
         sessionToken?: string;
+        gatewayToken?: string;
       } = { namespace };
       if (req.credentials) provisionOptions.credentials = req.credentials;
       if (req.workspaceSync) provisionOptions.workspaceSync = true;
@@ -400,6 +406,33 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
           sessionId: descriptor.id,
           secret,
         });
+      }
+      // WP16 Slice 2: call the LLM gateway to obtain a per-session bearer before
+      // provisioning. The pod receives ANTHROPIC_API_KEY=gw-<hex> instead of a
+      // raw Anthropic token. Failure is non-fatal: log a warning and continue
+      // without the gateway (pod will use direct Anthropic access).
+      if (llmGatewayUrl) {
+        try {
+          const gwResp = await fetch(`${llmGatewayUrl}/v1/session`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ sessionId: descriptor.id }),
+          });
+          if (gwResp.ok) {
+            const { gatewayToken } = (await gwResp.json()) as {
+              gatewayToken: string;
+            };
+            provisionOptions.gatewayToken = gatewayToken;
+          } else {
+            console.warn(
+              `[control-plane] gateway /v1/session returned ${gwResp.status} — provisioning without gateway`,
+            );
+          }
+        } catch (err) {
+          console.warn(
+            `[control-plane] gateway unreachable (${String(err)}) — provisioning without gateway`,
+          );
+        }
       }
       // A provisioning failure (k8s API error, e.g. quota exceeded) must NOT
       // crash the control-plane via an unhandled promise rejection — that would

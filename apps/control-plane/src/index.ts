@@ -57,6 +57,9 @@ export type ControlPlaneOptions = {
   registry?: AgentRegistry;
   authenticator?: Authenticator;
   tenantProvisioner?: TenantProvisioner;
+  /** WP16 Slice 2: LLM gateway base URL. Forwarded to the sessions router so
+   * it can call POST <url>/v1/session before provisioning each pod. */
+  llmGatewayUrl?: string;
 };
 
 type InjectWebSocket = ReturnType<
@@ -127,6 +130,7 @@ export function createControlPlane(
 
   // Build the sessions router up front so the agent-ws route can share its
   // `reconcileFromAnnounce` hook (bound over the SAME store + sessionTenant).
+  const llmGatewayUrl = options.llmGatewayUrl ?? process.env.LLM_GATEWAY_URL;
   const { router: sessionsRouter, reconcileFromAnnounce } =
     createSessionsRouter({
       ajv,
@@ -135,6 +139,7 @@ export function createControlPlane(
       provisioner,
       registry,
       tenantProvisioner,
+      ...(llmGatewayUrl ? { llmGatewayUrl } : {}),
     });
 
   // Announce-body validator (durability: agent re-announce repopulates the
