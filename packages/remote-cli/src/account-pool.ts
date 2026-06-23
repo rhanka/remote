@@ -523,12 +523,16 @@ export function llmGatewayEnv(): { ANTHROPIC_BASE_URL: string } {
 
 export type SessionLogEntry = {
   at: string;
+  /** "launch" = account selected at job start; "exhaust" = account auto-exhausted (throttle). Absent = "launch" (back-compat). */
+  kind?: "launch" | "exhaust";
   jobId: string;
   preferredProvider: AccountProvider;
   selectedProvider: AccountProvider;
   accountId: string;
   accountLabel: string;
   crossProvider: boolean;
+  /** Throttle signature tag that triggered auto-exhaustion (kind="exhaust" only). */
+  signature?: string;
 };
 
 export function sessionLogPath(dir: string = sentropicDir()): string {

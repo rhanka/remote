@@ -4602,6 +4602,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     const binding = lookupBinding(job.id);
     if (binding) {
       markExhausted(binding.accountId, QUOTA_WINDOW_5H_MS, verdict.signature ?? "rate-limit");
+      const accounts = loadCandidates(undefined);
+      const accountLabel = accounts.find((a) => a.id === binding.accountId)?.label ?? binding.accountId.slice(0, 8);
+      appendSessionLogEntry({
+        kind: "exhaust",
+        jobId: job.id,
+        preferredProvider: binding.provider,
+        selectedProvider: binding.provider,
+        accountId: binding.accountId,
+        accountLabel,
+        crossProvider: false,
+        ...(verdict.signature !== undefined ? { signature: verdict.signature } : {}),
+      });
     }
     const nowMs = Date.now();
     const prior = job.throttle
@@ -6899,7 +6911,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .command("log")
     .description(
       "Show the local account selection log (~/.sentropic/session-log.jsonl). " +
-        "Each line records which account was used per job launch, including cross-provider fallbacks.",
+        "Records job launches (kind=launch) and auto-exhaustion events (kind=exhaust) from throttle detection.",
     )
     .option("-n, --last <n>", "Show last N entries (default: 20)")
     .option("--json", "Output raw JSONL")
@@ -6924,19 +6936,21 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       process.stdout.write(
-        ["AT                       JOB-ID           PREFERRED        SELECTED         ACCOUNT-LABEL   CROSS"]
+        ["AT                       KIND      JOB-ID           ACCOUNT-LABEL    NOTE"]
           .concat(
             tail.map((line) => {
               try {
-                const e = JSON.parse(line) as { at: string; jobId: string; preferredProvider: string; selectedProvider: string; accountLabel: string; crossProvider: boolean };
-                const cross = e.crossProvider ? " ⚠" : "";
+                const e = JSON.parse(line) as { at: string; kind?: string; jobId: string; preferredProvider: string; selectedProvider: string; accountLabel: string; crossProvider: boolean; signature?: string };
+                const kind = e.kind ?? "launch";
+                const note = kind === "exhaust"
+                  ? `throttled (${e.signature ?? "rate-limit"})`
+                  : (e.crossProvider ? `⚠ fallback ${e.preferredProvider}→${e.selectedProvider}` : "");
                 return [
                   (e.at ?? "").slice(0, 23).padEnd(24),
+                  kind.padEnd(9),
                   (e.jobId ?? "").slice(0, 16).padEnd(17),
-                  (e.preferredProvider ?? "").padEnd(16),
-                  (e.selectedProvider ?? "").padEnd(16),
-                  (e.accountLabel ?? "").slice(0, 15).padEnd(16),
-                  cross,
+                  (e.accountLabel ?? "").slice(0, 16).padEnd(17),
+                  note,
                 ].join(" ").trimEnd();
               } catch {
                 return line;
