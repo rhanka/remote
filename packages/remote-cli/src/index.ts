@@ -6713,14 +6713,21 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write("[remote] no accounts enrolled\n");
         return;
       }
-      for (const a of accounts) {
+      const hasConfigDir = accounts.some((a) => a.configDir !== undefined);
+      const header = ["ID", "PROVIDER", "LABEL", "QUOTA", "ENROLLED"]
+        .concat(hasConfigDir ? ["CONFIG-DIR"] : []);
+      const rows = accounts.map((a) => {
         const quota = a.exhausted
-          ? `QUOTA_EXCEEDED (resets ${a.quotaResetsAt ?? "?"})`
+          ? `QUOTA_EXCEEDED (resets ${(a.quotaResetsAt ?? "?").slice(0, 19)})`
           : "ok";
-        process.stdout.write(
-          `${a.id}\t${a.provider}\t${a.label}\t${quota}\t${a.enrolledAt}\n`,
-        );
-      }
+        return [a.id, a.provider, a.label, quota, a.enrolledAt.slice(0, 19)]
+          .concat(hasConfigDir ? [a.configDir ?? ""] : []);
+      });
+      const widths = header.map((h, i) =>
+        Math.max(h.length, ...rows.map((r) => r[i]!.length)),
+      );
+      const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd();
+      process.stdout.write([line(header), ...rows.map(line)].join("\n") + "\n");
     });
 
   accountCommand
