@@ -6782,9 +6782,39 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Dry-run: show which account selectAccount() would pick for a new session " +
         "(round-robin, no I/O, stub planner).",
     )
-    .option("--provider <provider>", "Filter by provider")
-    .option("--last-used <id>", "Pretend this account was used last")
-    .action((opts: { provider?: string; lastUsed?: string }) => {
+    .option("--provider <provider>", "Filter by provider (required with --fallback)")
+    .option("--last-used <id>", "Pretend this account was used last (simple round-robin only)")
+    .option(
+      "--fallback",
+      "Use selectAccountWithFallback() — quota-aware, cross-provider fallback — instead of plain round-robin. Requires --provider.",
+    )
+    .option("--affinity-key <key>", "Sticky-binding key to test (used with --fallback, e.g. a job id)")
+    .action((opts: { provider?: string; lastUsed?: string; fallback?: boolean; affinityKey?: string }) => {
+      if (opts.fallback) {
+        if (!opts.provider || (opts.provider !== "claude-code" && opts.provider !== "codex")) {
+          process.stderr.write("[remote] account select --fallback requires --provider claude-code|codex\n");
+          process.exitCode = 1;
+          return;
+        }
+        const provider = opts.provider as AccountProvider;
+        const sel = selectAccountWithFallback(provider, opts.affinityKey);
+        if (!sel.candidate) {
+          process.stderr.write("[remote] account select: all accounts exhausted — no usable account available\n");
+          process.exitCode = 1;
+          return;
+        }
+        const { accessToken: _t, ...desc } = sel.candidate;
+        const crossProvider = "crossProvider" in sel ? sel.crossProvider : false;
+        const originalProvider = "originalProvider" in sel ? sel.originalProvider : undefined;
+        process.stdout.write(
+          JSON.stringify({
+            selected: desc,
+            crossProvider,
+            ...(originalProvider !== undefined ? { originalProvider } : {}),
+          }, null, 2) + "\n",
+        );
+        return;
+      }
       const provider = opts.provider as AccountProvider | undefined;
       const candidates = loadCandidates(provider).map(({ accessToken: _t, ...d }) => d);
       const pick = selectAccount(candidates, opts.lastUsed);

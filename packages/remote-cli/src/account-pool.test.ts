@@ -4,13 +4,14 @@
  * All I/O is directed to a temp dir to avoid touching ~/.sentropic.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   accountsDescriptorPath,
   accountsTokensPath,
+  appendSessionLogEntry,
   bindingsPath,
   clearBinding,
   clearExhaustion,
@@ -30,6 +31,7 @@ import {
   removeAccount,
   selectAccount,
   selectAccountWithFallback,
+  sessionLogPath,
   stickyBind,
 } from "./account-pool.js";
 
@@ -371,6 +373,76 @@ describe("account-pool", () => {
     const result = selectAccountWithFallback("claude-code", "ws-key", dir);
     // Should fall through to c1 (round-robin skipping exhausted c2)
     expect(result.candidate?.id).toBe("c1");
+  });
+
+  // -------------------------------------------------------------------------
+  // configDir on AccountDescriptor (multi-account claude)
+  // -------------------------------------------------------------------------
+
+  it("enroll: persists configDir in descriptor for claude-code accounts", () => {
+    const result = enrollAccount({
+      provider: "claude-code",
+      label: "Work",
+      accessToken: "sk-ant-work",
+      id: "claude-work",
+      configDir: "/home/user/.claude-work",
+      dir,
+    });
+    expect(result.ok).toBe(true);
+    const descs = listAccounts(dir);
+    expect(descs[0]!.configDir).toBe("/home/user/.claude-work");
+  });
+
+  it("enroll: no configDir when not provided", () => {
+    enrollAccount({ provider: "claude-code", label: "Main", accessToken: "tok", id: "main", dir });
+    const descs = listAccounts(dir);
+    expect(descs[0]!.configDir).toBeUndefined();
+  });
+
+  it("loadCandidates: carries configDir through to candidates", () => {
+    enrollAccount({
+      provider: "claude-code",
+      label: "Work",
+      accessToken: "tok-work",
+      id: "work",
+      configDir: "/home/user/.claude-work",
+      dir,
+    });
+    const candidates = loadCandidates("claude-code", dir);
+    expect(candidates[0]!.configDir).toBe("/home/user/.claude-work");
+  });
+
+  // -------------------------------------------------------------------------
+  // Session log (appendSessionLogEntry)
+  // -------------------------------------------------------------------------
+
+  it("appendSessionLogEntry: writes a JSONL line to session-log.jsonl", () => {
+    appendSessionLogEntry({
+      jobId: "test-job-1",
+      preferredProvider: "claude-code",
+      selectedProvider: "claude-code",
+      accountId: "claude-a",
+      accountLabel: "Main",
+      crossProvider: false,
+    }, dir);
+    const log = readFileSync(sessionLogPath(dir), "utf8");
+    const entry = JSON.parse(log.trim());
+    expect(entry.jobId).toBe("test-job-1");
+    expect(entry.crossProvider).toBe(false);
+    expect(entry.at).toBeTruthy();
+  });
+
+  it("appendSessionLogEntry: multiple calls append multiple lines", () => {
+    appendSessionLogEntry({ jobId: "j1", preferredProvider: "claude-code", selectedProvider: "claude-code", accountId: "a", accountLabel: "A", crossProvider: false }, dir);
+    appendSessionLogEntry({ jobId: "j2", preferredProvider: "claude-code", selectedProvider: "codex", accountId: "b", accountLabel: "B", crossProvider: true }, dir);
+    const lines = readFileSync(sessionLogPath(dir), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]!).jobId).toBe("j1");
+    expect(JSON.parse(lines[1]!).crossProvider).toBe(true);
+  });
+
+  it("sessionLogPath: returns path inside dir", () => {
+    expect(sessionLogPath(dir)).toContain("session-log.jsonl");
   });
 
   // -------------------------------------------------------------------------
