@@ -68,17 +68,38 @@ export function buildDelegateArgs(
   type: DelegateType,
   task: string,
   headless: boolean,
+  model?: string,
+  effort?: string,
 ): { command: string; args: string[] } {
   const command = DELEGATE_BIN[type];
+  // Flags prepended before the task/subcommand. Claude supports both
+  // --model and --effort; Codex exposes model via -m (global flag before
+  // subcommands); agy: ignore unknown flags (passed positional only).
+  const modelFlags = ((): string[] => {
+    if (!model && !effort) return [];
+    switch (type) {
+      case "claude": {
+        const flags: string[] = [];
+        if (model) flags.push("--model", model);
+        if (effort) flags.push("--effort", effort);
+        return flags;
+      }
+      case "codex":
+        return model ? ["-m", model] : [];
+      case "agy":
+        return [];
+    }
+  })();
+
   if (!headless) {
     // Interactive + initial prompt — task is the last argv token.
-    return { command, args: [task] };
+    return { command, args: [...modelFlags, task] };
   }
   switch (type) {
     case "claude":
-      return { command, args: ["-p", task] };
+      return { command, args: [...modelFlags, "-p", task] };
     case "codex":
-      return { command, args: ["exec", task] };
+      return { command, args: [...modelFlags, "exec", task] };
     case "agy":
       throw new Error(
         "agy has no confirmed headless mode — run it interactively (drop --headless)",
@@ -337,8 +358,10 @@ export function buildRemoteDelegate(
   type: DelegateType,
   task: string,
   headless: boolean,
+  model?: string,
+  effort?: string,
 ): { profile: DelegateType; startupArgs: string[] } {
-  const { args } = buildDelegateArgs(type, task, headless);
+  const { args } = buildDelegateArgs(type, task, headless, model, effort);
   return { profile: type, startupArgs: args };
 }
 

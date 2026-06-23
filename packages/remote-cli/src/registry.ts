@@ -114,6 +114,10 @@ export type RegistryEntry = {
   trackWp?: string;
   /** Rate-limit backoff/resume bookkeeping (HEADLESS LOCAL only; reliability slice 1). */
   throttle?: ThrottleInfo;
+  /** Model override passed to the CLI binary (--model for claude, -m for codex). */
+  model?: string;
+  /** Effort/reasoning override (claude --effort; not supported by codex). */
+  effort?: string;
 };
 
 export type EnrollInput = {
@@ -139,6 +143,8 @@ export type EnrollInput = {
   depthBudget?: number;
   trackWp?: string;
   throttle?: ThrottleInfo;
+  model?: string;
+  effort?: string;
 };
 
 /** Injectable liveness probes (tests stay deterministic, no tmux/pid needed). */
@@ -383,6 +389,10 @@ function applyEnroll(
   if (trackWp !== undefined) entry.trackWp = trackWp;
   const throttle = input.throttle ?? prev?.throttle;
   if (throttle !== undefined) entry.throttle = throttle;
+  const model = input.model ?? prev?.model;
+  if (model !== undefined) entry.model = model;
+  const effort = input.effort ?? prev?.effort;
+  if (effort !== undefined) entry.effort = effort;
   if (idx >= 0) entries[idx] = entry;
   else entries.push(entry);
   return entry;

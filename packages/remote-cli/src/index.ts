@@ -1191,7 +1191,7 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
       const url = job.remoteTarget;
       await ensureConnected(url);
       const ws = await createWorkspace(url, { displayName: `job-${job.id}` });
-      const remoteArgs = buildRemoteDelegate(job.tool, task, headless);
+      const remoteArgs = buildRemoteDelegate(job.tool, task, headless, job.model, job.effort);
       const session = await createRemoteSession(url, {
         profile: remoteArgs.profile,
         target: getDefaultTarget(),
@@ -1233,7 +1233,7 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   const originCwd = job.originCwd ?? process.cwd();
   let argv: { command: string; args: string[] };
   try {
-    argv = buildDelegateArgs(job.tool, task, headless);
+    argv = buildDelegateArgs(job.tool, task, headless, job.model, job.effort);
   } catch (err) {
     return { started: false, error: (err as Error).message };
   }
@@ -4194,6 +4194,14 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--track <wpId>",
       "mirror this job as a track item under workpackage <wpId> (`track item new --parent`, realized on done/failed). Best-effort: skipped silently if track is absent.",
     )
+    .option(
+      "--model <model>",
+      "model override for the spawned agent (claude: --model; codex: -m). E.g. claude-sonnet-4-6, claude-opus-4-8, o3.",
+    )
+    .option(
+      "--effort <level>",
+      "reasoning-effort override (claude only: --effort low|medium|high|xhigh|max). Silently ignored for non-claude types.",
+    )
     .action(
       async (
         type: string,
@@ -4208,6 +4216,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           maxConcurrent?: string;
           maxDepth?: string;
           track?: string;
+          model?: string;
+          effort?: string;
         },
       ) => {
         if (!isDelegateType(type)) {
@@ -4307,6 +4317,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             ...(explicitCwd !== undefined ? { explicitCwd } : {}),
             ...(callbackTo !== undefined ? { callbackTo } : {}),
             ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
+            ...(opts.model !== undefined ? { model: opts.model } : {}),
+            ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
           });
         } catch {
           // registry hiccup must not break the delegation
@@ -4332,6 +4344,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           ...(explicitCwd !== undefined ? { explicitCwd } : {}),
           ...(callbackTo !== undefined ? { callbackTo } : {}),
           ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
+          ...(opts.model !== undefined ? { model: opts.model } : {}),
+          ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
         };
         let claimed: RegistryEntry | undefined;
         try {
