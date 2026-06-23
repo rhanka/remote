@@ -441,6 +441,28 @@ describe("account-pool", () => {
     expect(JSON.parse(lines[1]!).crossProvider).toBe(true);
   });
 
+  it("appendSessionLogEntry: kind=exhaust + signature persisted", () => {
+    appendSessionLogEntry({
+      kind: "exhaust",
+      jobId: "j-exhaust",
+      preferredProvider: "claude-code",
+      selectedProvider: "claude-code",
+      accountId: "a",
+      accountLabel: "Work",
+      crossProvider: false,
+      signature: "claude:rate-limited",
+    }, dir);
+    const entry = JSON.parse(readFileSync(sessionLogPath(dir), "utf8").trim());
+    expect(entry.kind).toBe("exhaust");
+    expect(entry.signature).toBe("claude:rate-limited");
+  });
+
+  it("appendSessionLogEntry: kind absent means launch (back-compat)", () => {
+    appendSessionLogEntry({ jobId: "j-compat", preferredProvider: "claude-code", selectedProvider: "claude-code", accountId: "a", accountLabel: "Work", crossProvider: false }, dir);
+    const entry = JSON.parse(readFileSync(sessionLogPath(dir), "utf8").trim());
+    expect(entry.kind).toBeUndefined();
+  });
+
   it("sessionLogPath: returns path inside dir", () => {
     expect(sessionLogPath(dir)).toContain("session-log.jsonl");
   });
