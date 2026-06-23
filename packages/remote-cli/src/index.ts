@@ -4781,7 +4781,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .action(async () => {
       const jobs = await reconcileJobs();
-      const rows = buildJobRows(jobs, jobLive);
+      const accounts = listAccounts();
+      const resolveAccountLabel = accounts.length > 0
+        ? (jobId: string): string | undefined => {
+            const binding = lookupBinding(jobId);
+            if (!binding) return undefined;
+            return accounts.find((a) => a.id === binding.accountId)?.label ?? binding.accountId.slice(0, 8);
+          }
+        : undefined;
+      const rows = buildJobRows(jobs, jobLive, Date.now(), resolveAccountLabel);
       process.stdout.write(`${renderJobsTable(rows)}\n`);
       // M3 — warn (don't self-heal) when queued jobs have no conductor draining.
       const advisory = conductorAdvisory(jobs, conductorRunning());

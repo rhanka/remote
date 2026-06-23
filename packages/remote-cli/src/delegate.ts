@@ -731,6 +731,8 @@ export type JobRow = {
    * slice 1.
    */
   note: string;
+  /** Account label bound to this job via the pool (omitted when no pool binding). */
+  account?: string;
 };
 
 /**
@@ -837,6 +839,7 @@ export function buildJobRows(
   jobs: ReadonlyArray<RegistryEntry>,
   isJobLive: (e: RegistryEntry) => boolean,
   nowMs: number = Date.now(),
+  resolveAccountLabel?: (jobId: string) => string | undefined,
 ): JobRow[] {
   return jobs.map((e) => {
     const state = reconcileJobState(e, isJobLive(e));
@@ -847,7 +850,7 @@ export function buildJobRows(
         ? `${throttleRetryLabel(e.throttle, nowMs)}` +
           (e.throttle?.attempts !== undefined ? ` (try ${e.throttle.attempts}/${THROTTLE_MAX_ATTEMPTS})` : "")
         : "";
-    return {
+    const row: JobRow = {
       id: e.id,
       type: e.tool,
       state,
@@ -855,6 +858,11 @@ export function buildJobRows(
       cwd: e.cwd,
       note,
     };
+    if (resolveAccountLabel) {
+      const label = resolveAccountLabel(e.id);
+      if (label !== undefined) row.account = label;
+    }
+    return row;
   });
 }
 
@@ -890,6 +898,8 @@ export function renderJobsTable(rows: ReadonlyArray<JobRow>): string {
     ["age", "AGE"],
     ["cwd", "CWD"],
   ];
+  // Show ACCOUNT when any row has a pool binding.
+  if (rows.some((r) => r.account !== undefined)) cols.push(["account", "ACCOUNT"]);
   // Only show the NOTE column when something needs it (a throttled "retry in Xm"
   // hint) — keeps the common all-running table unchanged. Reliability slice 1.
   if (rows.some((r) => r.note.length > 0)) cols.push(["note", "NOTE"]);
