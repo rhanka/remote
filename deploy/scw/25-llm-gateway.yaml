@@ -1,0 +1,165 @@
+# WP16 Slice 2 — LLM Gateway
+# Proxy transparent entre pods session et l'API Anthropic, avec pool de comptes
+# sticky par session et isolation token (pods reçoivent un bearer gw-<hex>).
+#
+# Prérequis avant apply :
+#   1. Créer le Secret llm-gateway-accounts (voir exemple .secret-example.yaml)
+#   2. cert-manager + ClusterIssuer "letsencrypt" en place
+#   3. DNS llm.sent-tech.ca → load-balancer SCW
+
+---
+# ConfigMap vide — le gateway y écrit les bindings sessionId→accountId
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-gateway-sticky
+  namespace: sentropic-remote
+data: {}
+
+---
+# ServiceAccount dédié pour le gateway
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llm-gateway
+  namespace: sentropic-remote
+
+---
+# RBAC : lecture + écriture du seul ConfigMap sticky (pas d'accès global)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: llm-gateway-sticky-rw
+  namespace: sentropic-remote
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [llm-gateway-sticky]
+    verbs: [get, patch, update]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: llm-gateway-sticky-rw
+  namespace: sentropic-remote
+subjects:
+  - kind: ServiceAccount
+    name: llm-gateway
+    namespace: sentropic-remote
+roleRef:
+  kind: Role
+  name: llm-gateway-sticky-rw
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment — single replica en Slice 2 (sticky in-memory + ConfigMap single-writer)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gateway
+  namespace: sentropic-remote
+  labels:
+    app: llm-gateway
+spec:
+  replicas: 1
+  # Recreate pour éviter deux répliques simultanées qui concurrencent le ConfigMap
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llm-gateway
+  template:
+    metadata:
+      labels:
+        app: llm-gateway
+    spec:
+      serviceAccountName: llm-gateway
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: gateway
+          image: ghcr.io/rhanka/sentropic-remote-llm-gateway:main
+          ports:
+            - name: http
+              containerPort: 3001
+          env:
+            - name: PORT
+              value: "3001"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # CA k8s pour les appels ConfigMap depuis Node.js fetch
+            - name: NODE_EXTRA_CA_CERTS
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            # Comptes Anthropic/Codex — montés depuis Secret
+            - name: GATEWAY_ACCOUNTS
+              valueFrom:
+                secretKeyRef:
+                  name: llm-gateway-accounts
+                  key: accounts.json
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+---
+# Service interne uniquement (ClusterIP).
+# Les pods session accèdent au gateway via ce Service.
+# L'Ingress llm.sent-tech.ca expose aussi ce Service (pour les pods qui resolvent
+# l'URL externe — comportement identique au ClusterIP en intra-cluster).
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway
+  namespace: sentropic-remote
+spec:
+  selector:
+    app: llm-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+# Ingress TLS — llm.sent-tech.ca
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-gateway
+  namespace: sentropic-remote
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["llm.sent-tech.ca"]
+      secretName: llm-gateway-tls
+  rules:
+    - host: llm.sent-tech.ca
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-gateway
+                port:
+                  name: http
