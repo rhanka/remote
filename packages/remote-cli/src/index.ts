@@ -4830,6 +4830,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           displayState = "awaiting-decision";
         }
       }
+      const binding = lookupBinding(job.id);
+      const accountLabel = binding
+        ? (listAccounts().find((a) => a.id === binding.accountId)?.label ?? binding.accountId.slice(0, 8))
+        : undefined;
       const lines = [
         `id:      ${job.id}`,
         `type:    ${job.tool}`,
@@ -4842,6 +4846,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         `task:    ${job.task ?? "-"}`,
         `parent:  ${parentInstance(job) ?? "-"}`,
         `started: ${job.enrolledAt}`,
+        ...(accountLabel !== undefined ? [`account: ${accountLabel}`] : []),
       ];
       const resultPath = join(dir, "result.json");
       const logPath = join(dir, "output.log");
