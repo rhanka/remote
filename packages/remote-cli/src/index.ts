@@ -266,6 +266,7 @@ import {
 import { checkReadiness } from "./readiness.js";
 import { createInterface } from "node:readline";
 import {
+  appendSessionLogEntry,
   clearExhaustion,
   enrollAccount,
   listAccounts,
@@ -278,6 +279,7 @@ import {
   selectAccountWithFallback,
   stickyBind,
   loadCandidates,
+  sessionLogPath,
   QUOTA_WINDOW_5H_MS,
   QUOTA_WINDOW_WEEK_MS,
   type AccountProvider,
@@ -1272,12 +1274,25 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
     const sel = selectAccountWithFallback(preferredProvider, job.id);
     if (!("allExhausted" in sel) && sel.candidate !== undefined) {
       if (sel.crossProvider) {
-        process.stderr.write(
+        const msg =
           `[remote] account-pool: all ${preferredProvider} accounts exhausted — ` +
-          `falling back to ${sel.candidate.provider} (${sel.candidate.label})\n`,
-        );
+          `falling back to ${sel.candidate.provider} (${sel.candidate.label})`;
+        process.stderr.write(msg + "\n");
+        // Notify the current tmux pane (non-blocking, best-effort).
+        if (process.env.TMUX) {
+          spawnSync("tmux", ["display-message", msg], { stdio: "ignore" });
+        }
       }
       stickyBind(job.id, sel.candidate.id, sel.candidate.provider);
+      // Append a line to the local session log for audit / future S3 export.
+      appendSessionLogEntry({
+        jobId: job.id,
+        preferredProvider,
+        selectedProvider: sel.candidate.provider,
+        accountId: sel.candidate.id,
+        accountLabel: sel.candidate.label,
+        crossProvider: sel.crossProvider,
+      });
       if (sel.candidate.provider === "codex") {
         accountEnvOverrides["OPENAI_API_KEY"] = sel.candidate.accessToken;
       } else if (sel.candidate.provider === "claude-code" && sel.candidate.configDir) {
@@ -6779,6 +6794,58 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
       process.stdout.write(
         JSON.stringify({ selected: pick, totalCandidates: candidates.length }, null, 2) + "\n",
+      );
+    });
+
+  accountCommand
+    .command("log")
+    .description(
+      "Show the local account selection log (~/.sentropic/session-log.jsonl). " +
+        "Each line records which account was used per job launch, including cross-provider fallbacks.",
+    )
+    .option("-n, --last <n>", "Show last N entries (default: 20)")
+    .option("--json", "Output raw JSONL")
+    .action((opts: { last?: string; json?: boolean }) => {
+      const logFile = sessionLogPath();
+      let raw: string;
+      try {
+        raw = readFileSync(logFile, "utf8");
+      } catch {
+        process.stderr.write("[remote] account log: no session log yet (no jobs launched with accounts enrolled)\n");
+        return;
+      }
+      const lines = raw.split("\n").filter(Boolean);
+      const n = opts.last !== undefined ? Number.parseInt(opts.last, 10) : 20;
+      const tail = Number.isFinite(n) && n > 0 ? lines.slice(-n) : lines;
+      if (opts.json) {
+        process.stdout.write(tail.join("\n") + "\n");
+        return;
+      }
+      if (tail.length === 0) {
+        process.stderr.write("[remote] account log: empty\n");
+        return;
+      }
+      process.stdout.write(
+        ["AT                       JOB-ID           PREFERRED        SELECTED         ACCOUNT-LABEL   CROSS"]
+          .concat(
+            tail.map((line) => {
+              try {
+                const e = JSON.parse(line) as { at: string; jobId: string; preferredProvider: string; selectedProvider: string; accountLabel: string; crossProvider: boolean };
+                const cross = e.crossProvider ? " ⚠" : "";
+                return [
+                  (e.at ?? "").slice(0, 23).padEnd(24),
+                  (e.jobId ?? "").slice(0, 16).padEnd(17),
+                  (e.preferredProvider ?? "").padEnd(16),
+                  (e.selectedProvider ?? "").padEnd(16),
+                  (e.accountLabel ?? "").slice(0, 15).padEnd(16),
+                  cross,
+                ].join(" ").trimEnd();
+              } catch {
+                return line;
+              }
+            }),
+          )
+          .join("\n") + "\n",
       );
     });
 

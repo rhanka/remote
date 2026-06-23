@@ -11,6 +11,7 @@
  */
 
 import {
+  appendFileSync,
   chmodSync,
   mkdirSync,
   readFileSync,
@@ -510,4 +511,40 @@ export const LLM_GATEWAY_URL = "https://llm.sent-tech.ca";
  */
 export function llmGatewayEnv(): { ANTHROPIC_BASE_URL: string } {
   return { ANTHROPIC_BASE_URL: LLM_GATEWAY_URL };
+}
+
+// ---------------------------------------------------------------------------
+// Local session log — append-only audit trail of account selections.
+//
+// Each entry is a single JSONL line in ~/.sentropic/session-log.jsonl (0600).
+// Provides a local audit trail; can be exported to S3 later.
+// Best-effort: errors are silently swallowed (never block job launch).
+// ---------------------------------------------------------------------------
+
+export type SessionLogEntry = {
+  at: string;
+  jobId: string;
+  preferredProvider: AccountProvider;
+  selectedProvider: AccountProvider;
+  accountId: string;
+  accountLabel: string;
+  crossProvider: boolean;
+};
+
+export function sessionLogPath(dir: string = sentropicDir()): string {
+  return join(dir, "session-log.jsonl");
+}
+
+export function appendSessionLogEntry(
+  entry: Omit<SessionLogEntry, "at">,
+  dir?: string,
+): void {
+  try {
+    const p = sessionLogPath(dir);
+    mkdirSync(dirname(p), { recursive: true });
+    const line = JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n";
+    appendFileSync(p, line, { mode: 0o600 });
+  } catch {
+    // best-effort
+  }
 }
