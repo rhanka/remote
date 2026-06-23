@@ -283,6 +283,7 @@ import {
   stickyBind,
   loadCandidates,
   sessionLogPath,
+  exportSessionLogToS3,
   QUOTA_WINDOW_5H_MS,
   QUOTA_WINDOW_WEEK_MS,
   type AccountProvider,
@@ -6919,7 +6920,22 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option("-n, --last <n>", "Show last N entries (default: 20)")
     .option("--json", "Output raw JSONL")
-    .action((opts: { last?: string; json?: boolean }) => {
+    .option(
+      "--export-s3 <s3-uri>",
+      "Upload the full log to an S3 URI (e.g. s3://my-bucket/session-log.jsonl). " +
+        "Reads AWS_ENDPOINT_URL (SCW: https://s3.fr-par.scw.cloud), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.",
+    )
+    .action(async (opts: { last?: string; json?: boolean; exportS3?: string }) => {
+      if (opts.exportS3) {
+        try {
+          await exportSessionLogToS3(opts.exportS3);
+          process.stdout.write(`[remote] session log exported to ${opts.exportS3}\n`);
+        } catch (err) {
+          process.stderr.write(`[remote] account log --export-s3: ${err instanceof Error ? err.message : String(err)}\n`);
+          process.exit(1);
+        }
+        return;
+      }
       const logFile = sessionLogPath();
       let raw: string;
       try {

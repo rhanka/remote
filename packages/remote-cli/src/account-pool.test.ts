@@ -4,9 +4,9 @@
  * All I/O is directed to a temp dir to avoid touching ~/.sentropic.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   accountsDescriptorPath,
@@ -16,6 +16,7 @@ import {
   clearBinding,
   clearExhaustion,
   enrollAccount,
+  exportSessionLogToS3,
   isExhausted,
   listAccounts,
   listAccountsWithStatus,
@@ -478,5 +479,32 @@ describe("account-pool", () => {
   it("llmGatewayEnv returns ANTHROPIC_BASE_URL pointing to gateway", () => {
     const env = llmGatewayEnv();
     expect(env.ANTHROPIC_BASE_URL).toBe("https://llm.sent-tech.ca");
+  });
+
+  // -------------------------------------------------------------------------
+  // exportSessionLogToS3
+  // -------------------------------------------------------------------------
+
+  it("exportSessionLogToS3: rejects invalid S3 URI", async () => {
+    await expect(exportSessionLogToS3("not-an-s3-uri", dir)).rejects.toThrow("Invalid S3 URI");
+  });
+
+  it("exportSessionLogToS3: rejects missing log file", async () => {
+    await expect(exportSessionLogToS3("s3://bucket/key.jsonl", dir)).rejects.toThrow("Session log not found");
+  });
+
+  it("exportSessionLogToS3: calls S3Client.send with PutObjectCommand", async () => {
+    const sendMock = vi.fn().mockResolvedValue({});
+    vi.doMock("@aws-sdk/client-s3", () => ({
+      S3Client: class { send = sendMock; },
+      PutObjectCommand: class { constructor(public params: unknown) {} },
+    }));
+    writeFileSync(sessionLogPath(dir), '{"at":"2026-01-01","jobId":"j1"}\n');
+    await exportSessionLogToS3("s3://my-bucket/logs/session-log.jsonl", dir);
+    expect(sendMock).toHaveBeenCalledOnce();
+    const cmd = sendMock.mock.calls[0][0] as { params: { Bucket: string; Key: string } };
+    expect(cmd.params.Bucket).toBe("my-bucket");
+    expect(cmd.params.Key).toBe("logs/session-log.jsonl");
+    vi.doUnmock("@aws-sdk/client-s3");
   });
 });

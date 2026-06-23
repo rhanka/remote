@@ -560,3 +560,37 @@ export function appendSessionLogEntry(
     // best-effort
   }
 }
+
+/**
+ * Export the local session log to an S3 URI.
+ *
+ * Reads endpoint from AWS_ENDPOINT_URL (SCW: https://s3.fr-par.scw.cloud).
+ * Credentials from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (standard AWS env).
+ */
+export async function exportSessionLogToS3(
+  s3Uri: string,
+  dir?: string,
+): Promise<void> {
+  const match = s3Uri.match(/^s3:\/\/([^/]+)\/(.+)$/);
+  if (!match) throw new Error(`Invalid S3 URI (expected s3://bucket/key): ${s3Uri}`);
+  const [, Bucket, Key] = match;
+
+  const logPath = sessionLogPath(dir);
+  let Body: Buffer;
+  try {
+    Body = readFileSync(logPath);
+  } catch {
+    throw new Error(`Session log not found at ${logPath}`);
+  }
+
+  const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
+  const client = new S3Client({
+    region: process.env.AWS_DEFAULT_REGION ?? process.env.AWS_REGION ?? "fr-par",
+    ...(process.env.AWS_ENDPOINT_URL
+      ? { endpoint: process.env.AWS_ENDPOINT_URL }
+      : {}),
+  });
+  await client.send(
+    new PutObjectCommand({ Bucket, Key, Body, ContentType: "application/x-ndjson" }),
+  );
+}
