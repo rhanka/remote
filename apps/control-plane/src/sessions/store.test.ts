@@ -53,6 +53,36 @@ describe("SessionStore partition", () => {
   });
 });
 
+describe("SessionStore.getByDisplayName", () => {
+  it("returns the session when exactly one matches (case-insensitive)", () => {
+    const s = new SessionStore();
+    const d = { ...desc("s1"), displayName: "geo-flotte-lasarre" };
+    s.put(d, "alice");
+    expect(s.getByDisplayName("geo-flotte-lasarre", "alice")?.id).toBe("s1");
+    expect(s.getByDisplayName("GEO-FLOTTE-LASARRE", "alice")?.id).toBe("s1");
+  });
+
+  it("returns undefined when no match", () => {
+    const s = new SessionStore();
+    s.put({ ...desc("s1"), displayName: "other" }, "alice");
+    expect(s.getByDisplayName("geo-flotte-lasarre", "alice")).toBeUndefined();
+  });
+
+  it("returns undefined when multiple sessions share the same displayName (ambiguous)", () => {
+    const s = new SessionStore();
+    s.put({ ...desc("s1"), displayName: "shared" }, "alice");
+    s.put({ ...desc("s2"), displayName: "shared" }, "alice");
+    expect(s.getByDisplayName("shared", "alice")).toBeUndefined();
+  });
+
+  it("respects owner partitioning", () => {
+    const s = new SessionStore();
+    s.put({ ...desc("s1"), displayName: "named" }, "alice");
+    expect(s.getByDisplayName("named", "bob")).toBeUndefined();
+    expect(s.getByDisplayName("named", "alice")?.id).toBe("s1");
+  });
+});
+
 describe("SessionStore persistence (durable store)", () => {
   it("persists put to disk and reloads on next construction", () => {
     const s1 = new SessionStore(scratch);
