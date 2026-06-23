@@ -43,6 +43,9 @@ export type K8sContainer = {
     readonly name: string;
     readonly value: string;
   }>;
+  readonly envFrom?: ReadonlyArray<{
+    readonly secretRef: { readonly name: string };
+  }>;
   readonly volumeMounts: ReadonlyArray<K8sVolumeMount>;
   readonly resources?: {
     readonly requests?: ResourceQuantities;
@@ -177,6 +180,14 @@ export type SpecBuilderOptions = {
    * set, injected as ANTHROPIC_API_KEY so Claude Code/Codex authenticate via
    * the gateway. Only meaningful when llmGatewayUrl is also set. */
   readonly llmGatewayToken?: string;
+  /**
+   * Names of k8s Secrets to inject into the session Pod as `envFrom` entries.
+   * Every key in each Secret becomes an env var in the agent container — the
+   * clean way to provide service creds (S3, external APIs) without baking them
+   * into the image or passing them via task args. Secrets must exist in the
+   * session's namespace before the Pod is created.
+   */
+  readonly extraEnvFromSecrets?: readonly string[];
 };
 
 // HOME-relative conversation/log dir each CLI writes, persisted on the PVC via a
@@ -774,6 +785,13 @@ export function buildSessionPodSpec(
                 ]
               : []),
           ],
+          ...(options.extraEnvFromSecrets && options.extraEnvFromSecrets.length > 0
+            ? {
+                envFrom: options.extraEnvFromSecrets.map((name) => ({
+                  secretRef: { name },
+                })),
+              }
+            : {}),
           volumeMounts,
           ...(Object.keys(resourceLimits).length > 0 ||
           Object.keys(resourceRequests).length > 0

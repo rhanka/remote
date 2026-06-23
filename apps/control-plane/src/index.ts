@@ -282,6 +282,7 @@ export function provisionerFromEnv(): SessionProvisioner {
     controlPlaneEndpoint?: string;
     sharedWorkspacePvc?: string;
     llmGatewayUrl?: string;
+    extraEnvFromSecrets?: string[];
   } = { namespace };
   if (process.env.SESSION_AGENT_IMAGE)
     overrides.image = process.env.SESSION_AGENT_IMAGE;
@@ -314,6 +315,15 @@ export function provisionerFromEnv(): SessionProvisioner {
   // WP16 Slice 3: route pods through the LLM gateway (personal-passthrough v0).
   if (process.env.LLM_GATEWAY_URL)
     overrides.llmGatewayUrl = process.env.LLM_GATEWAY_URL;
+  // Inject k8s Secrets as envFrom into every session Pod (e.g. service creds
+  // for S3, external APIs). Comma-separated secret names; each secret must
+  // exist in the session namespace. Never pass creds in task args.
+  if (process.env.SESSION_EXTRA_ENV_SECRETS) {
+    overrides.extraEnvFromSecrets = process.env.SESSION_EXTRA_ENV_SECRETS
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
   return new K8sSessionProvisioner(
     KubernetesObjectApiClient.fromDefault(),
     overrides,

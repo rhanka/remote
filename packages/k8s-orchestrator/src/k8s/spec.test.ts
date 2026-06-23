@@ -399,6 +399,26 @@ describe("k8s spec builders", () => {
     ).toBe("https://llm.sent-tech.ca");
   });
 
+  it("injects envFrom entries when extraEnvFromSecrets is set", () => {
+    const absent = buildSessionPodSpec(baseDescriptor);
+    expect(absent.spec.containers[0]!.envFrom).toBeUndefined();
+
+    const present = buildSessionPodSpec(baseDescriptor, {
+      ...DEFAULT_BUILDER_OPTIONS,
+      extraEnvFromSecrets: ["geo-acquisition-creds", "other-secret"],
+    });
+    expect(present.spec.containers[0]!.envFrom).toEqual([
+      { secretRef: { name: "geo-acquisition-creds" } },
+      { secretRef: { name: "other-secret" } },
+    ]);
+
+    const empty = buildSessionPodSpec(baseDescriptor, {
+      ...DEFAULT_BUILDER_OPTIONS,
+      extraEnvFromSecrets: [],
+    });
+    expect(empty.spec.containers[0]!.envFrom).toBeUndefined();
+  });
+
   it("sets HOME from descriptor.home, falling back to the builder option", () => {
     const withHome = buildSessionPodSpec({
       ...baseDescriptor,
