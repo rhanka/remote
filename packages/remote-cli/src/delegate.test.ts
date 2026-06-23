@@ -239,6 +239,28 @@ describe("buildJobRows / renderJobsTable (jobs ls rendering)", () => {
   it("empty job list renders a placeholder", () => {
     expect(renderJobsTable([])).toBe("(no delegated jobs)");
   });
+
+  it("resolveAccountLabel populates the account field and ACCOUNT column", () => {
+    const job = jobEntry({ id: "j1", jobState: "running" });
+    const resolver = (id: string) => id === "j1" ? "Work account" : undefined;
+    const rows = buildJobRows([job], () => true, Date.now(), resolver);
+    expect(rows[0]!.account).toBe("Work account");
+    const table = renderJobsTable(rows);
+    expect(table.split("\n")[0]).toMatch(/ACCOUNT/);
+    expect(table).toContain("Work account");
+  });
+
+  it("ACCOUNT column absent when resolver returns undefined for all jobs", () => {
+    const rows = buildJobRows([jobEntry({ id: "j2" })], () => true, Date.now(), () => undefined);
+    expect(rows[0]!.account).toBeUndefined();
+    const table = renderJobsTable(rows);
+    expect(table.split("\n")[0]).not.toMatch(/ACCOUNT/);
+  });
+
+  it("ACCOUNT column absent when no resolver passed", () => {
+    const rows = buildJobRows([jobEntry({ id: "j3" })], () => true, Date.now());
+    expect(rows[0]!.account).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
