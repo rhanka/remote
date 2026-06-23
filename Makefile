@@ -5,10 +5,15 @@ NAMESPACE ?= sentropic-remote
 CONTROL_PLANE_IMAGE ?= ghcr.io/rhanka/sentropic-remote-control-plane:v0.5.16
 SESSION_AGENT_IMAGE ?= ghcr.io/rhanka/sentropic-remote-session-agent:v0.5.16
 BROWSER_IMAGE ?= ghcr.io/rhanka/sentropic-remote-browser:v0.5.16
+# SCW deploy/scw/*.yaml hardcode the :main tag — scw-push retags + pushes both.
+CONTROL_PLANE_MAIN := ghcr.io/rhanka/sentropic-remote-control-plane:main
+SESSION_AGENT_MAIN := ghcr.io/rhanka/sentropic-remote-session-agent:main
+BROWSER_MAIN       := ghcr.io/rhanka/sentropic-remote-browser:main
 PORT ?= 8080
 
 .PHONY: help install build typecheck test verify format format-write \
 	images images-control-plane images-session-agent images-browser \
+	scw-push scw-push-control-plane \
 	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
 	demo demo-down \
 	scw-deploy scw-undeploy scw-port-forward scw-prepull \
@@ -36,6 +41,8 @@ help:
 	@echo "  undeploy / k3d-down  individual cleanup"
 	@echo ""
 	@echo "Scaleway Kapsule (tenant-only; cluster + namespace owned by ../poc-k8s):"
+	@echo "  scw-push-control-plane  push :v0.5.16 + retag+push :main (control-plane only)"
+	@echo "  scw-push             push all 3 images — versioned tag + :main retag (deploy/scw uses :main)"
 	@echo "  scw-deploy           apply RBAC + Deployment + Service + pre-pull DaemonSet (add SCW_INGRESS=1 for the Ingress)"
 	@echo "  scw-prepull          re-pull session-agent:main on all session nodes (run after a release)"
 	@echo "  scw-port-forward     expose the Kapsule control-plane locally on $(PORT)"
@@ -73,6 +80,21 @@ images-session-agent:
 
 images-browser:
 	docker build -t $(BROWSER_IMAGE) -f packages/browser-bridge/docker/Dockerfile .
+
+# Push versioned tag + retag :main (used by deploy/scw/*.yaml) + push :main.
+# Run after `make images-control-plane` (or the other images-* targets).
+scw-push-control-plane:
+	docker push $(CONTROL_PLANE_IMAGE)
+	docker tag $(CONTROL_PLANE_IMAGE) $(CONTROL_PLANE_MAIN)
+	docker push $(CONTROL_PLANE_MAIN)
+
+scw-push: scw-push-control-plane
+	docker push $(SESSION_AGENT_IMAGE)
+	docker tag $(SESSION_AGENT_IMAGE) $(SESSION_AGENT_MAIN)
+	docker push $(SESSION_AGENT_MAIN)
+	docker push $(BROWSER_IMAGE)
+	docker tag $(BROWSER_IMAGE) $(BROWSER_MAIN)
+	docker push $(BROWSER_MAIN)
 
 k3d-up:
 	k3d cluster list | grep -q "^$(CLUSTER)\b" || k3d cluster create $(CLUSTER) --wait
