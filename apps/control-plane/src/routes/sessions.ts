@@ -660,11 +660,13 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
   });
 
   router.patch("/:id", async (c) => {
-    const id = c.req.param("id");
-    if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+    const rawId = c.req.param("id");
+    if (sessionTokenMismatch(c.var.auth!, rawId)) return notFound(c);
     const userId = c.var.auth!.userId;
-    const session = store.get(id, userId);
+    const session =
+      store.get(rawId, userId) ?? store.getByDisplayName(rawId, userId);
     if (!session) return notFound(c);
+    const id = session.id;
     const body = (await c.req.json().catch(() => ({}))) as {
       displayName?: string;
     };
@@ -800,12 +802,16 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
     "/:id/stop",
     validateJsonBody(ajv, stopSessionRequestSchema),
     (c) => {
-      const id = c.req.param("id");
-      if (sessionTokenMismatch(c.var.auth!, id)) return notFound(c);
+      const rawId = c.req.param("id");
+      if (sessionTokenMismatch(c.var.auth!, rawId)) return notFound(c);
+      const userId = c.var.auth!.userId;
+      const resolved =
+        store.get(rawId, userId) ?? store.getByDisplayName(rawId, userId);
+      if (!resolved) return notFound(c);
       const req = validatedBody<StopSessionRequest>(c);
-      const stopped = stopSessionInternal(id, req.reason, c.var.auth!.userId);
+      const stopped = stopSessionInternal(resolved.id, req.reason, userId);
       if (!stopped) return notFound(c);
-      const response: StopSessionResponse = { sessionId: id, accepted: true };
+      const response: StopSessionResponse = { sessionId: resolved.id, accepted: true };
       return c.json(response);
     },
   );
