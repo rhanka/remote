@@ -526,6 +526,7 @@ export async function createRemoteSession(
     workspaceId?: string;
     workspacePath?: string;
     home?: string;
+    agentImage?: string;
   },
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ id: string }> {
@@ -539,6 +540,7 @@ export async function createRemoteSession(
   if (body.workspaceId) payload.workspaceId = body.workspaceId;
   if (body.workspacePath) payload.workspacePath = body.workspacePath;
   if (body.home) payload.home = body.home;
+  if (body.agentImage) payload.agentImage = body.agentImage;
   if (
     body.resume !== undefined ||
     (body.startupArgs?.length ?? 0) > 0 ||

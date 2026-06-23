@@ -25,6 +25,10 @@ export type ProvisionOptions = {
    * set, injected as ANTHROPIC_API_KEY so the pod authenticates via the gateway
    * instead of holding a raw Anthropic token. */
   readonly gatewayToken?: string;
+  /** Override the session-agent container image for this session. Fully-qualified
+   * image reference (registry/repo/name:tag). Defaults to SESSION_AGENT_IMAGE
+   * (SpecBuilderOptions.image) when absent. */
+  readonly agentImage?: string;
 };
 
 export type WorkspaceGcOptions = {

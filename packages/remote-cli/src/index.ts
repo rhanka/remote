@@ -372,6 +372,8 @@ type ProfileOpts = {
   name?: string;
   /** WP7 — add the headful-browser noVNC sidecar to this session. */
   browser?: boolean;
+  /** Override the session-agent container image (fully-qualified registry ref). */
+  agentImage?: string;
 };
 
 type ProfileCliOpts = ProfileOpts & {
@@ -598,6 +600,7 @@ async function runProfile(
       ...(opts.sync ? { workspaceSync: true } : {}),
       ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
       ...(opts.browser ? { metadata: { browser: true } } : {}),
+      ...(opts.agentImage ? { agentImage: opts.agentImage } : {}),
     });
     if (archive) {
       await uploadWorkspaceArchive(opts.remote, session.id, archive);
@@ -1719,6 +1722,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       .option(
         "--browser",
         "add the headful-browser noVNC sidecar (WP7) — enables 2FA / authenticated-site flows from inside the pod",
+      )
+      .option(
+        "--image <ref>",
+        "override the session-agent container image (fully-qualified registry ref, e.g. rg.fr-par.scw.cloud/sentropic-geo/geo-acquisition:0.1.0)",
       )
       .action(
         async (commandArgs: string[] | undefined, opts: ProfileCliOpts) => {

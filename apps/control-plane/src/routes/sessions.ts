@@ -375,6 +375,7 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
           workspaceSync?: boolean;
           workspaceExport?: boolean;
           workspaceId?: string;
+          agentImage?: string;
         }
       >(c);
       const { userId } = c.var.auth!;
@@ -392,10 +393,12 @@ export function createSessionsRouter(deps: SessionsRouterDeps): SessionsRouter {
         namespace?: string;
         sessionToken?: string;
         gatewayToken?: string;
+        agentImage?: string;
       } = { namespace };
       if (req.credentials) provisionOptions.credentials = req.credentials;
       if (req.workspaceSync) provisionOptions.workspaceSync = true;
       if (req.workspaceExport) provisionOptions.workspaceExport = true;
+      if (req.agentImage) provisionOptions.agentImage = req.agentImage;
       // Under bearer auth, mint a per-session service token the agent uses to
       // authenticate its callbacks (workspace sync/export, cli-session). In
       // off-mode no secret/auth is set so nothing is minted or injected.

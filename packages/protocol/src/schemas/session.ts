@@ -177,6 +177,12 @@ export const createSessionRequestSchema = {
       description:
         "Bind the session to a persistent Workspace; its retained PVC is mounted at /workspace instead of a per-session volume.",
     },
+    agentImage: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Override the session-agent container image for this session. Useful when the task requires tools not present in the default session-agent image (e.g. GDAL, custom pipelines). Must be a fully-qualified image reference (registry/repo/name:tag). Falls back to SESSION_AGENT_IMAGE when absent.",
+    },
   },
 } as const;
 

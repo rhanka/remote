@@ -109,6 +109,7 @@ export class K8sSessionProvisioner implements SessionProvisioner {
       ...this.options,
       namespace: ns,
       ...(options.gatewayToken ? { llmGatewayToken: options.gatewayToken } : {}),
+      ...(options.agentImage ? { image: options.agentImage } : {}),
     };
 
     const credentials = options.credentials ?? {};
