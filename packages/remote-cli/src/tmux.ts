@@ -827,6 +827,50 @@ export function relaunchInSession(name: string, command: string): boolean {
 }
 
 /**
+ * Is a tmux session ATTACHED right now (a client is connected)? Reads
+ * `#{session_attached}` for the EXACT session ("=" prefix → no prefix match).
+ * Returns true (CONSERVATIVE) on ANY doubt — missing/erroring tmux, unparseable
+ * count — so the interactive throttle resume NEVER types into a pane we cannot
+ * prove is detached. The throttle-phase-2 HARD GUARD lives here AND in the pure
+ * planner; this is the live, last-line-of-defence re-check.
+ */
+export function sessionAttached(name: string): boolean {
+  try {
+    const r = spawnSync(
+      TMUX,
+      ["display", "-p", "-t", `=${name}`, "#{session_attached}"],
+      { encoding: "utf8" },
+    );
+    if (r.status !== 0) return true; // can't tell → assume attached (never nudge)
+    const n = Number((r.stdout ?? "").trim());
+    if (!Number.isInteger(n)) return true; // unparseable → assume attached
+    return n !== 0;
+  } catch {
+    return true; // tmux blew up → assume attached (never nudge)
+  }
+}
+
+/**
+ * Send a LITERAL line into a session's main pane, then submit it with a real
+ * Enter key event. The keys ride `send-keys -l <keys>` as a SINGLE literal
+ * argument — tmux does NOT interpret it (no key-name lookup, no shell), so an
+ * arbitrary nudge string is safe. Enter is sent as a separate, NON-literal
+ * key-name so it is a real carriage return rather than the word "Enter". Used by
+ * the interactive throttle auto-resume to un-stick a rate-limited pane. Returns
+ * whether tmux accepted both sends.
+ */
+export function sendKeysLiteral(name: string, keys: string): boolean {
+  const typed = spawnSync(TMUX, ["send-keys", "-t", name, "-l", keys], {
+    stdio: "ignore",
+  });
+  if (typed.status !== 0) return false;
+  const enter = spawnSync(TMUX, ["send-keys", "-t", name, "Enter"], {
+    stdio: "ignore",
+  });
+  return enter.status === 0;
+}
+
+/**
  * Attach the real terminal straight into the Pod's tmux session via
  * `kubectl exec -it`. The local terminal talks to tmux directly (no WS proxy),
  * so scrollback + copy-to-local-clipboard (OSC52) work natively. Requires a

@@ -68,6 +68,8 @@ import {
   localSessionName,
   relaunchInSession,
   resolveAgentPaneForInstance,
+  sendKeysLiteral,
+  sessionAttached,
   sessionAttachedCount,
   setLocalSessionDisplayName,
   startH2aWindow,
@@ -95,6 +97,7 @@ import {
   withRegistryLock,
   resolveRegistryPath,
   type RegistryEntry,
+  type RegistryTool,
   type ThrottleInfo,
 } from "./registry.js";
 import {
