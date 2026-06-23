@@ -275,6 +275,8 @@ import {
   readCodexCredential,
   removeAccount,
   selectAccount,
+  selectAccountWithFallback,
+  stickyBind,
   loadCandidates,
   QUOTA_WINDOW_5H_MS,
   QUOTA_WINDOW_WEEK_MS,
@@ -1259,6 +1261,32 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
     return { started: false, error: (err as Error).message };
   }
 
+  // Account-pool credential injection (WP16 Layer-C).
+  // For claude-code and codex jobs, select the best available account and inject
+  // its credential before spawning. tmux inherits process.env, so we set/restore
+  // around the spawn (same pattern as DEPTH_ENV). agy has no pool → skip.
+  // If no accounts are enrolled or all are exhausted, we proceed with existing env.
+  const accountEnvOverrides: Record<string, string> = {};
+  if (job.tool === "claude" || job.tool === "codex") {
+    const preferredProvider: AccountProvider = job.tool === "claude" ? "claude-code" : "codex";
+    const sel = selectAccountWithFallback(preferredProvider, job.id);
+    if (!("allExhausted" in sel) && sel.candidate !== undefined) {
+      if (sel.crossProvider) {
+        process.stderr.write(
+          `[remote] account-pool: all ${preferredProvider} accounts exhausted — ` +
+          `falling back to ${sel.candidate.provider} (${sel.candidate.label})\n`,
+        );
+      }
+      stickyBind(job.id, sel.candidate.id, sel.candidate.provider);
+      if (sel.candidate.provider === "codex") {
+        accountEnvOverrides["OPENAI_API_KEY"] = sel.candidate.accessToken;
+      } else if (sel.candidate.provider === "claude-code" && sel.candidate.configDir) {
+        accountEnvOverrides["CLAUDE_CONFIG_DIR"] = sel.candidate.configDir;
+      }
+    }
+    // allExhausted: proceed with existing env (fail gracefully at the CLI level)
+  }
+
   // Propagate the child's remaining spawn-depth budget through the env so a job
   // that itself runs `remote delegate` inherits a DECREMENTED budget (depth=0 →
   // refuse). tmux inherits the spawning process's env, so set it around spawn.
@@ -1267,10 +1295,15 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   // not the job slug), so an interactive tmux job actually completes.
   const prevDepth = process.env[DEPTH_ENV];
   const prevJobId = process.env[JOB_ID_ENV];
+  const prevAccountEnvs: Record<string, string | undefined> = {};
   process.env[DEPTH_ENV] = childDepthEnvValue(
     job.depthBudget ?? clampDepth(undefined),
   );
   process.env[JOB_ID_ENV] = job.id;
+  for (const [k, v] of Object.entries(accountEnvOverrides)) {
+    prevAccountEnvs[k] = process.env[k];
+    process.env[k] = v;
+  }
   let tmuxSession: string;
   try {
     if (headless) {
@@ -1302,6 +1335,10 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
     else process.env[DEPTH_ENV] = prevDepth;
     if (prevJobId === undefined) delete process.env[JOB_ID_ENV];
     else process.env[JOB_ID_ENV] = prevJobId;
+    for (const [k, prev] of Object.entries(prevAccountEnvs)) {
+      if (prev === undefined) delete process.env[k];
+      else process.env[k] = prev;
+    }
   }
 
   enroll({
@@ -6629,6 +6666,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           label: opts.label,
           accessToken,
           ...(opts.id !== undefined ? { id: opts.id } : {}),
+          // For claude-code: store configDir so startJob can inject CLAUDE_CONFIG_DIR.
+          ...(provider === "claude-code" && opts.configDir !== undefined
+            ? { configDir: opts.configDir }
+            : {}),
         });
         if (!result.ok) {
           process.stderr.write(`[remote] account enroll: ${result.error}\n`);

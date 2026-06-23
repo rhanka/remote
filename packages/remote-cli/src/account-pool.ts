@@ -27,6 +27,8 @@ export type AccountDescriptor = {
   readonly provider: AccountProvider;
   readonly label: string;
   readonly enrolledAt: string;
+  /** For claude-code accounts: the config dir holding credentials (maps to CLAUDE_CONFIG_DIR). Absent = default ~/.claude. */
+  readonly configDir?: string;
 };
 
 export type AccountCandidate = AccountDescriptor & {
@@ -95,6 +97,8 @@ export type EnrollOpts = {
   accessToken: string;
   id?: string;
   dir?: string;
+  /** For claude-code: path to the CLI config dir holding credentials (stored as CLAUDE_CONFIG_DIR override). */
+  configDir?: string;
 };
 
 export type EnrollResult =
@@ -118,6 +122,7 @@ export function enrollAccount(opts: EnrollOpts): EnrollResult {
     provider: opts.provider,
     label: opts.label,
     enrolledAt: new Date().toISOString(),
+    ...(opts.configDir !== undefined ? { configDir: opts.configDir } : {}),
   };
   saveDescriptors([...descs, descriptor], opts.dir);
   const tokens = loadTokenMap(opts.dir);
