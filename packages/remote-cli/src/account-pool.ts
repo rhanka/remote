@@ -442,6 +442,57 @@ export function selectAccountWithFallback(
 }
 
 // ---------------------------------------------------------------------------
+// Credential auto-read helpers
+//
+// Read the access token from the CLI's own config directory so the user
+// doesn't have to copy-paste it manually. Called only when the caller
+// explicitly asks (--from-credentials flag) — never automatic.
+// ---------------------------------------------------------------------------
+
+export type ReadCredentialResult =
+  | { ok: true; accessToken: string }
+  | { ok: false; error: string };
+
+/**
+ * Read the Claude Code access token from ~/.claude/.credentials.json
+ * (or a custom configDir). Returns the claudeAiOauth.accessToken value.
+ */
+export function readClaudeCredential(
+  configDir: string = join(homedir(), ".claude"),
+): ReadCredentialResult {
+  const path = join(configDir, ".credentials.json");
+  const raw = readJson<Record<string, unknown>>(path);
+  if (!raw) {
+    return { ok: false, error: `credentials file not found or unreadable: ${path}` };
+  }
+  const oauth = raw["claudeAiOauth"] as Record<string, unknown> | undefined;
+  const token = oauth?.["accessToken"];
+  if (typeof token !== "string" || !token.trim()) {
+    return { ok: false, error: `claudeAiOauth.accessToken missing or empty in ${path}` };
+  }
+  return { ok: true, accessToken: token.trim() };
+}
+
+/**
+ * Read the Codex / OpenAI API key from ~/.codex/auth.json
+ * (or a custom configDir). Returns the OPENAI_API_KEY value.
+ */
+export function readCodexCredential(
+  configDir: string = join(homedir(), ".codex"),
+): ReadCredentialResult {
+  const path = join(configDir, "auth.json");
+  const raw = readJson<Record<string, unknown>>(path);
+  if (!raw) {
+    return { ok: false, error: `auth file not found or unreadable: ${path}` };
+  }
+  const key = raw["OPENAI_API_KEY"];
+  if (typeof key !== "string" || !key.trim()) {
+    return { ok: false, error: `OPENAI_API_KEY missing or empty in ${path}` };
+  }
+  return { ok: true, accessToken: key.trim() };
+}
+
+// ---------------------------------------------------------------------------
 // Gateway constants (Layer-B wire — stable per architect spec)
 // ---------------------------------------------------------------------------
 

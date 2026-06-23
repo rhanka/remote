@@ -271,6 +271,8 @@ import {
   listAccounts,
   listAccountsWithStatus,
   markExhausted,
+  readClaudeCredential,
+  readCodexCredential,
   removeAccount,
   selectAccount,
   loadCandidates,
@@ -6562,8 +6564,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   accountCommand
     .command("enroll")
     .description(
-      "Register an LLM account. Pass the access token via the REMOTE_ACCOUNT_TOKEN " +
-        "env var (never as a flag — that leaks to shell history). " +
+      "Register an LLM account. Pass the access token via REMOTE_ACCOUNT_TOKEN " +
+        "env var (never as a flag — that leaks to shell history), OR use " +
+        "--from-credentials to read from the CLI's own config file. " +
         "Descriptor written to ~/.sentropic/accounts.json (0600); " +
         "token written to ~/.sentropic/accounts-tokens.json (0600).",
     )
@@ -6576,8 +6579,17 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--id <id>",
       "Unique account id (default: <provider>-<epoch>)",
     )
+    .option(
+      "--from-credentials",
+      "Read access token from the CLI's local config file (~/.claude/.credentials.json " +
+        "for claude-code, ~/.codex/auth.json for codex) instead of REMOTE_ACCOUNT_TOKEN.",
+    )
+    .option(
+      "--config-dir <path>",
+      "Custom config directory to read credentials from (used with --from-credentials).",
+    )
     .action(
-      (opts: { provider: string; label: string; id?: string }) => {
+      (opts: { provider: string; label: string; id?: string; fromCredentials?: boolean; configDir?: string }) => {
         const provider = opts.provider as AccountProvider;
         if (provider !== "claude-code" && provider !== "codex") {
           process.stderr.write(
@@ -6586,13 +6598,31 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.exitCode = 1;
           return;
         }
-        const accessToken = process.env.REMOTE_ACCOUNT_TOKEN ?? "";
-        if (!accessToken.trim()) {
+        let accessToken: string;
+        if (opts.fromCredentials) {
+          const result =
+            provider === "claude-code"
+              ? readClaudeCredential(opts.configDir)
+              : readCodexCredential(opts.configDir);
+          if (!result.ok) {
+            process.stderr.write(`[remote] account enroll: ${result.error}\n`);
+            process.exitCode = 1;
+            return;
+          }
+          accessToken = result.accessToken;
           process.stderr.write(
-            "[remote] account enroll: REMOTE_ACCOUNT_TOKEN env var is not set or empty\n",
+            `[remote] account enroll: read token from ${provider === "claude-code" ? "~/.claude/.credentials.json" : "~/.codex/auth.json"}\n`,
           );
-          process.exitCode = 1;
-          return;
+        } else {
+          accessToken = process.env.REMOTE_ACCOUNT_TOKEN ?? "";
+          if (!accessToken.trim()) {
+            process.stderr.write(
+              "[remote] account enroll: REMOTE_ACCOUNT_TOKEN env var is not set or empty\n" +
+                "[remote] (tip: use --from-credentials to read from the CLI's local config)\n",
+            );
+            process.exitCode = 1;
+            return;
+          }
         }
         const result = enrollAccount({
           provider,
