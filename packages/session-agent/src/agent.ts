@@ -65,7 +65,7 @@ const PROFILE_COMMANDS: Readonly<
   shell: { command: "/bin/bash", args: [] },
   codex: { command: "codex", args: [] },
   opencode: { command: "opencode", args: [] },
-  claude: { command: "claude", args: [] },
+  claude: { command: "claude", args: ["--dangerously-skip-permissions"] },
   agy: { command: "agy", args: [] },
   gemini: { command: "gemini", args: [] },
   mistral: { command: "mistral", args: [] },

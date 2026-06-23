@@ -231,7 +231,7 @@ describe("SessionAgent", () => {
     expect(args![1]).toContain("tmux new-session");
     expect(args![1]).toContain("tmux has-session");
     expect(args![1]).toContain("tmux attach");
-    expect(args!.slice(2)).toEqual(["remote-session", "claude"]);
+    expect(args!.slice(2)).toEqual(["remote-session", "claude", "--dangerously-skip-permissions"]);
   });
 
   it("does NOT wrap the shell profile (ephemeral push/pull one-shot)", async () => {
