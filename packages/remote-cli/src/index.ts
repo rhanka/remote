@@ -4469,6 +4469,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             ...(explicitCwd !== undefined ? { explicitCwd } : {}),
             ...(callbackTo !== undefined ? { callbackTo } : {}),
             ...(opts.track !== undefined ? { trackWp: opts.track } : {}),
+            ...(opts.model !== undefined ? { model: opts.model } : {}),
+            ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+            ...(opts.account !== undefined ? { accountId: opts.account } : {}),
           } satisfies RegistryEntry);
 
         const result = await startJob(launchEntry);
