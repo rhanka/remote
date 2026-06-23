@@ -57,12 +57,11 @@ spec:
             # gateway (personal-passthrough v0 — token injected per-session).
             - name: LLM_GATEWAY_URL
               value: "https://llm.sent-tech.ca"
-            # Optional: comma-separated k8s Secret names whose keys are injected
-            # as env vars into every session Pod (envFrom). Use for service creds
-            # (S3, external APIs) that must not appear in task args.
-            # Example: geo fleet creds → SESSION_EXTRA_ENV_SECRETS: "geo-acquisition-creds"
-            # - name: SESSION_EXTRA_ENV_SECRETS
-            #   value: ""
+            # Comma-separated k8s Secret names whose keys are injected as env vars
+            # into every session Pod (envFrom). Used for service creds (S3,
+            # Mistral, external APIs) that must not appear in task args.
+            - name: SESSION_EXTRA_ENV_SECRETS
+              value: "geo-acquisition-creds"
           ports:
             - name: http
               containerPort: 8080
