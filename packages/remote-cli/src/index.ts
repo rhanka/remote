@@ -271,6 +271,7 @@ import {
   enrollAccount,
   listAccounts,
   listAccountsWithStatus,
+  lookupBinding,
   markExhausted,
   readClaudeCredential,
   readCodexCredential,
@@ -4571,6 +4572,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   const maybeRecordThrottle = (job: RegistryEntry): boolean => {
     const verdict = detectThrottle(readJobLogTail(job), job.tool);
     if (!verdict.throttled) return false;
+    // Auto-exhaust the account that was rate-limited so new jobs avoid it.
+    const binding = lookupBinding(job.id);
+    if (binding) {
+      markExhausted(binding.accountId, QUOTA_WINDOW_5H_MS, verdict.signature ?? "rate-limit");
+    }
     const nowMs = Date.now();
     const prior = job.throttle
       ? { attempts: job.throttle.attempts, firstAt: job.throttle.firstAt }
