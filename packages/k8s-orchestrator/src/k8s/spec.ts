@@ -723,6 +723,11 @@ export function buildSessionPodSpec(
             // (detach-safe; enables `remote attach --exec`). The agent ignores
             // this for the one-shot `shell` profile.
             { name: "SESSION_TMUX", value: "1" },
+            // Escape hatch: Claude Code refuses --dangerously-skip-permissions
+            // when running as root unless IS_SANDBOX=1 is set. Session-agent
+            // pods run as root inside an isolated k8s sandbox — this is the
+            // correct signal (not a multi-user host).
+            { name: "IS_SANDBOX", value: "1" },
             ...(descriptor.workspaceId
               ? [
                   {
