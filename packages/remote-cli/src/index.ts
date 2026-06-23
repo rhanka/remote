@@ -267,6 +267,7 @@ import { checkReadiness } from "./readiness.js";
 import { createInterface } from "node:readline";
 import {
   appendSessionLogEntry,
+  clearBinding,
   clearExhaustion,
   enrollAccount,
   listAccounts,
@@ -6960,6 +6961,25 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           )
           .join("\n") + "\n",
       );
+    });
+
+  accountCommand
+    .command("rm-binding <affinityKey>")
+    .description(
+      "Remove a sticky session→account binding (forces re-selection on next launch for this affinity key). " +
+        "Use the job id or session slug as <affinityKey>.",
+    )
+    .action((affinityKey: string) => {
+      const existing = lookupBinding(affinityKey);
+      if (!existing) {
+        process.stderr.write(`[remote] no binding for "${affinityKey}"\n`);
+        process.exitCode = 1;
+        return;
+      }
+      clearBinding(affinityKey);
+      const accounts = listAccounts();
+      const label = accounts.find((a) => a.id === existing.accountId)?.label ?? existing.accountId.slice(0, 8);
+      process.stderr.write(`[remote] binding removed: ${affinityKey} → ${label} (${existing.provider})\n`);
     });
 
   accountCommand
