@@ -1429,7 +1429,9 @@ export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
   const preferredProvider: AccountProvider = job.tool === "codex" ? "codex" : "claude-code";
   const sel = selectAccountWithFallback(preferredProvider, job.id);
   const accountEnvOverrides: Record<string, string> = {};
-  if (!("allExhausted" in sel) && sel.candidate !== undefined) {
+  if ("allExhausted" in sel) {
+    process.stderr.write(`[remote] account-pool: all accounts exhausted for job ${job.id} — resuming without account override (may throttle again)\n`);
+  } else if (sel.candidate !== undefined) {
     if (sel.crossProvider) {
       const msg = `[remote] account-pool: all ${preferredProvider} accounts exhausted — falling back to ${sel.candidate.provider} (${sel.candidate.label}) for resume`;
       process.stderr.write(msg + "\n");
