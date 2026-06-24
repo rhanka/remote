@@ -390,15 +390,44 @@ function runDir(): string {
   return base;
 }
 
-/** Launch the layout in gnome-terminal: one window per group, one tab per session. */
+/**
+ * Launch the layout in gnome-terminal: one window per group, one tab per session.
+ *
+ * Default behaviour (reattach=false): sessions already live in tmux are SKIPPED —
+ * no new terminal tab is opened for them. The assumption is that if a tmux session
+ * exists, the user either has a terminal showing it or intentionally left it running.
+ * Use reattach=true (--reattach flag) to reopen a terminal tab for every session
+ * regardless of its current tmux state.
+ */
 export function launchLayout(
   windows: LayoutWindow[],
   stderr: NodeJS.WriteStream = process.stderr,
-): void {
-  // Sessions already live now: their tabs attach instead of re-running (which
-  // the single-writer guard would refuse).
+  opts: { reattach?: boolean } = {},
+): { opened: number; skippedLive: string[] } {
   const liveSlugs = new Set(listLocalSessions().map((s) => s.slug));
+  const skippedLive: string[] = [];
+  let opened = 0;
+
   for (const win of windows) {
+    // Filter tabs: skip local sessions already in tmux (attach would be redundant).
+    // Remote (k8s) tabs are always included — we can't probe pod health here.
+    const activeTabs = opts.reattach
+      ? win.tabs
+      : win.tabs.filter((t) => {
+          if (t.remoteId) return true;
+          const slug = slugify(t.label);
+          if (liveSlugs.has(slug)) {
+            skippedLive.push(t.label);
+            return false;
+          }
+          return true;
+        });
+
+    if (activeTabs.length === 0) {
+      // All sessions in this window are already active — no tab needed.
+      continue;
+    }
+
     // Map keyed by per-tab working directory -> the tab's command. Tabs sharing
     // a cwd (several sessions of one project) each claim a distinct line FIFO.
     const slug = win.title.replace(/[^a-zA-Z0-9]+/g, "-");
@@ -407,12 +436,12 @@ export function launchLayout(
       `restore-${process.pid}-${slug}-${mapCounter++}.map`,
     );
     const body =
-      win.tabs.map((t) => `${t.cwd}\t${tabCommand(t, liveSlugs)}`).join("\n") +
+      activeTabs.map((t) => `${t.cwd}\t${tabCommand(t, liveSlugs)}`).join("\n") +
       "\n";
     writeFileSync(mapPath, body, "utf8");
 
     const args: string[] = [];
-    win.tabs.forEach((tab, i) => {
+    activeTabs.forEach((tab, i) => {
       args.push(
         i === 0 ? "--window" : "--tab",
         `--working-directory=${tab.cwd}`,
@@ -423,7 +452,7 @@ export function launchLayout(
     args.push("--", "bash", "-lc", DISPATCHER, "remote-restore", mapPath);
 
     stderr.write(
-      `[remote] fenêtre "${win.title}" (${win.tabs.length} onglet(s))\n`,
+      `[remote] fenêtre "${win.title}" (${activeTabs.length} onglet(s))\n`,
     );
     // Surface gnome-terminal errors (e.g. "Failed to get screen…") instead of
     // silently claiming the window opened.
@@ -436,7 +465,17 @@ export function launchLayout(
       stderr.write(`[remote] gnome-terminal: ${chunk.toString().trim()}\n`);
     });
     child.unref();
+    opened += activeTabs.length;
   }
+
+  if (skippedLive.length > 0) {
+    stderr.write(
+      `[remote] ${skippedLive.length} session(s) déjà actives ignorées` +
+      ` (--reattach pour les rouvrir quand même): ${skippedLive.join(", ")}\n`,
+    );
+  }
+
+  return { opened, skippedLive };
 }
 
 export type RestoreOptions = {
@@ -445,6 +484,11 @@ export type RestoreOptions = {
   group?: string;
   /** Pre-resolved SCW tabs (from `remote ls`), used to fill `remote: true` groups. */
   remoteTabs?: RemoteTab[];
+  /**
+   * When true, open a new terminal tab even for sessions already live in tmux.
+   * Default (false): sessions already in tmux are skipped — no redundant tab.
+   */
+  reattach?: boolean;
   stderr?: NodeJS.WriteStream;
 };
 
@@ -521,7 +565,7 @@ export function restore(
   if (dropped > 0 && !opts.group)
     stderr.write(`  (! ${dropped} session(s) ignorée(s), plafond atteint)\n`);
   if (!opts.dryRun && total > 0) {
-    launchLayout(windows, stderr);
+    launchLayout(windows, stderr, opts.reattach ? { reattach: true } : {});
     // Auto-record the launched layout (inspect with `remote layout show`).
     try {
       writeLastLayout(windows, opts.group);

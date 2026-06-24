@@ -6239,7 +6239,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       'Relance les sessions dev dans leur layout (fenêtre par groupe, onglet par session). Sans argument: tous les groupes. Avec [group]: ce lot seulement (ex: `remote restore "full remote"`). Groupes LOCAUX = claude/codex sous ~/src/* (tmux via `remote run`); groupes REMOTE = sessions SCW (`remote attach <id> --exec`). Layout: champ `layout` de la config.',
     )
     .option("--dry-run", "affiche le layout calculé sans ouvrir de terminaux")
-    .action(async (group: string | undefined, opts: { dryRun?: boolean }) => {
+    .option("--reattach", "ouvre aussi un onglet pour les sessions déjà actives en tmux (ré-attache)")
+    .action(async (group: string | undefined, opts: { dryRun?: boolean; reattach?: boolean }) => {
       if (!tmuxAvailable()) {
         process.stderr.write(
           "[remote] tmux requis pour restore (sudo apt install tmux)\n",
@@ -6277,6 +6278,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         }
       }
 
+      if (opts.reattach) restoreOpts.reattach = true;
       const { total } = restoreLayout(restoreOpts);
       if (total === 0) {
         process.stderr.write(

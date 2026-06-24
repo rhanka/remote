@@ -5,15 +5,17 @@ NAMESPACE ?= sentropic-remote
 CONTROL_PLANE_IMAGE ?= ghcr.io/rhanka/sentropic-remote-control-plane:v0.5.16
 SESSION_AGENT_IMAGE ?= ghcr.io/rhanka/sentropic-remote-session-agent:v0.5.16
 BROWSER_IMAGE ?= ghcr.io/rhanka/sentropic-remote-browser:v0.5.16
+LLM_GATEWAY_IMAGE   ?= ghcr.io/rhanka/sentropic-remote-llm-gateway:v0.5.16
 # SCW deploy/scw/*.yaml hardcode the :main tag — scw-push retags + pushes both.
 CONTROL_PLANE_MAIN := ghcr.io/rhanka/sentropic-remote-control-plane:main
 SESSION_AGENT_MAIN := ghcr.io/rhanka/sentropic-remote-session-agent:main
 BROWSER_MAIN       := ghcr.io/rhanka/sentropic-remote-browser:main
+LLM_GATEWAY_MAIN   := ghcr.io/rhanka/sentropic-remote-llm-gateway:main
 PORT ?= 8080
 
 .PHONY: help install build typecheck test verify format format-write \
-	images images-control-plane images-session-agent images-browser \
-	scw-push scw-push-control-plane \
+	images images-control-plane images-session-agent images-browser images-llm-gateway \
+	scw-push scw-push-control-plane scw-push-llm-gateway \
 	k3d-up k3d-down k3d-load deploy undeploy port-forward wait-ready \
 	demo demo-down \
 	scw-deploy scw-undeploy scw-port-forward scw-prepull \
@@ -70,7 +72,7 @@ format:
 format-write:
 	corepack npm run format:write
 
-images: images-control-plane images-session-agent images-browser
+images: images-control-plane images-session-agent images-browser images-llm-gateway
 
 images-control-plane:
 	docker build -t $(CONTROL_PLANE_IMAGE) -f apps/control-plane/Dockerfile .
@@ -81,6 +83,9 @@ images-session-agent:
 images-browser:
 	docker build -t $(BROWSER_IMAGE) -f packages/browser-bridge/docker/Dockerfile .
 
+images-llm-gateway:
+	docker build -t $(LLM_GATEWAY_IMAGE) -f apps/llm-gateway/Dockerfile .
+
 # Push versioned tag + retag :main (used by deploy/scw/*.yaml) + push :main.
 # Run after `make images-control-plane` (or the other images-* targets).
 scw-push-control-plane:
@@ -88,7 +93,12 @@ scw-push-control-plane:
 	docker tag $(CONTROL_PLANE_IMAGE) $(CONTROL_PLANE_MAIN)
 	docker push $(CONTROL_PLANE_MAIN)
 
-scw-push: scw-push-control-plane
+scw-push-llm-gateway:
+	docker push $(LLM_GATEWAY_IMAGE)
+	docker tag $(LLM_GATEWAY_IMAGE) $(LLM_GATEWAY_MAIN)
+	docker push $(LLM_GATEWAY_MAIN)
+
+scw-push: scw-push-control-plane scw-push-llm-gateway
 	docker push $(SESSION_AGENT_IMAGE)
 	docker tag $(SESSION_AGENT_IMAGE) $(SESSION_AGENT_MAIN)
 	docker push $(SESSION_AGENT_MAIN)
