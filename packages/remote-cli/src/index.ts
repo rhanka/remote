@@ -294,6 +294,16 @@ import {
 } from "./account-pool.js";
 
 import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
+import {
+  enrollCodexAccount,
+  readLlmMeshConfig,
+  startGateway,
+  stopGateway,
+  writeLlmMeshConfig,
+  readGatewayPid,
+  llmMeshLogPath,
+  jwtExpiry,
+} from "./llm-mesh.js";
 
 const KNOWN_PROFILE_HELP = `${CLI_PROFILES.join(", ")} (aliases: claude-code, antigravity, gemini-cli, mistralcli)`;
 
@@ -7161,6 +7171,120 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       },
     );
   void accountPushClusterCommand; // suppress unused-var lint
+
+  // ---------------------------------------------------------------------------
+  // llm-mesh — local LLM gateway (solo-dev mode)
+  // ---------------------------------------------------------------------------
+
+  const llmMeshCommand = program
+    .command("llm-mesh")
+    .description("Manage the local LLM gateway (solo-dev mesh: multi-account, cross-provider fallback)");
+
+  llmMeshCommand
+    .command("enroll <provider>")
+    .description("Enroll a local LLM provider account (provider: codex)")
+    .action(async (provider: string) => {
+      if (provider !== "codex") {
+        process.stderr.write(`[remote] llm-mesh: unsupported provider "${provider}". Only "codex" is supported today.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const account = enrollCodexAccount();
+      const existing = readLlmMeshConfig() ?? { accounts: [] };
+      const accounts = existing.accounts.filter((a) => a.id !== account.id);
+      accounts.push(account);
+      writeLlmMeshConfig({ ...existing, accounts });
+      process.stdout.write(`[remote] llm-mesh: enrolled ${account.label} (id: ${account.id})\n`);
+      if (account.expiresAt) {
+        process.stdout.write(`[remote] llm-mesh: token expires ${account.expiresAt}\n`);
+      }
+      process.stdout.write(`[remote] Run \`remote llm-mesh start\` to launch the gateway.\n`);
+    });
+
+  llmMeshCommand
+    .command("start")
+    .description("Start the local LLM gateway")
+    .option("-v, --verbose", "verbose output")
+    .action(async (opts: { verbose?: boolean }) => {
+      const config = readLlmMeshConfig();
+      if (!config || config.accounts.length === 0) {
+        process.stderr.write(
+          `[remote] llm-mesh: no accounts configured. Run \`remote llm-mesh enroll codex\` first.\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const existing = readGatewayPid();
+      if (existing) {
+        process.stderr.write(`[remote] llm-mesh: already running (pid ${existing}). Use \`remote llm-mesh stop\` first.\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(`[remote] llm-mesh: starting gateway…\n`);
+      const result = await startGateway(config, { verbose: opts.verbose });
+      const port = result.port;
+      process.stdout.write(`[remote] llm-mesh: gateway started (pid ${result.pid}, port ${port})\n`);
+      process.stdout.write(`\nTo use with Claude Code:\n`);
+      process.stdout.write(`  export ANTHROPIC_BASE_URL=http://localhost:${port}\n`);
+      process.stdout.write(`  export ANTHROPIC_API_KEY=${result.gatewayToken}\n`);
+    });
+
+  llmMeshCommand
+    .command("stop")
+    .description("Stop the local LLM gateway")
+    .action(() => {
+      const res = stopGateway();
+      if (res.stopped) {
+        process.stdout.write(`[remote] llm-mesh: stopped (pid ${res.pid})\n`);
+      } else {
+        process.stdout.write(`[remote] llm-mesh: not running\n`);
+      }
+    });
+
+  llmMeshCommand
+    .command("status")
+    .description("Show llm-mesh status")
+    .action(() => {
+      const config = readLlmMeshConfig();
+      const pid = readGatewayPid();
+      const port = config?.port ?? 3002;
+      if (pid) {
+        process.stdout.write(`[remote] llm-mesh: running (pid ${pid}, port ${port})\n`);
+      } else {
+        process.stdout.write(`[remote] llm-mesh: stopped\n`);
+      }
+      if (config) {
+        for (const acc of config.accounts) {
+          let status = "ok";
+          if (acc.expiresAt) {
+            const exp = new Date(acc.expiresAt);
+            const mins = Math.round((exp.getTime() - Date.now()) / 60_000);
+            status = mins > 0 ? `expires in ${mins}min` : `EXPIRED ${Math.abs(mins)}min ago`;
+          }
+          process.stdout.write(`  account: ${acc.label} (${acc.provider}) — ${status}\n`);
+        }
+      } else {
+        process.stdout.write(`  no config. Run \`remote llm-mesh enroll codex\` first.\n`);
+      }
+    });
+
+  llmMeshCommand
+    .command("logs")
+    .description("Tail the gateway log")
+    .option("-n, --lines <n>", "number of lines to show initially", "50")
+    .action((opts: { lines: string }) => {
+      const logPath = llmMeshLogPath(readLlmMeshConfig() ?? undefined);
+      const lines = parseInt(opts.lines, 10) || 50;
+      const tail = spawnSync("tail", ["-n", String(lines), "-f", logPath], {
+        stdio: "inherit",
+      });
+      if (tail.error) {
+        process.stderr.write(`[remote] llm-mesh: log tail failed: ${String(tail.error)}\n`);
+        process.exitCode = 1;
+      }
+    });
+
+  void llmMeshCommand; // suppress unused-var lint
 
   // ---------------------------------------------------------------------------
   // lineage — local incarnation lifecycle (Phase A0c)
