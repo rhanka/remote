@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   REMOTE_PROTOCOL_VERSION,
   REMOTE_SCHEMA_VERSION,
@@ -140,6 +142,38 @@ export function parseStartupArgs(raw: string | undefined): string[] {
   return [];
 }
 
+/**
+ * Mark `workspacePath` as trusted in `~/.claude.json` so `claude -p <task>`
+ * doesn't block on "Do you trust the files in this folder?". Idempotent and
+ * best-effort: silently skipped on any read/write error.
+ */
+export function preTrustClaudeWorkspace(
+  home: string,
+  workspacePath: string,
+): void {
+  try {
+    const configPath = join(home, ".claude.json");
+    let config: Record<string, unknown> = {};
+    try {
+      config = JSON.parse(readFileSync(configPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      // missing or malformed — start fresh
+    }
+    const projects = (config.projects ?? {}) as Record<string, unknown>;
+    const project = (projects[workspacePath] ?? {}) as Record<string, unknown>;
+    if (project["hasTrustDialogAccepted"] === true) return;
+    project["hasTrustDialogAccepted"] = true;
+    projects[workspacePath] = project;
+    config.projects = projects;
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+  } catch {
+    // never block session start on a config write failure
+  }
+}
+
 export class SessionAgent {
   private readonly sessionId: string;
   private readonly profile: string;
@@ -185,6 +219,16 @@ export class SessionAgent {
     const startupArgs = parseStartupArgs(this.env.SESSION_STARTUP_ARGS);
     const cliArgs = [...profile.args, ...startupArgs];
     this.terminalId = this.randomId("term");
+
+    // Pre-trust the workspace for claude so `claude -p <task>` isn't blocked
+    // by the "Do you trust the files in this folder?" dialog (which disrupts
+    // headless mode by stalling stdin before the task can execute).
+    if (this.profile === "claude") {
+      preTrustClaudeWorkspace(
+        this.env.HOME ?? "/root",
+        this.workspacePath,
+      );
+    }
 
     this.transport.onMessage((envelope) => this.handleIncoming(envelope));
 

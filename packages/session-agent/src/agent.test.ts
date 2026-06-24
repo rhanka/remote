@@ -1,8 +1,12 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { RemoteEventEnvelope } from "@sentropic/remote-protocol";
 import { describe, expect, it } from "vitest";
 
 import {
   SessionAgent,
+  preTrustClaudeWorkspace,
   type AgentTransport,
   type IncomingEnvelope,
   type ProcessHandle,
@@ -85,6 +89,51 @@ function stubSpawner(
     return handle;
   };
 }
+
+describe("preTrustClaudeWorkspace", () => {
+  it("creates ~/.claude.json with hasTrustDialogAccepted when the file is missing", () => {
+    const home = mkdtempSync(join(tmpdir(), "remote-test-"));
+    try {
+      preTrustClaudeWorkspace(home, "/workspace");
+      const config = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")) as Record<string, unknown>;
+      const projects = config.projects as Record<string, { hasTrustDialogAccepted: boolean }>;
+      expect(projects["/workspace"]?.hasTrustDialogAccepted).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("merges into an existing ~/.claude.json without overwriting other keys", () => {
+    const home = mkdtempSync(join(tmpdir(), "remote-test-"));
+    try {
+      writeFileSync(join(home, ".claude.json"), JSON.stringify({ numSessions: 42, projects: {} }), "utf8");
+      preTrustClaudeWorkspace(home, "/workspace");
+      const config = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8")) as Record<string, unknown>;
+      expect(config.numSessions).toBe(42);
+      const projects = config.projects as Record<string, { hasTrustDialogAccepted: boolean }>;
+      expect(projects["/workspace"]?.hasTrustDialogAccepted).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("is idempotent — does not rewrite if already trusted", () => {
+    const home = mkdtempSync(join(tmpdir(), "remote-test-"));
+    try {
+      preTrustClaudeWorkspace(home, "/workspace");
+      const before = readFileSync(join(home, ".claude.json"), "utf8");
+      preTrustClaudeWorkspace(home, "/workspace");
+      const after = readFileSync(join(home, ".claude.json"), "utf8");
+      expect(before).toBe(after);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("silently ignores a non-writable home (bad dir)", () => {
+    expect(() => preTrustClaudeWorkspace("/nonexistent/dir/xyz", "/workspace")).not.toThrow();
+  });
+});
 
 describe("SessionAgent", () => {
   it("emits terminal.opened then forwards stdout and exit as protocol events", async () => {
