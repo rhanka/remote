@@ -76,6 +76,8 @@ spec:
     spec:
       serviceAccountName: llm-gateway
       terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: gateway
           image: ghcr.io/rhanka/sentropic-remote-llm-gateway:main
