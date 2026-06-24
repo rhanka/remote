@@ -283,6 +283,33 @@ describe("SessionAgent", () => {
     expect(args!.slice(2)).toEqual(["remote-session", "claude", "--dangerously-skip-permissions"]);
   });
 
+  it("claude headless (-p <task>) launches directly without wrapper — no PTY, trust dialog auto-skipped", async () => {
+    const { transport } = stubTransport();
+    const proc = stubProcess();
+    let command: string | null = null;
+    let args: ReadonlyArray<string> | null = null;
+    const agent = new SessionAgent({
+      sessionId: "sess-headless",
+      profile: "claude",
+      workspacePath: "/workspace",
+      transport,
+      spawner: (options) => {
+        command = options.command;
+        args = options.args;
+        return proc;
+      },
+      env: { SESSION_STARTUP_ARGS: JSON.stringify(["-p", "summarize this repo"]) },
+    });
+    agent.start();
+    proc.finish({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Headless: spawned as `claude --dangerously-skip-permissions -p "summarize this repo"` directly.
+    // No /bin/bash wrapper → stdout is not a TTY → trust dialog auto-skipped by claude.
+    expect(command).toBe("claude");
+    expect(args).toEqual(["--dangerously-skip-permissions", "-p", "summarize this repo"]);
+  });
+
   it("does NOT wrap the shell profile (ephemeral push/pull one-shot)", async () => {
     const { transport } = stubTransport();
     const proc = stubProcess();
