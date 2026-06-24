@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { SessionAnnounce } from "@sentropic/remote-protocol";
@@ -357,7 +357,27 @@ export async function main(): Promise<void> {
     profile,
     workspacePath,
     transport,
-    onBeforeExit: () => {
+    onBeforeExit: (exitCode) => {
+      // For remote headless jobs: write result.json to the RWX workspace so that
+      // `remote jobs status` on the CLI side can reconcile done/failed correctly.
+      // Local headless jobs write result.json via the tmux wrapper; remote jobs
+      // have no wrapper so the agent must do it directly.
+      if (isClaudeHeadless) {
+        try {
+          const jobDir = join(workspacePath, ".remote", "jobs", sessionId);
+          mkdirSync(jobDir, { recursive: true });
+          const state = exitCode === 0 ? "done" : "failed";
+          writeFileSync(
+            join(jobDir, "result.json"),
+            JSON.stringify({ state, exitCode }) + "\n",
+          );
+          console.log(
+            `[session-agent] wrote result.json state=${state} exitCode=${exitCode} for headless job ${sessionId}`,
+          );
+        } catch (error) {
+          console.error("[session-agent] result.json write failed:", error);
+        }
+      }
       try {
         const saved = snapshotSessionState(profile, home, workspacePath);
         if (saved.length > 0) {
