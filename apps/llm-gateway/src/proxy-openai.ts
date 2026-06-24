@@ -23,6 +23,14 @@ import { updateSessionToken } from "./sticky.js";
 const OPENAI_BASE =
   process.env.OPENAI_UPSTREAM_URL ?? "https://api.openai.com";
 
+// Codex ChatGPT Pro OAuth transport (chatgpt.com/backend-api, no model.request scope needed)
+const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
+
+/** True if token is a ChatGPT Pro OAuth JWT (3-part base64url), not an sk-... API key. */
+function isCodexOAuthToken(token: string): boolean {
+  return !token.startsWith("sk-") && token.split(".").length === 3;
+}
+
 // ---------------------------------------------------------------------------
 // Model mapping
 // ---------------------------------------------------------------------------
@@ -169,6 +177,93 @@ function toOAIMessages(messages: AntMessage[]): OAIMessage[] {
   }
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Request translation: Anthropic → OpenAI Responses API (Codex OAuth path)
+// ---------------------------------------------------------------------------
+
+function toCodexInput(messages: AntMessage[]): unknown[] {
+  const items: unknown[] = [];
+  for (const msg of messages) {
+    if (msg.role === "assistant") {
+      const texts: string[] = [];
+      const toolCalls: AntToolUseBlock[] = [];
+      if (typeof msg.content === "string") {
+        if (msg.content) texts.push(msg.content);
+      } else {
+        for (const block of msg.content) {
+          if (block.type === "text") texts.push((block as AntTextBlock).text);
+          else if (block.type === "tool_use") toolCalls.push(block as AntToolUseBlock);
+          // thinking blocks: skip
+        }
+      }
+      const text = texts.join("");
+      if (text || toolCalls.length === 0) {
+        items.push({ type: "message", role: "assistant", content: text });
+      }
+      for (const tc of toolCalls) {
+        items.push({ type: "function_call", call_id: tc.id, name: tc.name, arguments: JSON.stringify(tc.input) });
+      }
+    } else {
+      const texts: string[] = [];
+      const toolResults: AntToolResultBlock[] = [];
+      if (typeof msg.content === "string") {
+        if (msg.content) texts.push(msg.content);
+      } else {
+        for (const block of msg.content) {
+          if (block.type === "text") texts.push((block as AntTextBlock).text);
+          else if (block.type === "tool_result") toolResults.push(block as AntToolResultBlock);
+        }
+      }
+      for (const tr of toolResults) {
+        const output = typeof tr.content === "string"
+          ? tr.content
+          : (tr.content as AntTextBlock[]).map((b) => b.text).join("");
+        items.push({ type: "function_call_output", call_id: tr.tool_use_id, output });
+      }
+      const text = texts.join("");
+      if (text) items.push({ type: "message", role: "user", content: text });
+    }
+  }
+  return items;
+}
+
+function codexEffort(budgetTokens: number): "high" | "medium" | "low" {
+  if (budgetTokens >= 25_000) return "high";
+  if (budgetTokens >= 8_000) return "medium";
+  return "low";
+}
+
+export function toCodexRequest(body: AntRequest): Record<string, unknown> {
+  const req: Record<string, unknown> = {
+    model: mapModel(body.model),
+    input: toCodexInput(body.messages),
+    store: false,
+    stream: true,
+  };
+
+  if (body.system) req.instructions = body.system;
+
+  if (body.thinking?.type === "enabled") {
+    req.reasoning = { effort: codexEffort(body.thinking.budget_tokens) };
+  }
+
+  if (body.tools && body.tools.length > 0) {
+    req.tools = body.tools.map((t) => ({
+      type: "function",
+      name: t.name,
+      ...(t.description !== undefined ? { description: t.description } : {}),
+      parameters: t.input_schema,
+      strict: false,
+    }));
+  }
+
+  return req;
+}
+
+// ---------------------------------------------------------------------------
+// Request translation: Anthropic → OpenAI Chat Completions (standard sk- key)
+// ---------------------------------------------------------------------------
 
 export function toOpenAIRequest(body: AntRequest): Record<string, unknown> {
   const messages: OAIMessage[] = [];
@@ -445,6 +540,197 @@ export function translateOpenAIStreamToAnthropic(
 }
 
 // ---------------------------------------------------------------------------
+// Streaming translation: Codex Responses API SSE → Anthropic SSE
+// ---------------------------------------------------------------------------
+
+export function translateCodexStreamToAnthropic(
+  codexStream: ReadableStream<Uint8Array>,
+  originalModel: string,
+  messageId: string,
+  estimatedInputTokens: number,
+): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (s: string) => controller.enqueue(enc.encode(s));
+
+      let nextBlockIdx = 0;
+      // output_index → {type, idx}
+      const blockMap = new Map<number, { type: "text" | "tool"; idx: number }>();
+      let textBlockOpen = false;
+      let outputTokens = 0;
+      let stopReason = "end_turn";
+
+      emit(sseEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: messageId,
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: originalModel,
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
+        },
+      }));
+      emit(sseEvent("ping", { type: "ping" }));
+
+      const reader = codexStream.getReader();
+      let buf = "";
+      let currentEvent = "";
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += new TextDecoder().decode(value);
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+
+          for (const line of lines) {
+            if (line.startsWith("event: ")) {
+              currentEvent = line.slice(7).trim();
+              continue;
+            }
+            if (!line.startsWith("data: ")) { if (line === "") currentEvent = ""; continue; }
+            const raw = line.slice(6).trim();
+            if (raw === "[DONE]") continue;
+
+            let data: Record<string, unknown>;
+            try { data = JSON.parse(raw) as Record<string, unknown>; } catch { continue; }
+
+            const evType = (data.type as string | undefined) ?? currentEvent;
+            const outputIndex = (data.output_index as number | undefined) ?? 0;
+
+            switch (evType) {
+              case "response.output_item.added": {
+                const item = data.item as Record<string, unknown> | undefined;
+                if (!item) break;
+                if (item.type === "function_call") {
+                  const blockIdx = nextBlockIdx++;
+                  blockMap.set(outputIndex, { type: "tool", idx: blockIdx });
+                  emit(sseEvent("content_block_start", {
+                    type: "content_block_start",
+                    index: blockIdx,
+                    content_block: {
+                      type: "tool_use",
+                      id: (item.call_id as string | undefined) ?? `toolu_${outputIndex}`,
+                      name: (item.name as string | undefined) ?? "",
+                      input: {},
+                    },
+                  }));
+                }
+                break;
+              }
+
+              case "response.output_text.delta": {
+                const delta = data.delta as string | undefined;
+                if (!delta) break;
+                if (!blockMap.has(outputIndex)) {
+                  const blockIdx = nextBlockIdx++;
+                  blockMap.set(outputIndex, { type: "text", idx: blockIdx });
+                  textBlockOpen = true;
+                  emit(sseEvent("content_block_start", {
+                    type: "content_block_start",
+                    index: blockIdx,
+                    content_block: { type: "text", text: "" },
+                  }));
+                }
+                const tBlock = blockMap.get(outputIndex)!;
+                emit(sseEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index: tBlock.idx,
+                  delta: { type: "text_delta", text: delta },
+                }));
+                break;
+              }
+
+              case "response.function_call_arguments.delta": {
+                const delta = data.delta as string | undefined;
+                if (!delta) break;
+                const fBlock = blockMap.get(outputIndex);
+                if (fBlock?.type === "tool") {
+                  emit(sseEvent("content_block_delta", {
+                    type: "content_block_delta",
+                    index: fBlock.idx,
+                    delta: { type: "input_json_delta", partial_json: delta },
+                  }));
+                }
+                break;
+              }
+
+              case "response.output_item.done": {
+                const block = blockMap.get(outputIndex);
+                if (block) {
+                  emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+                  if (block.type === "text") textBlockOpen = false;
+                }
+                const item = data.item as Record<string, unknown> | undefined;
+                if (item?.type === "function_call") stopReason = "tool_use";
+                break;
+              }
+
+              case "response.completed": {
+                const response = data.response as Record<string, unknown> | undefined;
+                const usage = response?.usage as Record<string, unknown> | undefined;
+                if (typeof usage?.output_tokens === "number") outputTokens = usage.output_tokens;
+                // Close any unclosed blocks (shouldn't happen but be safe)
+                for (const [, block] of blockMap) {
+                  if (block.type === "text" && textBlockOpen) {
+                    emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+                    textBlockOpen = false;
+                  }
+                }
+                emit(sseEvent("message_delta", {
+                  type: "message_delta",
+                  delta: { stop_reason: stopReason, stop_sequence: null },
+                  usage: { output_tokens: outputTokens },
+                }));
+                emit(sseEvent("message_stop", { type: "message_stop" }));
+                controller.close();
+                return;
+              }
+
+              case "response.failed": {
+                emit(sseEvent("message_stop", { type: "message_stop" }));
+                controller.close();
+                return;
+              }
+            }
+          }
+        }
+        // Stream ended without response.completed — close gracefully
+        if (textBlockOpen) {
+          for (const [, block] of blockMap) {
+            if (block.type === "text") {
+              emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+            }
+          }
+        }
+        for (const [, block] of blockMap) {
+          if (block.type === "tool") {
+            emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+          }
+        }
+        emit(sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: stopReason, stop_sequence: null },
+          usage: { output_tokens: outputTokens },
+        }));
+        emit(sseEvent("message_stop", { type: "message_stop" }));
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      } finally {
+        reader.releaseLock();
+      }
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Route handler
 // ---------------------------------------------------------------------------
 
@@ -461,22 +747,40 @@ export async function handleMessagesViaOpenAI(
   }
 
   const originalModel = body.model;
-  const openaiReq = toOpenAIRequest(body);
+  const isCodex = isCodexOAuthToken(session.token);
+  const upstreamReq = isCodex ? toCodexRequest(body) : toOpenAIRequest(body);
   const messageId = `msg_${Date.now().toString(36)}`;
   const estimatedInputTokens = Math.ceil(JSON.stringify(body.messages).length / 4);
 
-  const doFetch = (token: string) =>
-    fetch(`${OPENAI_BASE}/v1/chat/completions`, {
+  const doFetch = (token: string) => {
+    if (isCodex) {
+      return fetch(CODEX_RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          originator: "opencode",
+          "User-Agent": "opencode/0.1.0",
+          session_id: `codex_${Date.now().toString(36)}`,
+        },
+        body: JSON.stringify(upstreamReq),
+        // @ts-expect-error Node 18+ supports duplex for streaming
+        duplex: "half",
+        signal: c.req.raw.signal,
+      });
+    }
+    return fetch(`${OPENAI_BASE}/v1/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify(openaiReq),
+      body: JSON.stringify(upstreamReq),
       // @ts-expect-error Node 18+ supports duplex for streaming
       duplex: "half",
       signal: c.req.raw.signal,
     });
+  };
 
   let upstream: Response;
   try {
@@ -510,12 +814,9 @@ export async function handleMessagesViaOpenAI(
   }
 
   if (body.stream && upstream.body) {
-    const stream = translateOpenAIStreamToAnthropic(
-      upstream.body,
-      originalModel,
-      messageId,
-      estimatedInputTokens,
-    );
+    const stream = isCodex
+      ? translateCodexStreamToAnthropic(upstream.body, originalModel, messageId, estimatedInputTokens)
+      : translateOpenAIStreamToAnthropic(upstream.body, originalModel, messageId, estimatedInputTokens);
     return new Response(stream, {
       status: 200,
       headers: {
