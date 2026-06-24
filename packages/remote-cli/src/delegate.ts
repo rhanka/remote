@@ -733,6 +733,8 @@ export type JobRow = {
   note: string;
   /** Account label bound to this job via the pool (omitted when no pool binding). */
   account?: string;
+  /** Remote session UUID (kind "remote" only) — use with `remote attach <session>`. */
+  session?: string;
 };
 
 /**
@@ -858,6 +860,7 @@ export function buildJobRows(
       cwd: e.cwd,
       note,
     };
+    if (e.remoteId) row.session = e.remoteId;
     if (resolveAccountLabel) {
       const label = resolveAccountLabel(e.id);
       if (label !== undefined) row.account = label;
@@ -898,6 +901,8 @@ export function renderJobsTable(rows: ReadonlyArray<JobRow>): string {
     ["age", "AGE"],
     ["cwd", "CWD"],
   ];
+  // Show SESSION for remote jobs so `remote attach <session>` is copy-paste-ready.
+  if (rows.some((r) => r.session !== undefined)) cols.push(["session", "SESSION"]);
   // Show ACCOUNT when any row has a pool binding.
   if (rows.some((r) => r.account !== undefined)) cols.push(["account", "ACCOUNT"]);
   // Only show the NOTE column when something needs it (a throttled "retry in Xm"
