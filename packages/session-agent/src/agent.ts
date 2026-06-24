@@ -284,6 +284,9 @@ export class SessionAgent {
           if (trustBuffer.includes("Do you trust the files in this folder?")) {
             trustDialogHandled = true;
             trustBuffer = "";
+            console.log(
+              `[session-agent] auto-trust: dialog detected — answering "1" for ${this.workspacePath}`,
+            );
             this.process?.write("1\n");
           } else if (trustBuffer.length > 512) {
             trustBuffer = trustBuffer.slice(-256);
