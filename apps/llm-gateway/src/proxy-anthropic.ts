@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { lookupToken } from "./sticky.js";
+import { handleMessagesViaOpenAI } from "./proxy-openai.js";
 
 const ANTHROPIC_BASE = process.env.ANTHROPIC_UPSTREAM_URL ?? "https://api.anthropic.com";
 
@@ -22,6 +23,11 @@ export async function handleMessages(c: Context): Promise<Response> {
 
   const session = lookupToken(gatewayToken);
   if (!session) return c.json({ error: "unauthorized" }, 403);
+
+  // Route to OpenAI/Codex path when the bound account is an OpenAI provider
+  if (session.provider === "openai" || session.provider === "codex") {
+    return handleMessagesViaOpenAI(c, session);
+  }
 
   const upstreamUrl = `${ANTHROPIC_BASE}/v1/messages`;
   const body = await c.req.raw.arrayBuffer();
