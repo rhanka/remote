@@ -26,7 +26,11 @@ export async function handleMessages(c: Context): Promise<Response> {
 
   // Route to OpenAI/Codex path when the bound account is an OpenAI provider
   if (session.provider === "openai" || session.provider === "codex") {
-    return handleMessagesViaOpenAI(c, session);
+    return handleMessagesViaOpenAI(c, {
+      token: session.token,
+      gatewayToken: session.gatewayToken,
+      accountId: session.accountId,
+    });
   }
 
   const upstreamUrl = `${ANTHROPIC_BASE}/v1/messages`;

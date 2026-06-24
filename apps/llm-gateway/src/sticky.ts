@@ -75,6 +75,12 @@ export function lookupToken(gatewayToken: string): SessionEntry | undefined {
   return _sessions.get(gatewayToken);
 }
 
+/** Update the bearer token for a session after an OAuth refresh. */
+export function updateSessionToken(gatewayToken: string, newToken: string): void {
+  const entry = _sessions.get(gatewayToken);
+  if (entry) (entry as { token: string }).token = newToken;
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export interface SessionResult {

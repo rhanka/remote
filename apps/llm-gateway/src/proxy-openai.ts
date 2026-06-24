@@ -17,6 +17,8 @@
  */
 
 import type { Context } from "hono";
+import { refreshOAuthToken } from "./accounts.js";
+import { updateSessionToken } from "./sticky.js";
 
 const OPENAI_BASE =
   process.env.OPENAI_UPSTREAM_URL ?? "https://api.openai.com";
@@ -448,7 +450,7 @@ export function translateOpenAIStreamToAnthropic(
 
 export async function handleMessagesViaOpenAI(
   c: Context,
-  session: { token: string },
+  session: { token: string; gatewayToken?: string; accountId?: string },
 ): Promise<Response> {
   const rawBody = await c.req.arrayBuffer();
   let body: AntRequest;
@@ -463,12 +465,11 @@ export async function handleMessagesViaOpenAI(
   const messageId = `msg_${Date.now().toString(36)}`;
   const estimatedInputTokens = Math.ceil(JSON.stringify(body.messages).length / 4);
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(`${OPENAI_BASE}/v1/chat/completions`, {
+  const doFetch = (token: string) =>
+    fetch(`${OPENAI_BASE}/v1/chat/completions`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${session.token}`,
+        Authorization: `Bearer ${token}`,
         "content-type": "application/json",
       },
       body: JSON.stringify(openaiReq),
@@ -476,9 +477,28 @@ export async function handleMessagesViaOpenAI(
       duplex: "half",
       signal: c.req.raw.signal,
     });
+
+  let upstream: Response;
+  try {
+    upstream = await doFetch(session.token);
   } catch (err) {
     if ((err as { name?: string }).name === "AbortError") return new Response(null, { status: 499 });
     throw err;
+  }
+
+  // 401 → attempt OAuth token refresh + retry once
+  if (upstream.status === 401 && session.accountId) {
+    await upstream.body?.cancel().catch(() => {});
+    const newToken = await refreshOAuthToken(session.accountId);
+    if (newToken) {
+      if (session.gatewayToken) updateSessionToken(session.gatewayToken, newToken);
+      try {
+        upstream = await doFetch(newToken);
+      } catch (err) {
+        if ((err as { name?: string }).name === "AbortError") return new Response(null, { status: 499 });
+        throw err;
+      }
+    }
   }
 
   if (!upstream.ok) {

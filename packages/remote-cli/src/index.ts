@@ -7182,21 +7182,63 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   llmMeshCommand
     .command("enroll <provider>")
-    .description("Enroll a local LLM provider account (provider: codex)")
-    .action(async (provider: string) => {
-      if (provider !== "codex") {
-        process.stderr.write(`[remote] llm-mesh: unsupported provider "${provider}". Only "codex" is supported today.\n`);
+    .description(
+      "Enroll a local LLM provider account.\n" +
+      "  Providers:\n" +
+      "    codex     — import OAuth tokens from local Codex CLI installation (~/.codex/auth.json)\n" +
+      "    openai    — register an OpenAI API key (sk-...) via --token",
+    )
+    .option("--from-local", "import credentials from the local provider CLI installation (codex: reads ~/.codex/auth.json)")
+    .option("--token <value>", "API key or bearer token to enroll manually (openai: sk-...)")
+    .option("--label <label>", "human-readable label for this account")
+    .option("--id <id>", "account id (default: derived from provider)")
+    .action(async (provider: string, opts: { fromLocal?: boolean; token?: string; label?: string; id?: string }) => {
+      let account;
+      if (provider === "codex") {
+        // Reads ~/.codex/auth.json: OAuth JWT (chatgpt_plan_type: pro).
+        // NOTE: this token works with the Codex CLI app-server (local) but NOT with
+        // api.openai.com Chat Completions (missing model.request scope).
+        // For a working gateway proxy, use `enroll openai --token sk-...` instead.
+        account = enrollCodexAccount();
+      } else if (provider === "openai") {
+        if (!opts.token) {
+          process.stderr.write(
+            `[remote] llm-mesh: --token <sk-...> is required for provider "openai"\n` +
+            `  Example: remote llm-mesh enroll openai --token sk-proj-...\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        account = {
+          id: opts.id ?? "openai-1",
+          provider: "openai" as const,
+          label: opts.label ?? "OpenAI (API key)",
+          token: opts.token,
+        };
+      } else {
+        process.stderr.write(
+          `[remote] llm-mesh: unsupported provider "${provider}".\n` +
+          `  Supported: codex (OAuth, local-only), openai (API key, gateway-ready)\n`,
+        );
         process.exitCode = 1;
         return;
       }
-      const account = enrollCodexAccount();
       const existing = readLlmMeshConfig() ?? { accounts: [] };
       const accounts = existing.accounts.filter((a) => a.id !== account.id);
       accounts.push(account);
       writeLlmMeshConfig({ ...existing, accounts });
-      process.stdout.write(`[remote] llm-mesh: enrolled ${account.label} (id: ${account.id})\n`);
-      if (account.expiresAt) {
-        process.stdout.write(`[remote] llm-mesh: token expires ${account.expiresAt}\n`);
+      process.stdout.write(`[remote] llm-mesh: enrolled ${account.label} (id: ${account.id}, provider: ${account.provider})\n`);
+      if ("expiresAt" in account && account.expiresAt) {
+        const exp = new Date(account.expiresAt as string);
+        const minsLeft = Math.round((exp.getTime() - Date.now()) / 60_000);
+        process.stdout.write(`[remote] llm-mesh: token expires ${account.expiresAt} (${minsLeft > 0 ? `in ${minsLeft}min` : "EXPIRED"})\n`);
+      }
+      if (provider === "codex") {
+        process.stdout.write(
+          `[remote] NOTE: Codex OAuth token works locally via codex app-server,\n` +
+          `  but NOT with api.openai.com (missing model.request scope).\n` +
+          `  For a fully working gateway, use: remote llm-mesh enroll openai --token sk-...\n`,
+        );
       }
       process.stdout.write(`[remote] Run \`remote llm-mesh start\` to launch the gateway.\n`);
     });

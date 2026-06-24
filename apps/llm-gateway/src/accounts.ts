@@ -3,6 +3,7 @@ export interface AccountDescriptor {
   provider: string;
   label: string;
   token: string;
+  refreshToken?: string;
   expiresAt?: string;
 }
 
@@ -36,4 +37,75 @@ export function selectAccount(): AccountDescriptor {
 
 export function findAccount(accountId: string): AccountDescriptor | undefined {
   return getAccounts().find((a) => a.id === accountId);
+}
+
+/** Update the in-memory token for an account (after OAuth refresh). */
+export function updateAccountToken(accountId: string, newToken: string, expiresAt?: string): void {
+  const accounts = getAccounts();
+  const acc = accounts.find((a) => a.id === accountId);
+  if (!acc) return;
+  (acc as { token: string }).token = newToken;
+  if (expiresAt !== undefined) (acc as { expiresAt?: string }).expiresAt = expiresAt;
+}
+
+// ---------------------------------------------------------------------------
+// OAuth token refresh (ChatGPT Pro / OpenAI OAuth flow)
+// ---------------------------------------------------------------------------
+
+interface OAuthRefreshResponse {
+  access_token?: string;
+  expires_in?: number;
+  error?: string;
+}
+
+function jwtExpiry(token: string): string | undefined {
+  try {
+    const parts = token.split(".");
+    const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as { exp?: number };
+    if (typeof payload.exp === "number") return new Date(payload.exp * 1000).toISOString();
+  } catch { /* ignore */ }
+  return undefined;
+}
+
+/**
+ * Refresh the OAuth access token for an account using its refresh_token.
+ * Updates the in-memory account on success. No-op if no refresh_token.
+ * Returns the new token, or null if refresh is not applicable.
+ */
+export async function refreshOAuthToken(accountId: string): Promise<string | null> {
+  const acc = findAccount(accountId);
+  if (!acc?.refreshToken) return null;
+
+  let resp: Response;
+  try {
+    resp = await fetch("https://auth.openai.com/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: acc.refreshToken,
+        client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+      }),
+    });
+  } catch (err) {
+    console.error(`[llm-gateway] OAuth refresh network error for ${accountId}:`, err);
+    return null;
+  }
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    console.error(`[llm-gateway] OAuth refresh failed (${resp.status}) for ${accountId}: ${body}`);
+    return null;
+  }
+
+  const data = (await resp.json()) as OAuthRefreshResponse;
+  if (!data.access_token) {
+    console.error(`[llm-gateway] OAuth refresh: no access_token in response for ${accountId}`);
+    return null;
+  }
+
+  const expiresAt = jwtExpiry(data.access_token);
+  updateAccountToken(accountId, data.access_token, expiresAt);
+  console.log(`[llm-gateway] OAuth token refreshed for ${accountId}${expiresAt ? `, expires ${expiresAt}` : ""}`);
+  return data.access_token;
 }
