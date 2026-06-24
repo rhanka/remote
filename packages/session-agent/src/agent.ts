@@ -246,9 +246,18 @@ export class SessionAgent {
     // exiting the CLI drops to a live shell on the box rather than destroying
     // the session. The `shell` profile (ephemeral workspace push/pull sessions
     // with one-shot startupArgs like `-c "exit 0"`) is spawned directly.
+    //
+    // Claude headless (-p <task>): skip the wrapper entirely and launch the
+    // binary directly. With no wrapper there is no tmux (so no TTY), which
+    // means claude detects a non-TTY stdout and skips the workspace trust dialog
+    // automatically — the documented behaviour. The wrapper is only useful for
+    // interactive sessions that need a persistent box after the CLI exits.
+    const isClaudeHeadless =
+      this.profile === "claude" && startupArgs.includes("-p");
+
     let spawnCommand = profile.command;
     let spawnArgs: ReadonlyArray<string> = cliArgs;
-    if (this.profile !== "shell") {
+    if (this.profile !== "shell" && !isClaudeHeadless) {
       // SESSION_TMUX=1 → run the CLI inside a durable tmux session (detach-safe,
       // enables `--exec` attach); otherwise the bare persistent-box wrapper.
       const wrapper =

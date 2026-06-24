@@ -339,8 +339,16 @@ export async function main(): Promise<void> {
     },
   );
 
+  // Claude headless jobs (-p <task>): use the plain childProcess spawner so
+  // stdout is NOT a TTY. Claude auto-skips the workspace trust dialog when
+  // stdout is not a TTY (documented behaviour), which is the root cause of
+  // the trust-dialog bug on concurrent pods. PTY is only needed for interactive
+  // sessions (scroll, resize, Ctrl-C forwarding) — headless jobs don't use it.
+  const isClaudeHeadless =
+    profile === "claude" &&
+    parseStartupArgs(process.env.SESSION_STARTUP_ARGS).includes("-p");
   const spawner =
-    process.env.SESSION_AGENT_SPAWNER === "child-process"
+    process.env.SESSION_AGENT_SPAWNER === "child-process" || isClaudeHeadless
       ? childProcessSpawner
       : ptySpawner;
 
