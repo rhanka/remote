@@ -140,6 +140,18 @@ export function localSessionName(slug: string): string {
   return slug.startsWith(LOCAL_PREFIX) ? slug : `${LOCAL_PREFIX}${slug}`;
 }
 
+function tmuxEnvironmentArgs(): string[] {
+  const args: string[] = [];
+  for (const key of [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+  ] as const) {
+    const value = process.env[key];
+    if (value) args.push("-e", `${key}=${value}`);
+  }
+  return args;
+}
+
 function expandHome(p: string): string {
   return p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
 }
@@ -405,6 +417,7 @@ export function startLocalSession(
     [
       "new-session",
       "-d",
+      ...tmuxEnvironmentArgs(),
       "-s",
       name,
       // Launcher contract (a2a): the agent's window is NAMED after the profile
@@ -460,6 +473,7 @@ export function startHeadlessSession(
     [
       "new-session",
       "-d",
+      ...tmuxEnvironmentArgs(),
       "-s",
       name,
       "-n",
@@ -745,7 +759,24 @@ export function startH2aWindow(
  */
 export function attachLocalSession(name: string): number {
   ensureScrollConfig();
-  const r = spawnSync(TMUX, ["attach", "-t", name], { stdio: "inherit" });
+  const args = process.env.TMUX
+    ? ["switch-client", "-t", `=${name}`]
+    : ["attach-session", "-t", `=${name}`];
+  const r = spawnSync(TMUX, args, { stdio: "inherit" });
+  return r.status ?? 0;
+}
+
+export function currentTmuxSessionIs(name: string): boolean {
+  if (!process.env.TMUX) return false;
+  const r = spawnSync(TMUX, ["display-message", "-p", "#S"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return r.status === 0 && r.stdout.trim() === name;
+}
+
+export function runLocalCliForeground(command: string, args: string[]): number {
+  const r = spawnSync(command, args, { stdio: "inherit" });
   return r.status ?? 0;
 }
 

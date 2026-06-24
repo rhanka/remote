@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock child_process at the module boundary so NOTHING here ever talks to the
 // user's real tmux server (or shells out at all).
@@ -8,6 +8,7 @@ vi.mock("node:child_process", () => ({ spawnSync: spawnSyncMock }));
 import {
   H2A_WINDOW_NAME,
   LOCAL_WRAPPER,
+  attachLocalSession,
   buildCodexImagePasteBinding,
   buildSessionWindowArgs,
   buildTmuxGlobalOptions,
@@ -29,9 +30,36 @@ const { spawnSync: realSpawnSync } =
   );
 
 const H2A_CMD = "h2a mcp-serve --auto-open --auto-upgrade --wake local-tmux";
+const ORIGINAL_TMUX_ENV = process.env.TMUX;
+const ORIGINAL_ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
+const ORIGINAL_ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ORIGINAL_ANTHROPIC_AUTH_TOKEN = process.env.ANTHROPIC_AUTH_TOKEN;
 
 beforeEach(() => {
   spawnSyncMock.mockReset();
+});
+
+afterEach(() => {
+  if (ORIGINAL_TMUX_ENV === undefined) {
+    delete process.env.TMUX;
+  } else {
+    process.env.TMUX = ORIGINAL_TMUX_ENV;
+  }
+  if (ORIGINAL_ANTHROPIC_BASE_URL === undefined) {
+    delete process.env.ANTHROPIC_BASE_URL;
+  } else {
+    process.env.ANTHROPIC_BASE_URL = ORIGINAL_ANTHROPIC_BASE_URL;
+  }
+  if (ORIGINAL_ANTHROPIC_API_KEY === undefined) {
+    delete process.env.ANTHROPIC_API_KEY;
+  } else {
+    process.env.ANTHROPIC_API_KEY = ORIGINAL_ANTHROPIC_API_KEY;
+  }
+  if (ORIGINAL_ANTHROPIC_AUTH_TOKEN === undefined) {
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+  } else {
+    process.env.ANTHROPIC_AUTH_TOKEN = ORIGINAL_ANTHROPIC_AUTH_TOKEN;
+  }
 });
 
 /** Calls to `tmux <subcommand> …` recorded by the mock. */
@@ -51,6 +79,41 @@ function fakeStderr(): { write: (s: string) => boolean; text: () => string } {
     text: () => buf,
   };
 }
+
+describe("attachLocalSession", () => {
+  it("uses tmux attach-session outside tmux", () => {
+    delete process.env.TMUX;
+    spawnSyncMock.mockReturnValue({ status: 0, stdout: "" });
+
+    const status = attachLocalSession("remote-projA");
+
+    expect(status).toBe(0);
+    expect(spawnSyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["attach-session", "-t", "=remote-projA"],
+      { stdio: "inherit" },
+    ]);
+  });
+
+  it("uses tmux switch-client inside tmux and returns its status", () => {
+    process.env.TMUX = "/tmp/tmux-1000/default,1,0";
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "tmux" && args[0] === "switch-client") {
+        return { status: 7, stdout: "" };
+      }
+      return { status: 0, stdout: "" };
+    });
+
+    const status = attachLocalSession("remote-projA");
+
+    expect(status).toBe(7);
+    expect(spawnSyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["switch-client", "-t", "=remote-projA"],
+      { stdio: "inherit" },
+    ]);
+  });
+});
 
 describe("buildSessionWindowArgs (pure)", () => {
   it("builds a detached NAMED window running the command line under the drop-to-shell wrapper", () => {
@@ -97,6 +160,24 @@ describe("buildSessionWindowArgs (pure)", () => {
 });
 
 describe("startLocalSession agent pane metadata", () => {
+  it("passes Anthropic gateway env explicitly to tmux new-session", () => {
+    process.env.ANTHROPIC_BASE_URL = "http://localhost:3002";
+    process.env.ANTHROPIC_AUTH_TOKEN = "gw-test";
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "tmux" && args[0] === "-V") return { status: 0 };
+      if (cmd === "tmux" && args[0] === "list-sessions")
+        return { status: 1, stdout: "" };
+      if (cmd === "tmux" && args[0] === "new-session") return { status: 0 };
+      return { status: 0, stdout: "" };
+    });
+
+    startLocalSession("claude", "claude", "/home/u/src/remote", [], "remote");
+
+    const newSession = tmuxCalls("new-session")[0]!;
+    expect(newSession[1]).toContain("ANTHROPIC_BASE_URL=http://localhost:3002");
+    expect(newSession[1]).toContain("ANTHROPIC_AUTH_TOKEN=gw-test");
+  });
+
   it("stores the agent pane on the tmux session after creation", () => {
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "tmux" && args[0] === "-V") return { status: 0 };

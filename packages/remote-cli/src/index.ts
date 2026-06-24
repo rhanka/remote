@@ -60,6 +60,7 @@ import {
   attachPodTmux,
   capturePane,
   conductorRunning,
+  currentTmuxSessionIs,
   fanoutLabels,
   findLocalSession,
   killLocalSession,
@@ -68,14 +69,17 @@ import {
   localSessionName,
   relaunchInSession,
   resolveAgentPaneForInstance,
+  runLocalCliForeground,
   sendKeysLiteral,
   sessionAttached,
   sessionAttachedCount,
   setLocalSessionDisplayName,
+  slugify,
   startH2aWindow,
   startHeadlessSession,
   startLocalSession,
   tmuxAvailable,
+  type LocalSession,
 } from "./tmux.js";
 import { planRelaunch } from "./relaunch.js";
 import {
@@ -304,6 +308,7 @@ import {
   llmMeshLogPath,
   jwtExpiry,
   readLlmMeshSessionEnv,
+  acquireLlmMeshSessionEnv,
 } from "./llm-mesh.js";
 
 const KNOWN_PROFILE_HELP = `${CLI_PROFILES.join(", ")} (aliases: claude-code, antigravity, gemini-cli, mistralcli)`;
@@ -1637,18 +1642,108 @@ function localCliCommand(profile: string): string {
 }
 
 /** CLI args to resume a specific conversation, per profile. */
-function localResumeArgs(profile: string, convId: string): string[] {
+function localResumeArgs(
+  profile: string,
+  convId?: string,
+  opts: { bare?: boolean; last?: boolean } = {},
+): string[] {
   switch (profile) {
     case "claude":
     case "claude-code":
-      return ["--resume", convId];
+      return [
+        ...(opts.bare ? ["--bare"] : []),
+        "--resume",
+        ...(convId ? [convId] : []),
+      ];
     case "codex":
-      return ["resume", convId];
+      return [
+        "resume",
+        ...(opts.last && !convId ? ["--last"] : []),
+        ...(convId ? [convId] : []),
+      ];
     case "agy":
     case "antigravity":
-      return ["--resume", convId];
+      return ["--resume", ...(convId ? [convId] : [])];
     default:
       return [];
+  }
+}
+
+function localStartArgs(
+  profile: string,
+  opts: { bare?: boolean } = {},
+): string[] {
+  switch (profile) {
+    case "claude":
+    case "claude-code":
+      return opts.bare ? ["--bare"] : [];
+    default:
+      return [];
+  }
+}
+
+function shouldUseClaudeBare(profile: string): boolean {
+  return (
+    (profile === "claude" || profile === "claude-code") &&
+    Boolean(process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY)
+  );
+}
+
+async function injectLlmMeshGatewayEnv(): Promise<string | undefined> {
+  if (process.env.ANTHROPIC_BASE_URL) return undefined;
+  const meshEnv =
+    (await acquireLlmMeshSessionEnv()) ?? readLlmMeshSessionEnv();
+  if (!meshEnv) return undefined;
+  for (const [k, v] of Object.entries(meshEnv)) {
+    process.env[k] = v;
+  }
+  process.stderr.write(
+    `[remote] llm-mesh: injecting gateway env (${meshEnv.ANTHROPIC_BASE_URL})\n`,
+  );
+  return meshEnv.ANTHROPIC_BASE_URL;
+}
+
+function registryEntryForResumeTarget(
+  target: string,
+  local?: LocalSession,
+): RegistryEntry | undefined {
+  const canonicalSlug = local?.slug ?? target;
+  const tmuxSession = local?.name ?? localSessionName(target);
+  const canonicalTmuxSession = localSessionName(canonicalSlug);
+  const matches = loadRegistry().filter(
+    (e) =>
+      e.role === undefined &&
+      e.kind === "local-tmux" &&
+      (e.id === target ||
+        e.id === canonicalSlug ||
+        e.label === target ||
+        e.label === canonicalSlug ||
+        e.tmuxSession === tmuxSession ||
+        e.tmuxSession === canonicalTmuxSession),
+  );
+  const ids = new Set(matches.map((e) => e.id));
+  if (ids.size !== 1) return undefined;
+  return matches
+    .slice()
+    .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))[0];
+}
+
+async function confirmReplace(slug: string): Promise<boolean> {
+  if (process.stdin.isTTY !== true || process.stderr.isTTY !== true) {
+    return false;
+  }
+  const { createInterface: createPromisesInterface } = await import(
+    "node:readline/promises",
+  );
+  const rl = createPromisesInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+  try {
+    const answer = await rl.question(`Type "replace ${slug}" to continue: `);
+    return answer.trim() === `replace ${slug}`;
+  } finally {
+    rl.close();
   }
 }
 
@@ -4156,6 +4251,312 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     );
 
   program
+    .command("resume [slug]")
+    .description(
+      "Resume a LOCAL session. Known sessions come from the registry; use --claude/--codex from a repo to open that CLI's resume flow.",
+    )
+    .option(
+      "--claude [convId]",
+      "resume/enroll a Claude conversation from the current directory; omit convId to let Claude show its selector",
+    )
+    .option(
+      "--codex [convId]",
+      "resume/enroll a Codex conversation from the current directory; omit convId to let Codex show its selector",
+    )
+    .option(
+      "--last",
+      "with --claude/--codex, resume the last conversation for the current directory instead of showing a selector",
+    )
+    .option(
+      "--attach",
+      "attach after a successful resume, or attach an already-active session",
+    )
+    .option(
+      "--replace",
+      "replace an existing idle local tmux session without interactive confirmation",
+    )
+    .action(
+      async (
+        slug: string | undefined,
+        opts: {
+          attach?: boolean;
+          replace?: boolean;
+          claude?: string | boolean;
+          codex?: string | boolean;
+          last?: boolean;
+        },
+      ) => {
+        if (!tmuxAvailable()) {
+          process.stderr.write(
+            "[remote] tmux is not installed locally — `remote resume` needs it (e.g. `sudo apt install tmux`).\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const explicitProfile =
+          opts.claude !== undefined
+            ? "claude"
+            : opts.codex !== undefined
+              ? "codex"
+              : undefined;
+        if (opts.claude !== undefined && opts.codex !== undefined) {
+          process.stderr.write(
+            "[remote] pass only one of --claude or --codex.\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const explicitConvId =
+          typeof opts.claude === "string"
+            ? opts.claude.trim()
+            : typeof opts.codex === "string"
+              ? opts.codex.trim()
+              : undefined;
+        if (opts.last && !explicitProfile) {
+          process.stderr.write(
+            "[remote] --last is only valid with --claude or --codex.\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (opts.last && explicitConvId) {
+          process.stderr.write(
+            "[remote] pass either a conversation id or --last, not both.\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (slug === undefined && !explicitProfile) {
+          process.stderr.write(
+            "[remote] resume needs a known session name, or `remote resume --claude [conversation-id]` / `remote resume --codex [conversation-id]` from the repo directory.\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const target = slug ?? slugify(process.cwd());
+        const local = findLocalSession(target);
+        const displaySlug = local?.slug ?? target;
+        const registryEntry = registryEntryForResumeTarget(target, local);
+        const resolvedConvId =
+          explicitProfile === "claude" && opts.last
+            ? localConvStat(process.cwd())?.convId
+            : explicitConvId;
+        if (explicitProfile === "claude" && opts.last && !resolvedConvId) {
+          process.stderr.write(
+            `[remote] cannot resume last Claude conversation: no local Claude conversation found for ${process.cwd()}.\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const entry = explicitProfile
+          ? {
+              id: displaySlug,
+              tool: explicitProfile,
+              kind: "local-tmux" as const,
+              cwd: process.cwd(),
+              label: displaySlug,
+              ...(resolvedConvId ? { convId: resolvedConvId } : {}),
+              tmuxSession: localSessionName(displaySlug),
+              enrolledAt: new Date().toISOString(),
+              lastSeenAt: new Date().toISOString(),
+              source: "run" as const,
+            }
+          : registryEntry;
+        const localIdle = local ? localSessionIdle(local.name) : false;
+        if (!entry && local && !localIdle && !opts.replace) {
+          process.stderr.write(
+            `[remote] local session ${displaySlug} already exists and does not look idle; no new CLI was started.\n`,
+          );
+          if (opts.attach || explicitProfile) {
+            process.stderr.write(
+              `[remote] switching to existing session ${displaySlug}\n`,
+            );
+            process.exitCode = attachLocalSession(local.name);
+            return;
+          }
+          process.stderr.write(`[remote] attach: remote attach ${displaySlug}\n`);
+          process.exitCode = 2;
+          return;
+        }
+        if (!entry) {
+          process.stderr.write(
+            `[remote] cannot resume ${displaySlug}: registry has no single local-tmux entry with profile, cwd and convId.\n`,
+          );
+          if (local) {
+            process.stderr.write(
+              `[remote] local session ${displaySlug} exists but cannot be relaunched without a recorded convId.\n`,
+            );
+            process.stderr.write(`[remote] attach: remote attach ${displaySlug}\n`);
+          } else {
+            process.stderr.write(
+              `[remote] start explicitly: remote resume ${displaySlug} --claude [convId]\n`,
+            );
+          }
+          process.exitCode = 1;
+          return;
+        }
+        const resumeSlug = entry.id;
+        if (!entry.cwd || !entry.tool || (!entry.convId && !explicitProfile)) {
+          process.stderr.write(
+            `[remote] cannot resume ${displaySlug}: registry entry is incomplete (need profile, cwd and convId).\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const profile = entry.tool;
+        const gateway = await injectLlmMeshGatewayEnv();
+        const useBare = shouldUseClaudeBare(profile);
+        const command = localCliCommand(profile);
+        const args = localResumeArgs(profile, entry.convId, {
+          bare: useBare,
+          last: Boolean(opts.last),
+        });
+        if (args.length === 0) {
+          process.stderr.write(
+            `[remote] cannot resume ${displaySlug}: profile "${profile}" has no verified local resume argv.\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (local && !localIdle && !opts.replace) {
+          process.stderr.write(
+            `[remote] local session ${displaySlug} already exists and does not look idle; no new ${profile} was started.\n`,
+          );
+          if (opts.attach || explicitProfile) {
+            if (explicitProfile && currentTmuxSessionIs(local.name)) {
+              process.stderr.write(
+                `[remote] already inside ${displaySlug}; running ${profile} resume in this pane\n`,
+              );
+              process.exitCode = runLocalCliForeground(command, args);
+              return;
+            }
+            process.stderr.write(
+              `[remote] switching to existing session ${displaySlug}\n`,
+            );
+            process.exitCode = attachLocalSession(local.name);
+            return;
+          }
+          process.stderr.write(`[remote] attach: remote attach ${displaySlug}\n`);
+          process.exitCode = 2;
+          return;
+        }
+        if (local) {
+          if (!localIdle && opts.replace) {
+            process.stderr.write(
+              `[remote] local session ${displaySlug} does not look idle; --replace will kill tmux session ${local.name} before resuming${entry.convId ? ` ${entry.convId}` : ""}.\n`,
+            );
+          }
+          if (!opts.replace) {
+            process.stderr.write(
+              `[remote] local session ${displaySlug} already exists.\n`,
+            );
+            process.stderr.write(
+              `[remote] pane appears idle; replacing it will kill tmux session ${local.name} and resume${entry.convId ? ` conversation ${entry.convId}` : ""} in ${entry.cwd}.\n`,
+            );
+            process.stderr.write(
+              `[remote] If another CLI is still writing this conversation, replacing can corrupt the .jsonl.\n`,
+            );
+            if (!(await confirmReplace(displaySlug))) {
+              process.stderr.write(`[remote] takeover requires confirmation.\n`);
+              process.stderr.write(
+                `[remote] interactive: remote resume ${displaySlug}\n`,
+              );
+              process.stderr.write(
+                `[remote] explicit replace: remote resume ${displaySlug} --replace\n`,
+              );
+              process.stderr.write(
+                `[remote] manual path: remote stop ${displaySlug} --reason restart && remote resume ${displaySlug}\n`,
+              );
+              process.exitCode = 1;
+              return;
+            }
+          }
+          const rechecked = findLocalSession(displaySlug);
+          if (!rechecked) {
+            process.stderr.write(
+              `[remote] local session ${displaySlug} changed state before replace; aborting.\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          if (!opts.replace && !localSessionIdle(rechecked.name)) {
+            process.stderr.write(
+              `[remote] local session ${displaySlug} is no longer idle; aborting.\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          if (entry.convId) {
+            const ok = await guardConvWriters({
+              convId: entry.convId,
+              cwd: entry.cwd,
+              excludeId: entry.id,
+              fetchRemoteSessions: async () => {
+                const url = getConfiguredRemoteOptional();
+                return url ? await listRemoteSessions(url) : [];
+              },
+            });
+            if (!ok) {
+              process.exitCode = 1;
+              return;
+            }
+          }
+          if (!killLocalSession(rechecked.name)) {
+            process.stderr.write(
+              `[remote] local session ${displaySlug} could not be killed; no new ${profile} was started.\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          process.stderr.write(
+            `[remote] replaced local session ${displaySlug} (${rechecked.name})\n`,
+          );
+        } else {
+          if (entry.convId) {
+            const ok = await guardConvWriters({
+              convId: entry.convId,
+              cwd: entry.cwd,
+              excludeId: entry.id,
+              fetchRemoteSessions: async () => {
+                const url = getConfiguredRemoteOptional();
+                return url ? await listRemoteSessions(url) : [];
+              },
+            });
+            if (!ok) {
+              process.exitCode = 1;
+              return;
+            }
+          }
+        }
+        const { name } = startLocalSession(
+          profile,
+          command,
+          entry.cwd,
+          args,
+          resumeSlug,
+        );
+        enrollFromRun({
+          profile,
+          slug: resumeSlug,
+          tmuxSession: name,
+          cwd: entry.cwd,
+          ...(entry.convId ? { convId: entry.convId } : {}),
+        });
+        process.stderr.write(
+          `[remote] resumed local session ${resumeSlug} (${profile} resume${entry.convId ? ` ${entry.convId}` : ""} in ${entry.cwd})\n`,
+        );
+        if (gateway) {
+          process.stderr.write(`[remote] gateway active: ${gateway}\n`);
+        }
+        if (opts.attach) {
+          process.exitCode = attachLocalSession(name);
+          return;
+        }
+        process.stderr.write(`[remote] attach: remote attach ${resumeSlug}\n`);
+      },
+    );
+
+  program
     .command("run <profile> [path]")
     .description(
       "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd). Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
@@ -4225,6 +4626,32 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           }
         }
         const cwd = path ? resolve(path) : process.cwd();
+        // count==1 keeps the exact prior behaviour (label = opts.name, which may
+        // be undefined -> slug derives from cwd). count>1 fans out distinct
+        // labels <base>#k from the name or the cwd basename.
+        const labels: Array<string | undefined> =
+          count > 1
+            ? fanoutLabels(opts.name ?? basename(cwd), count)
+            : [opts.name];
+        const existingLocalSessions = labels
+          .map((label) => {
+            const slug = slugify(label ?? cwd);
+            return findLocalSession(slug) ? slug : undefined;
+          })
+          .filter((slug): slug is string => slug !== undefined);
+        if (existingLocalSessions.length > 0) {
+          for (const slug of existingLocalSessions) {
+            process.stderr.write(
+              `[remote] local session ${slug} already exists; no new ${profile} was started.\n`,
+            );
+            process.stderr.write(`[remote] attach: remote attach ${slug}\n`);
+            process.stderr.write(
+              `[remote] stop first: remote stop ${slug} --reason restart\n`,
+            );
+          }
+          process.exitCode = 1;
+          return;
+        }
         // Single-writer guard: refuse to resume a conversation another live
         // session (local registry / remote pod) is already writing.
         if (opts.resume) {
@@ -4242,8 +4669,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             return;
           }
         }
+        // Inject llm-mesh gateway env before building argv. The gateway uses
+        // ANTHROPIC_AUTH_TOKEN, so normal Claude Code startup keeps settings
+        // and avoids the API-key onboarding prompts.
+        await injectLlmMeshGatewayEnv();
+        const useBare = shouldUseClaudeBare(profile);
         const command = localCliCommand(profile);
-        const args = opts.resume ? localResumeArgs(profile, opts.resume) : [];
+        const args = opts.resume
+          ? localResumeArgs(profile, opts.resume, { bare: useBare })
+          : localStartArgs(profile, { bare: useBare });
         if (opts.resume && args.length === 0) {
           process.stderr.write(
             `[remote] profile "${profile}" has no verified local resume argv; start it without -r/--resume\n`,
@@ -4252,26 +4686,6 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
         const h2a = getH2aConfig();
-        // Inject llm-mesh gateway env if running — only when not already set.
-        // Applies before tmux spawn so claude + subagents inherit it automatically.
-        if (!process.env.ANTHROPIC_BASE_URL) {
-          const meshEnv = readLlmMeshSessionEnv();
-          if (meshEnv) {
-            for (const [k, v] of Object.entries(meshEnv)) {
-              process.env[k] = v;
-            }
-            process.stderr.write(
-              `[remote] llm-mesh: injecting gateway env (${meshEnv.ANTHROPIC_BASE_URL})\n`,
-            );
-          }
-        }
-        // count==1 keeps the exact prior behaviour (label = opts.name, which may
-        // be undefined → slug derives from cwd). count>1 fans out distinct
-        // labels <base>#k from the name or the cwd basename.
-        const labels: Array<string | undefined> =
-          count > 1
-            ? fanoutLabels(opts.name ?? basename(cwd), count)
-            : [opts.name];
         const started: Array<{ name: string; slug: string }> = [];
         for (const label of labels) {
           const { name, slug } = startLocalSession(
@@ -4312,7 +4726,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           `[remote] local session ${only.slug} started (${profile}${opts.resume ? ` --resume ${opts.resume}` : ""} in ${cwd})\n`,
         );
         if (opts.attach) {
-          attachLocalSession(only.name);
+          process.exitCode = attachLocalSession(only.name);
           return;
         }
         process.stderr.write(
@@ -4986,7 +5400,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.exitCode = 1;
         return;
       }
-      attachLocalSession(name);
+      process.exitCode = attachLocalSession(name);
     });
 
   jobsCommand
@@ -6450,7 +6864,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
               process.exitCode = 1;
               return;
             }
-            attachLocalSession(local.name);
+            process.exitCode = attachLocalSession(local.name);
             return;
           }
         }
@@ -7295,7 +7709,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       process.stdout.write(`[remote] llm-mesh: gateway started (pid ${result.pid}, port ${port})\n`);
       process.stdout.write(`\nTo use with Claude Code:\n`);
       process.stdout.write(`  export ANTHROPIC_BASE_URL=http://localhost:${port}\n`);
-      process.stdout.write(`  export ANTHROPIC_API_KEY=${result.gatewayToken}\n`);
+      process.stdout.write(`  export ANTHROPIC_AUTH_TOKEN=${result.gatewayToken}\n`);
     });
 
   llmMeshCommand

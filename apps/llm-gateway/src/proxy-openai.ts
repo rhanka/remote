@@ -7,8 +7,8 @@
  *
  * Model mapping (overridable via OPENAI_MODEL_MAP env JSON):
  *   claude-opus-4-8  / claude-opus-4-7  → gpt-5.5
- *   claude-sonnet-4-6 / claude-sonnet-4-5 → gpt-5.3-spark
- *   claude-haiku-*                        → gpt-5.3-spark
+ *   claude-sonnet-4-6 / claude-sonnet-4-5 → gpt-5.5
+ *   claude-haiku-*                        → gpt-5.5
  *
  * Thinking budget_tokens → reasoning_effort:
  *   ≥ 25 000 (xhigh) → "high"
@@ -39,9 +39,9 @@ const DEFAULT_MODEL_MAP: Record<string, string> = {
   "claude-opus-4-8": "gpt-5.5",
   "claude-opus-4-7": "gpt-5.5",
   "claude-opus-4-6": "gpt-5.5",
-  "claude-sonnet-4-6": "gpt-5.3-spark",
-  "claude-sonnet-4-5": "gpt-5.3-spark",
-  "claude-haiku-4-5-20251001": "gpt-5.3-spark",
+  "claude-sonnet-4-6": "gpt-5.5",
+  "claude-sonnet-4-5": "gpt-5.5",
+  "claude-haiku-4-5-20251001": "gpt-5.5",
 };
 
 let _modelMap: Record<string, string> | null = null;
@@ -95,7 +95,7 @@ type AntTool = { name: string; description?: string; input_schema: Record<string
 type AntRequest = {
   model: string;
   messages: AntMessage[];
-  system?: string;
+  system?: string | AntContentBlock[];
   max_tokens: number;
   tools?: AntTool[];
   stream?: boolean;
@@ -178,6 +178,19 @@ function toOAIMessages(messages: AntMessage[]): OAIMessage[] {
   return result;
 }
 
+function systemToText(system: AntRequest["system"]): string | undefined {
+  if (typeof system === "string") return system || undefined;
+  if (!Array.isArray(system)) return undefined;
+
+  const parts: string[] = [];
+  for (const block of system) {
+    if (block.type === "text") {
+      parts.push((block as AntTextBlock).text);
+    }
+  }
+  return parts.join("\n\n") || undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Request translation: Anthropic → OpenAI Responses API (Codex OAuth path)
 // ---------------------------------------------------------------------------
@@ -242,7 +255,8 @@ export function toCodexRequest(body: AntRequest): Record<string, unknown> {
     stream: true,
   };
 
-  if (body.system) req.instructions = body.system;
+  const instructions = systemToText(body.system);
+  if (instructions) req.instructions = instructions;
 
   if (body.thinking?.type === "enabled") {
     req.reasoning = { effort: codexEffort(body.thinking.budget_tokens) };
@@ -267,7 +281,8 @@ export function toCodexRequest(body: AntRequest): Record<string, unknown> {
 
 export function toOpenAIRequest(body: AntRequest): Record<string, unknown> {
   const messages: OAIMessage[] = [];
-  if (body.system) messages.push({ role: "system", content: body.system });
+  const system = systemToText(body.system);
+  if (system) messages.push({ role: "system", content: system });
   messages.push(...toOAIMessages(body.messages));
 
   const req: Record<string, unknown> = {

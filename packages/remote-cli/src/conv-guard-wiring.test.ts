@@ -18,13 +18,24 @@ const SCRATCH = join(
 );
 const CONFIG_PATH = join(SCRATCH, "config.json");
 const REGISTRY_PATH = join(SCRATCH, "registry.json");
+const ORIGINAL_ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
+const ORIGINAL_ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ORIGINAL_ANTHROPIC_AUTH_TOKEN = process.env.ANTHROPIC_AUTH_TOKEN;
 
 const listRemoteSessions = vi.fn();
 const getDefaultRemote = vi.fn();
 const startLocalSession = vi.fn();
+const attachLocalSession = vi.fn();
+const currentTmuxSessionIs = vi.fn();
+const findLocalSession = vi.fn();
+const killLocalSession = vi.fn();
+const localSessionIdle = vi.fn();
+const runLocalCliForeground = vi.fn();
 const migrateForward = vi.fn();
 const migrateBack = vi.fn();
 const localConvStat = vi.fn();
+const acquireLlmMeshSessionEnv = vi.fn();
+const readLlmMeshSessionEnv = vi.fn();
 
 vi.mock("./attach.js", () => ({
   attach: vi.fn(),
@@ -59,16 +70,41 @@ vi.mock("./config.js", () => ({
 vi.mock("./tmux.js", () => ({
   tmuxAvailable: () => true,
   startLocalSession,
-  attachLocalSession: vi.fn(),
+  attachLocalSession,
   attachPodTmux: vi.fn(),
-  findLocalSession: vi.fn(),
-  killLocalSession: vi.fn(),
+  currentTmuxSessionIs,
+  findLocalSession,
+  killLocalSession,
   listLocalSessions: () => [],
+  localSessionIdle,
+  localSessionName: (slug: string) =>
+    slug.startsWith("remote-") ? slug : `remote-${slug}`,
+  slugify: (p: string) => {
+    const parts = p.split("/").filter(Boolean);
+    const base = (parts[parts.length - 1] ?? "")
+      .replace(/[^a-zA-Z0-9_.-]/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return base || "session";
+  },
+  runLocalCliForeground,
 }));
 
 vi.mock("./migrate.js", () => ({
   migrateForward,
   migrateBack,
+}));
+
+vi.mock("./llm-mesh.js", () => ({
+  enrollCodexAccount: vi.fn(),
+  readLlmMeshConfig: vi.fn(() => ({ accounts: [] })),
+  startGateway: vi.fn(),
+  stopGateway: vi.fn(),
+  writeLlmMeshConfig: vi.fn(),
+  readGatewayPid: vi.fn(() => null),
+  llmMeshLogPath: vi.fn(() => "llm-mesh.log"),
+  jwtExpiry: vi.fn(() => null),
+  acquireLlmMeshSessionEnv,
+  readLlmMeshSessionEnv,
 }));
 
 // Controls how a BARE `migrate forward -r` resolves "the most recent local
@@ -143,21 +179,479 @@ beforeEach(() => {
   getDefaultRemote.mockReturnValue(undefined);
   startLocalSession.mockReset();
   startLocalSession.mockReturnValue({ name: "remote-projA", slug: "projA" });
+  attachLocalSession.mockReset();
+  attachLocalSession.mockReturnValue(0);
+  currentTmuxSessionIs.mockReset();
+  currentTmuxSessionIs.mockReturnValue(false);
+  findLocalSession.mockReset();
+  findLocalSession.mockReturnValue(undefined);
+  killLocalSession.mockReset();
+  killLocalSession.mockReturnValue(true);
+  localSessionIdle.mockReset();
+  localSessionIdle.mockReturnValue(false);
+  runLocalCliForeground.mockReset();
+  runLocalCliForeground.mockReturnValue(0);
   migrateForward.mockReset();
   migrateBack.mockReset();
   localConvStat.mockReset();
   localConvStat.mockReturnValue(undefined);
+  acquireLlmMeshSessionEnv.mockReset();
+  acquireLlmMeshSessionEnv.mockResolvedValue(null);
+  readLlmMeshSessionEnv.mockReset();
+  readLlmMeshSessionEnv.mockReturnValue(null);
   stderrWrite.mockClear();
   stdoutWrite.mockClear();
+  delete process.env.ANTHROPIC_BASE_URL;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
   process.exitCode = 0;
 });
 
 afterAll(() => {
   rmSync(SCRATCH, { recursive: true, force: true });
+  if (ORIGINAL_ANTHROPIC_BASE_URL === undefined) {
+    delete process.env.ANTHROPIC_BASE_URL;
+  } else {
+    process.env.ANTHROPIC_BASE_URL = ORIGINAL_ANTHROPIC_BASE_URL;
+  }
+  if (ORIGINAL_ANTHROPIC_API_KEY === undefined) {
+    delete process.env.ANTHROPIC_API_KEY;
+  } else {
+    process.env.ANTHROPIC_API_KEY = ORIGINAL_ANTHROPIC_API_KEY;
+  }
+  if (ORIGINAL_ANTHROPIC_AUTH_TOKEN === undefined) {
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+  } else {
+    process.env.ANTHROPIC_AUTH_TOKEN = ORIGINAL_ANTHROPIC_AUTH_TOKEN;
+  }
   process.exitCode = 0;
 });
 
+function registrySession(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "projA",
+    tool: "claude",
+    kind: "local-tmux",
+    cwd: "/home/u/src/projA",
+    label: "projA",
+    convId: "conv-dup",
+    tmuxSession: "remote-projA",
+    enrolledAt: NOW,
+    lastSeenAt: NOW,
+    source: "run",
+    ...overrides,
+  };
+}
+
+describe("remote resume <slug>", () => {
+  it("opens Claude's native resume selector when --claude has no id", async () => {
+    const cwd = process.cwd();
+    const expectedSlug = cwd.split("/").filter(Boolean).pop() ?? "session";
+
+    const exitCode = await main(["node", "remote", "resume", "--claude"]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      cwd,
+      ["--resume"],
+      expectedSlug,
+    );
+  });
+
+  it("opens Codex's native resume selector when --codex has no id", async () => {
+    const cwd = process.cwd();
+    const expectedSlug = cwd.split("/").filter(Boolean).pop() ?? "session";
+
+    const exitCode = await main(["node", "remote", "resume", "--codex"]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "codex",
+      "codex",
+      cwd,
+      ["resume"],
+      expectedSlug,
+    );
+  });
+
+  it("resumes the last local Claude conversation with --claude --last", async () => {
+    const cwd = process.cwd();
+    const expectedSlug = cwd.split("/").filter(Boolean).pop() ?? "session";
+    localConvStat.mockReturnValue({
+      convId: "claude-last",
+      bytes: 12,
+      lines: 2,
+      sha: "abc123",
+    });
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "--claude",
+      "--last",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(localConvStat).toHaveBeenCalledWith(cwd);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      cwd,
+      ["--resume", "claude-last"],
+      expectedSlug,
+    );
+  });
+
+  it("attaches an already-active explicit Claude resume target instead of requiring a second command", async () => {
+    localConvStat.mockReturnValue({
+      convId: "claude-last",
+      bytes: 12,
+      lines: 2,
+      sha: "abc123",
+    });
+    findLocalSession.mockReturnValue({
+      name: "remote-remote-cli",
+      slug: "remote-cli",
+      profile: "claude",
+      path: process.cwd(),
+      attached: false,
+    });
+    localSessionIdle.mockReturnValue(false);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "--claude",
+      "--last",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(attachLocalSession).toHaveBeenCalledWith("remote-remote-cli");
+    expect(stderrText()).toContain("no new claude was started");
+    expect(stderrText()).toContain("switching to existing session remote-cli");
+    expect(stderrText()).not.toContain("attach: remote attach remote-cli");
+  });
+
+  it("runs the CLI in-place when explicit resume is invoked from inside the target tmux session", async () => {
+    localConvStat.mockReturnValue({
+      convId: "claude-last",
+      bytes: 12,
+      lines: 2,
+      sha: "abc123",
+    });
+    findLocalSession.mockReturnValue({
+      name: "remote-remote-cli",
+      slug: "remote-cli",
+      profile: "claude",
+      path: process.cwd(),
+      attached: true,
+    });
+    localSessionIdle.mockReturnValue(false);
+    currentTmuxSessionIs.mockReturnValue(true);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "--claude",
+      "--last",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(attachLocalSession).not.toHaveBeenCalled();
+    expect(runLocalCliForeground).toHaveBeenCalledWith("claude", [
+      "--resume",
+      "claude-last",
+    ]);
+    expect(stderrText()).toContain("already inside remote-cli");
+  });
+
+  it("resumes Codex's native last session with --codex --last", async () => {
+    const cwd = process.cwd();
+    const expectedSlug = cwd.split("/").filter(Boolean).pop() ?? "session";
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "--codex",
+      "--last",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "codex",
+      "codex",
+      cwd,
+      ["resume", "--last"],
+      expectedSlug,
+    );
+  });
+
+  it("fails clearly when --claude --last has no local conversation", async () => {
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "--claude",
+      "--last",
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(stderrText()).toContain("no local Claude conversation found");
+  });
+
+  it("enrolls and resumes an existing Claude conversation from the current directory", async () => {
+    const cwd = process.cwd();
+    const expectedSlug = cwd.split("/").filter(Boolean).pop() ?? "session";
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "--claude",
+      "claude-existing",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      cwd,
+      ["--resume", "claude-existing"],
+      expectedSlug,
+    );
+    expect(stderrText()).toContain(`resumed local session ${expectedSlug}`);
+    expect(stderrText()).toContain(`remote attach ${expectedSlug}`);
+  });
+
+  it("uses the optional resume slug as the local name with --claude", async () => {
+    const cwd = process.cwd();
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "geo",
+      "--claude",
+      "claude-existing",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      cwd,
+      ["--resume", "claude-existing"],
+      "geo",
+    );
+  });
+
+  it("starts a missing local tmux session from the registry", async () => {
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main(["node", "remote", "resume", "projA"]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--resume", "conv-dup"],
+      "projA",
+    );
+    expect(stderrText()).toContain("resumed local session projA");
+    expect(stderrText()).toContain("remote attach projA");
+  });
+
+  it("uses Anthropic gateway auth token without forcing claude --bare", async () => {
+    acquireLlmMeshSessionEnv.mockResolvedValue({
+      ANTHROPIC_BASE_URL: "http://localhost:3002",
+      ANTHROPIC_AUTH_TOKEN: "gw-test",
+    });
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main(["node", "remote", "resume", "projA"]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--resume", "conv-dup"],
+      "projA",
+    );
+    expect(process.env.ANTHROPIC_BASE_URL).toBe("http://localhost:3002");
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("gw-test");
+  });
+
+  it("does not replace an existing non-idle session", async () => {
+    writeRegistry([registrySession()]);
+    findLocalSession.mockReturnValue({
+      name: "remote-projA",
+      slug: "projA",
+      profile: "claude",
+      path: "/home/u/src/projA",
+      attached: false,
+    });
+    localSessionIdle.mockReturnValue(false);
+
+    const exitCode = await main(["node", "remote", "resume", "projA"]);
+
+    expect(exitCode).toBe(2);
+    expect(killLocalSession).not.toHaveBeenCalled();
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(stderrText()).toContain("does not look idle");
+    expect(stderrText()).toContain("remote attach projA");
+  });
+
+  it("accepts a full tmux session name and canonicalizes to its slug", async () => {
+    writeRegistry([registrySession()]);
+    findLocalSession.mockReturnValue({
+      name: "remote-projA",
+      slug: "projA",
+      profile: "claude",
+      path: "/home/u/src/projA",
+      attached: false,
+    });
+    localSessionIdle.mockReturnValue(true);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "remote-projA",
+      "--replace",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--resume", "conv-dup"],
+      "projA",
+    );
+    expect(stderrText()).toContain("replaced local session projA");
+  });
+
+  it("can attach/no-op an active named local session even without registry", async () => {
+    findLocalSession.mockReturnValue({
+      name: "remote-projA",
+      slug: "projA",
+      profile: "claude",
+      path: "/home/u/src/projA",
+      attached: false,
+    });
+    localSessionIdle.mockReturnValue(false);
+
+    const exitCode = await main(["node", "remote", "resume", "remote-projA"]);
+
+    expect(exitCode).toBe(2);
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(stderrText()).toContain("local session projA already exists");
+    expect(stderrText()).toContain("remote attach projA");
+  });
+
+  it("replaces an existing idle session with --replace after rechecking", async () => {
+    writeRegistry([registrySession()]);
+    findLocalSession.mockReturnValue({
+      name: "remote-projA",
+      slug: "projA",
+      profile: "claude",
+      path: "/home/u/src/projA",
+      attached: false,
+    });
+    localSessionIdle.mockReturnValue(true);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "projA",
+      "--replace",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(killLocalSession).toHaveBeenCalledWith("remote-projA");
+    expect(startLocalSession).toHaveBeenCalled();
+    expect(stderrText()).toContain("replaced local session projA");
+    expect(stderrText()).toContain("resumed local session projA");
+  });
+
+  it("honors --replace even when the existing session does not look idle", async () => {
+    writeRegistry([registrySession()]);
+    findLocalSession.mockReturnValue({
+      name: "remote-projA",
+      slug: "projA",
+      profile: "claude",
+      path: "/home/u/src/projA",
+      attached: false,
+    });
+    localSessionIdle.mockReturnValue(false);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "projA",
+      "--replace",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(killLocalSession).toHaveBeenCalledWith("remote-projA");
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--resume", "conv-dup"],
+      "projA",
+    );
+    expect(stderrText()).toContain("--replace will kill tmux session remote-projA");
+  });
+});
+
 describe("remote run -r <conv> single-writer guard", () => {
+  it("refuses an existing local target before guard, gateway, registry, or spawn", async () => {
+    findLocalSession.mockReturnValue({
+      name: "remote-projA",
+      slug: "projA",
+      profile: "claude",
+      path: "/home/u/src/projA",
+      attached: false,
+    });
+    getDefaultRemote.mockReturnValue("http://localhost:8080");
+    listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "run",
+      "claude",
+      "/home/u/src/projA",
+      "--name",
+      "projA",
+      "--resume",
+      "conv-dup",
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(listRemoteSessions).not.toHaveBeenCalled();
+    expect(stderrText()).toContain("local session projA already exists");
+    expect(stderrText()).toContain("no new claude was started");
+    expect(stderrText()).toContain("remote attach projA");
+    expect(stderrText()).toContain("remote stop projA --reason restart");
+    expect(stderrText()).not.toContain("llm-mesh");
+  });
+
   it("refuses when a live REMOTE session holds the conversation (cliSessionId)", async () => {
     getDefaultRemote.mockReturnValue("http://localhost:8080");
     listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);

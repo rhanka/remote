@@ -136,6 +136,8 @@ export type GuardConvWritersArgs = LivenessOpts & {
   convId: string;
   /** Local project path (suspect heuristic for remote sessions). */
   cwd: string;
+  /** Registry entry id to ignore (the entry the caller is creating/reviving). */
+  excludeId?: string;
   /** Override the refusal (still warns). */
   force?: boolean;
   /**
@@ -165,6 +167,7 @@ export async function guardConvWriters(
   }
   const owners = convOwners(args.convId, {
     cwd: args.cwd,
+    ...(args.excludeId !== undefined ? { excludeId: args.excludeId } : {}),
     ...(remoteSessions !== undefined ? { remoteSessions } : {}),
     ...(args.registryPath ? { registryPath: args.registryPath } : {}),
     ...(args.tmuxHasSession ? { tmuxHasSession: args.tmuxHasSession } : {}),

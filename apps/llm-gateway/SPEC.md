@@ -30,8 +30,9 @@ More broadly, `remote` orchestrates AI coding sessions for developers. It should
 - CLI config: `remote llm-mesh start` → local proxy at `http://localhost:3002`
 - `remote llm-mesh stop|status|logs`
 - CLIs configured via `ANTHROPIC_BASE_URL=http://localhost:3002`
-- Model map: `claude-opus-4-8/4-7 → gpt-5.5`, `claude-sonnet-4-6/4-5 → gpt-5.3-spark`
-- Thinking budget → reasoning_effort: `xhigh (≥50k) → xhigh`, `high (≥25k) → high`,
+- Model map: `claude-opus-4-8/4-7 → gpt-5.5`, `claude-sonnet-4-6/4-5 → gpt-5.5`
+- Thinking budget → reasoning_effort: `xhigh (≥50k) → high` on Codex OAuth,
+  `xhigh (≥50k) → xhigh` on standard OpenAI API, `high (≥25k) → high`,
   `med (≥8k) → medium`, `low (<8k) → low`
 
 **Enrollment** (solo): plain local config file, CLI asks for keys on first run.
@@ -57,7 +58,7 @@ Provider pairs: `anthropic ↔ openai` (mirror logic in gateway, not just in CLI
 - Enrollment: each user **enrolls their OWN keys** — never shares raw credentials
   with teammates. The gateway stores `encrypt(token, per-user-key)`.
 - Per-account usage tracking (tokens/requests/cost per enrolled account)
-- Per-provider policy: e.g. "sonnet ok, opus not" / "gpt-5.3-spark ok, gpt-5.5 not"
+- Per-provider policy: e.g. "sonnet ok, opus not" / "model A ok, model B not"
 - Multi-team: namespace isolation, one gateway serves N teams
 - Sticky bindings: per-session account affinity (ConfigMap in k8s, or DB row)
 - `remote` starts/manages the team gateway (k8s Deployment) or points to an external one
@@ -103,7 +104,7 @@ so when Anthropic quota is exhausted, requests fall through to Codex.
 2. Model mapping + reasoning_effort translation  ✓ (proxy-openai.ts)
 3. Run gateway locally: `GATEWAY_ACCOUNTS='[{"id":"c1","provider":"openai","label":"Codex","token":"<sk->"}]' node apps/llm-gateway/dist/index.js`
 4. Obtain a `gw-xxx` token via `POST /v1/session { "sessionId": "local-dev" }`
-5. Set `ANTHROPIC_BASE_URL=http://localhost:3001` + `ANTHROPIC_API_KEY=gw-xxx` in Claude Code
+5. Set `ANTHROPIC_BASE_URL=http://localhost:3002` + `ANTHROPIC_AUTH_TOKEN=gw-xxx` in Claude Code
 
 **What's missing for the full solo-dev UX**:
 - `remote llm-mesh start` command (starts gateway, writes creds, configures CLIs)
@@ -123,18 +124,18 @@ See `apps/llm-gateway/src/proxy-openai.ts` for the implementation.
 |----------------------|----------------|--------------------|
 | claude-opus-4-8      | gpt-5.5        | most capable       |
 | claude-opus-4-7      | gpt-5.5        |                    |
-| claude-sonnet-4-6    | gpt-5.3-spark  | balanced           |
-| claude-sonnet-4-5    | gpt-5.3-spark  |                    |
-| claude-haiku-4-5-*   | gpt-5.3-spark  | fast/cheap         |
+| claude-sonnet-4-6    | gpt-5.5        | Codex OAuth default |
+| claude-sonnet-4-5    | gpt-5.5        |                    |
+| claude-haiku-4-5-*   | gpt-5.5        | Codex OAuth default |
 
 ### thinking.budget_tokens → reasoning_effort
 
-| budget_tokens | reasoning_effort | Claude tier |
-|---------------|-----------------|-------------|
-| ≥ 50 000      | xhigh           | xhigh       |
-| ≥ 25 000      | high            | high        |
-| ≥  8 000      | medium          | medium      |
-| < 8 000       | low             | low         |
+| budget_tokens | OpenAI API | Codex OAuth | Claude tier |
+|---------------|------------|-------------|-------------|
+| ≥ 50 000      | xhigh      | high        | xhigh       |
+| ≥ 25 000      | high       | high        | high        |
+| ≥  8 000      | medium     | medium      | medium      |
+| < 8 000       | low        | low         | low         |
 
 ---
 
@@ -149,9 +150,9 @@ See `apps/llm-gateway/src/proxy-openai.ts` for the implementation.
 3. **`remote llm-mesh start`**: which process manager? systemd user unit, or just
    a background process managed by remote's PID file?
 
-4. **gpt-5.5 support for `reasoning_effort: "xhigh"`**: unconfirmed — may need
-   to downgrade to "high" on error. The proxy passes it through; let the model reject
-   and we'll catch and retry.
+4. **Codex OAuth support for `reasoning.effort: "xhigh"`**: unconfirmed. The proxy
+   currently sends the maximum known-compatible Codex OAuth effort, `"high"`, while
+   the standard OpenAI API path still passes `reasoning_effort: "xhigh"`.
 
 5. **Codex tool filtering**: codex config already disables `web_search` and
    `image_generation` when proxying through Claude (`web_search = "disabled"`).

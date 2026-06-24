@@ -381,15 +381,15 @@ interface LlmMeshTokenFile {
 }
 
 /**
- * Returns {ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY} for the running local gateway,
- * or null if not running or token file absent.
+ * Returns {ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN} for the running local
+ * gateway, or null if not running or token file absent.
  *
  * Used by `remote run` to auto-inject the gateway env into every tmux session
  * (interactive + headless) so all Claude sessions + their subagents use the gateway.
  */
 export function readLlmMeshSessionEnv(dir?: string): {
   ANTHROPIC_BASE_URL: string;
-  ANTHROPIC_API_KEY: string;
+  ANTHROPIC_AUTH_TOKEN: string;
 } | null {
   try {
     const raw = readFileSync(llmMeshTokenPath(dir), "utf8");
@@ -397,7 +397,47 @@ export function readLlmMeshSessionEnv(dir?: string): {
     if (!gatewayToken || !baseUrl) return null;
     // Verify the gateway process is still alive
     try { process.kill(pid, 0); } catch { return null; }
-    return { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_API_KEY: gatewayToken };
+    return { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: gatewayToken };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Acquire a fresh in-memory gateway token from the running local gateway.
+ * Gateway tokens are intentionally not durable; after a gateway restart,
+ * llm-mesh-token.json may point at a token the new process does not know.
+ */
+export async function acquireLlmMeshSessionEnv(dir?: string): Promise<{
+  ANTHROPIC_BASE_URL: string;
+  ANTHROPIC_AUTH_TOKEN: string;
+} | null> {
+  try {
+    const raw = readFileSync(llmMeshTokenPath(dir), "utf8");
+    const { baseUrl, pid } = JSON.parse(raw) as LlmMeshTokenFile;
+    if (!baseUrl || !pid) return null;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return null;
+    }
+    const sessionResp = await fetch(`${baseUrl}/v1/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "local-dev" }),
+    });
+    if (!sessionResp.ok) return null;
+    const session = (await sessionResp.json()) as { gatewayToken?: string };
+    if (!session.gatewayToken) return null;
+    writeSecret(llmMeshTokenPath(dir), {
+      gatewayToken: session.gatewayToken,
+      baseUrl,
+      pid,
+    });
+    return {
+      ANTHROPIC_BASE_URL: baseUrl,
+      ANTHROPIC_AUTH_TOKEN: session.gatewayToken,
+    };
   } catch {
     return null;
   }
