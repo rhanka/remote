@@ -561,10 +561,24 @@ export function buildSessionPodSpec(
   // it surfaces here on resume and every in-session write lands on the volume
   // (survives pod restart/re-deport). Narrow on purpose: only the conversation
   // dir, never all of HOME (auth files stay Secret-sourced + ephemeral).
+  //
+  // Headless jobs (`-p <task>`) get a per-session-id subPath so concurrent jobs
+  // sharing the same workspace don't collide on the same conversation directory.
+  // Interactive sessions keep the shared-per-profile path so `--resume` survives
+  // pod restart/refresh (same subPath → same conversations visible on the new pod).
   const convRelDir = CONVERSATION_DIRS[descriptor.profile];
   if (convRelDir) {
     const sessionHome = descriptor.home ?? options.home;
-    const convSubPath = `.remote/sessions/${descriptor.profile}/${convRelDir}`;
+    const isHeadless = (() => {
+      const startup = descriptor.metadata?.startup;
+      if (!startup || typeof startup !== "object") return false;
+      const args = (startup as { args?: unknown }).args;
+      if (!Array.isArray(args)) return false;
+      return args.some((a): a is string => typeof a === "string" && a === "-p");
+    })();
+    const convSubPath = isHeadless
+      ? `.remote/jobs/${descriptor.id}/${descriptor.profile}/${convRelDir}`
+      : `.remote/sessions/${descriptor.profile}/${convRelDir}`;
     volumeMounts.push({
       name: PVC_VOLUME,
       mountPath: `${sessionHome}/${convRelDir}`,
