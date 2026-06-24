@@ -303,6 +303,7 @@ import {
   readGatewayPid,
   llmMeshLogPath,
   jwtExpiry,
+  readLlmMeshSessionEnv,
 } from "./llm-mesh.js";
 
 const KNOWN_PROFILE_HELP = `${CLI_PROFILES.join(", ")} (aliases: claude-code, antigravity, gemini-cli, mistralcli)`;
@@ -1367,6 +1368,17 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   for (const [k, v] of Object.entries(accountEnvOverrides)) {
     prevAccountEnvs[k] = process.env[k];
     process.env[k] = v;
+  }
+  // Inject llm-mesh gateway env if running — only when not already set by the user.
+  // tmux inherits process.env, so claude + its subagents all get the gateway automatically.
+  if (!process.env.ANTHROPIC_BASE_URL) {
+    const meshEnv = readLlmMeshSessionEnv();
+    if (meshEnv) {
+      for (const [k, v] of Object.entries(meshEnv)) {
+        prevAccountEnvs[k] = process.env[k];
+        process.env[k] = v;
+      }
+    }
   }
   let tmuxSession: string;
   try {
@@ -4240,6 +4252,19 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
         const h2a = getH2aConfig();
+        // Inject llm-mesh gateway env if running — only when not already set.
+        // Applies before tmux spawn so claude + subagents inherit it automatically.
+        if (!process.env.ANTHROPIC_BASE_URL) {
+          const meshEnv = readLlmMeshSessionEnv();
+          if (meshEnv) {
+            for (const [k, v] of Object.entries(meshEnv)) {
+              process.env[k] = v;
+            }
+            process.stderr.write(
+              `[remote] llm-mesh: injecting gateway env (${meshEnv.ANTHROPIC_BASE_URL})\n`,
+            );
+          }
+        }
         // count==1 keeps the exact prior behaviour (label = opts.name, which may
         // be undefined → slug derives from cwd). count>1 fans out distinct
         // labels <base>#k from the name or the cwd basename.

@@ -374,6 +374,35 @@ export function readGatewayPid(dir?: string): number | null {
   }
 }
 
+interface LlmMeshTokenFile {
+  gatewayToken: string;
+  baseUrl: string;
+  pid: number;
+}
+
+/**
+ * Returns {ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY} for the running local gateway,
+ * or null if not running or token file absent.
+ *
+ * Used by `remote run` to auto-inject the gateway env into every tmux session
+ * (interactive + headless) so all Claude sessions + their subagents use the gateway.
+ */
+export function readLlmMeshSessionEnv(dir?: string): {
+  ANTHROPIC_BASE_URL: string;
+  ANTHROPIC_API_KEY: string;
+} | null {
+  try {
+    const raw = readFileSync(llmMeshTokenPath(dir), "utf8");
+    const { gatewayToken, baseUrl, pid } = JSON.parse(raw) as LlmMeshTokenFile;
+    if (!gatewayToken || !baseUrl) return null;
+    // Verify the gateway process is still alive
+    try { process.kill(pid, 0); } catch { return null; }
+    return { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_API_KEY: gatewayToken };
+  } catch {
+    return null;
+  }
+}
+
 /** Stop the running gateway. */
 export function stopGateway(dir?: string): { stopped: boolean; pid?: number } {
   const pid = readGatewayPid(dir);
