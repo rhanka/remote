@@ -403,7 +403,7 @@ export async function getRemoteSession(
   baseUrl: string,
   sessionId: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ session: { profile: string } }> {
+): Promise<{ session: { id: string; profile: string } }> {
   const response = await fetchImpl(joinUrl(baseUrl, `/sessions/${sessionId}`), {
     headers: { ...authHeaders() },
   });
@@ -412,7 +412,7 @@ export async function getRemoteSession(
       `getRemoteSession: ${response.status} ${response.statusText}`,
     );
   }
-  return (await response.json()) as { session: { profile: string } };
+  return (await response.json()) as { session: { id: string; profile: string } };
 }
 
 export async function refreshRemoteSession(

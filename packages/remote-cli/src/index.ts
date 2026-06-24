@@ -6417,7 +6417,17 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             return;
           }
         }
-        const { url, sessionId } = resolveUrlAndSessionId(first, second);
+        const { url, sessionId: rawSessionId } = resolveUrlAndSessionId(first, second);
+        await ensureConnected(url);
+        // Resolve displayName → real UUID so attachPodTmux builds the right pod
+        // name (session-<uuid>) and the WS path hits the right session.
+        let sessionId = rawSessionId;
+        try {
+          const resolved = await getRemoteSession(url, rawSessionId);
+          if (resolved.session.id) sessionId = resolved.session.id;
+        } catch {
+          // not found or network error — keep rawSessionId, will fail downstream
+        }
         const tunnel = getTunnel();
         // Default to exec-into-Pod-tmux (UTF-8, native scrollback + copy, direct,
         // no deaf-zombie) when a tunnel is configured; the WS/SSE proxy is the
@@ -6430,14 +6440,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             process.exitCode = 1;
             return;
           }
-          await ensureConnected(url);
           process.stderr.write(
             `[remote] exec-attaching into Pod tmux for ${sessionId} (Ctrl-b d to detach)\n`,
           );
           process.exitCode = attachPodTmux(tunnel, sessionId);
           return;
         }
-        await ensureConnected(url);
         process.stderr.write(
           `[remote] attaching to ${url}/sessions/${sessionId} (WS)\n`,
         );
