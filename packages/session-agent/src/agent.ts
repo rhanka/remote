@@ -164,13 +164,23 @@ export function preTrustClaudeWorkspace(
     }
     const projects = (config.projects ?? {}) as Record<string, unknown>;
     const project = (projects[workspacePath] ?? {}) as Record<string, unknown>;
-    if (project["hasTrustDialogAccepted"] === true) return;
+    if (project["hasTrustDialogAccepted"] === true) {
+      console.log(
+        `[session-agent] pre-trust: ${workspacePath} already trusted in ${configPath}`,
+      );
+      return;
+    }
     project["hasTrustDialogAccepted"] = true;
     projects[workspacePath] = project;
     config.projects = projects;
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
-  } catch {
-    // never block session start on a config write failure
+    console.log(
+      `[session-agent] pre-trust: wrote hasTrustDialogAccepted=true for ${workspacePath} in ${configPath}`,
+    );
+  } catch (err) {
+    console.error(
+      `[session-agent] pre-trust: FAILED to write ${join(home, ".claude.json")}: ${String(err)}`,
+    );
   }
 }
 
@@ -255,12 +265,32 @@ export class SessionAgent {
       ];
     }
 
+    // Fallback trust-dialog handler: if preTrustClaudeWorkspace didn't prevent
+    // the "Do you trust the files in this folder?" dialog (e.g. because the
+    // running claude version uses a different config key, or the write raced with
+    // a concurrent pod), detect it in stdout and answer "1" automatically.
+    // Accumulate across chunks; cap the buffer to avoid unbounded growth.
+    let trustDialogHandled = false;
+    let trustBuffer = "";
+
     const handle = this.spawner({
       command: spawnCommand,
       args: spawnArgs,
       cwd: this.workspacePath,
       env: { ...this.env, REMOTE_SESSION_ID: this.sessionId },
-      onStdout: (chunk) => this.publishOutput("stdout", chunk),
+      onStdout: (chunk) => {
+        if (!trustDialogHandled && this.profile === "claude") {
+          trustBuffer += chunk;
+          if (trustBuffer.includes("Do you trust the files in this folder?")) {
+            trustDialogHandled = true;
+            trustBuffer = "";
+            this.process?.write("1\n");
+          } else if (trustBuffer.length > 512) {
+            trustBuffer = trustBuffer.slice(-256);
+          }
+        }
+        this.publishOutput("stdout", chunk);
+      },
       onStderr: (chunk) => this.publishOutput("stderr", chunk),
     });
     this.process = handle;
