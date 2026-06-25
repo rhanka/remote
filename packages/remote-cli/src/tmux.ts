@@ -12,6 +12,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -145,6 +146,7 @@ function tmuxEnvironmentArgs(): string[] {
   for (const key of [
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
   ] as const) {
     const value = process.env[key];
     if (value) args.push("-e", `${key}=${value}`);
@@ -843,6 +845,67 @@ export function localSessionIdle(name: string): boolean {
   );
   const kids = Number((children.stdout ?? "").trim());
   return Number.isInteger(kids) && kids === 0;
+}
+
+export type LocalSessionGatewayEnvStatus =
+  | "current"
+  | "missing"
+  | "stale"
+  | "unknown";
+
+function directChildPids(pid: number): number[] {
+  const children = spawnSync("ps", ["--ppid", String(pid), "-o", "pid="], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (children.status !== 0 || !children.stdout) return [];
+  return children.stdout
+    .split("\n")
+    .map((s) => Number.parseInt(s.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n > 0);
+}
+
+function readProcessEnvironment(pid: number): Record<string, string> | null {
+  try {
+    const raw = readFileSync(`/proc/${pid}/environ`, "utf8");
+    const env: Record<string, string> = {};
+    for (const part of raw.split("\0")) {
+      const i = part.indexOf("=");
+      if (i > 0) env[part.slice(0, i)] = part.slice(i + 1);
+    }
+    return env;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Inspect the real CLI child process under the tmux wrapper and compare its
+ * Anthropic gateway env with the token remote is about to use. Unknown is
+ * deliberately non-actionable; callers should only repair missing/stale.
+ */
+export function localSessionGatewayEnvStatus(
+  name: string,
+  expected: { baseUrl: string; authToken: string },
+): LocalSessionGatewayEnvStatus {
+  const disp = spawnSync(
+    TMUX,
+    ["display", "-p", "-t", name, "#{pane_pid}"],
+    { encoding: "utf8" },
+  );
+  if (disp.status !== 0 || !disp.stdout) return "unknown";
+  const panePid = Number.parseInt(disp.stdout.trim(), 10);
+  if (!Number.isInteger(panePid) || panePid <= 0) return "unknown";
+  const [childPid] = directChildPids(panePid);
+  const env = readProcessEnvironment(childPid ?? panePid);
+  if (!env) return "unknown";
+  const baseUrl = env.ANTHROPIC_BASE_URL;
+  const authToken = env.ANTHROPIC_AUTH_TOKEN;
+  if (!baseUrl || !authToken) return "missing";
+  if (baseUrl !== expected.baseUrl || authToken !== expected.authToken) {
+    return "stale";
+  }
+  return "current";
 }
 
 /**

@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { findAccount, selectAccount } from "./accounts.js";
 import type { AccountDescriptor } from "./accounts.js";
 
@@ -10,6 +11,7 @@ const K8S_HOST = process.env.KUBERNETES_SERVICE_HOST ?? "kubernetes.default.svc.
 const K8S_PORT = process.env.KUBERNETES_SERVICE_PORT ?? "443";
 const NAMESPACE = process.env.POD_NAMESPACE ?? "sentropic-remote";
 const CONFIGMAP_NAME = process.env.STICKY_CONFIGMAP ?? "llm-gateway-sticky";
+const LOCAL_STICKY_FILE = process.env.LLM_GATEWAY_STICKY_FILE;
 
 function saToken(): string {
   try {
@@ -24,9 +26,27 @@ function cmUrl(): string {
   return `https://${K8S_HOST}:${K8S_PORT}/api/v1/namespaces/${NAMESPACE}/configmaps/${CONFIGMAP_NAME}`;
 }
 
+function readLocalSticky(): Record<string, string> {
+  if (!LOCAL_STICKY_FILE) return {};
+  try {
+    return JSON.parse(readFileSync(LOCAL_STICKY_FILE, "utf8")) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalSticky(data: Record<string, string>): void {
+  if (!LOCAL_STICKY_FILE) return;
+  mkdirSync(dirname(LOCAL_STICKY_FILE), { recursive: true });
+  const tmp = `${LOCAL_STICKY_FILE}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, LOCAL_STICKY_FILE);
+}
+
 export async function readSticky(): Promise<Record<string, string>> {
   const token = saToken();
-  if (!token) return {};
+  if (!token) return readLocalSticky();
   const resp = await fetch(cmUrl(), {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -38,7 +58,10 @@ export async function readSticky(): Promise<Record<string, string>> {
 
 export async function writeSticky(sessionId: string, accountId: string): Promise<void> {
   const token = saToken();
-  if (!token) return; // No k8s in local dev — skip write
+  if (!token) {
+    writeLocalSticky({ ...readLocalSticky(), [sessionId]: accountId });
+    return;
+  }
   const patch = {
     apiVersion: "v1",
     kind: "ConfigMap",
@@ -56,7 +79,7 @@ export async function writeSticky(sessionId: string, accountId: string): Promise
   if (!resp.ok) throw new Error(`sticky ConfigMap patch failed: ${resp.status}`);
 }
 
-// ─── In-memory token map (survives only until gateway restart) ────────────────
+// ─── Restart-safe gateway token derivation ──────────────────────────────────
 
 interface SessionEntry {
   gatewayToken: string;
@@ -66,13 +89,78 @@ interface SessionEntry {
 }
 
 const _sessions = new Map<string, SessionEntry>();
+const TOKEN_PREFIX = "gw-v1-";
+
+function tokenSeed(): string {
+  const seed = process.env.LLM_GATEWAY_TOKEN_SEED;
+  if (!seed) throw new Error("LLM_GATEWAY_TOKEN_SEED env var is required");
+  return seed;
+}
+
+function b64url(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function unb64url(value: string): string | null {
+  try {
+    return Buffer.from(value, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function macFor(sessionId: string): string {
+  return createHmac("sha256", tokenSeed())
+    .update("gw-token-v1\0")
+    .update(sessionId)
+    .digest("base64url");
+}
+
+export function gatewayTokenForSession(sessionId: string): string {
+  return `${TOKEN_PREFIX}${b64url(sessionId)}.${macFor(sessionId)}`;
+}
+
+function sessionIdFromGatewayToken(gatewayToken: string): string | null {
+  if (!gatewayToken.startsWith(TOKEN_PREFIX)) return null;
+  const rest = gatewayToken.slice(TOKEN_PREFIX.length);
+  const dot = rest.indexOf(".");
+  if (dot <= 0) return null;
+  const encodedSessionId = rest.slice(0, dot);
+  const suppliedMac = rest.slice(dot + 1);
+  const sessionId = unb64url(encodedSessionId);
+  if (!sessionId) return null;
+  const expectedMac = macFor(sessionId);
+  const a = Buffer.from(suppliedMac);
+  const b = Buffer.from(expectedMac);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  return sessionId;
+}
 
 export function sessionCount(): number {
   return _sessions.size;
 }
 
-export function lookupToken(gatewayToken: string): SessionEntry | undefined {
-  return _sessions.get(gatewayToken);
+export async function lookupToken(gatewayToken: string): Promise<SessionEntry | undefined> {
+  const cached = _sessions.get(gatewayToken);
+  if (cached) return cached;
+
+  const sessionId = sessionIdFromGatewayToken(gatewayToken);
+  if (!sessionId) return undefined;
+
+  const existing = await readSticky();
+  const accountId = existing[sessionId];
+  if (accountId === undefined) return undefined;
+  const account = findAccount(accountId);
+  if (!account) return undefined;
+
+  const entry = {
+    gatewayToken,
+    accountId: account.id,
+    token: account.token,
+    provider: account.provider,
+  };
+  _sessions.set(gatewayToken, entry);
+  return entry;
 }
 
 /** Update the bearer token for a session after an OAuth refresh. */
@@ -90,8 +178,8 @@ export interface SessionResult {
 
 /**
  * Acquire or re-acquire a session for a given sessionId.
- * Idempotent: the same sessionId always maps to the same accountId (ConfigMap).
- * Generates a new gatewayToken on each call (tokens are in-memory only).
+ * Idempotent: the same sessionId always maps to the same accountId and token.
+ * The token is derived from LLM_GATEWAY_TOKEN_SEED + sessionId, never persisted.
  */
 export async function acquireSession(sessionId: string): Promise<SessionResult> {
   // Check ConfigMap for existing sticky binding
@@ -108,7 +196,7 @@ export async function acquireSession(sessionId: string): Promise<SessionResult> 
     await writeSticky(sessionId, account.id);
   }
 
-  const gatewayToken = "gw-" + randomBytes(16).toString("hex");
+  const gatewayToken = gatewayTokenForSession(sessionId);
   _sessions.set(gatewayToken, {
     gatewayToken,
     accountId: account.id,

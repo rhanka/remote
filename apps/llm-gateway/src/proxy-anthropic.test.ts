@@ -4,7 +4,7 @@ import { handleMessages } from "./proxy-anthropic.js";
 
 // Inject a fake session into the in-memory map via sticky module
 vi.mock("./sticky.js", () => ({
-  lookupToken: vi.fn((t: string) =>
+  lookupToken: vi.fn(async (t: string) =>
     t === "gw-validtoken"
       ? { gatewayToken: t, accountId: "c1", token: "sk-ant-real", provider: "claude-code" }
       : undefined,

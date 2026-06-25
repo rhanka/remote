@@ -21,7 +21,7 @@ export async function handleMessages(c: Context): Promise<Response> {
   const gatewayToken = auth.startsWith("Bearer gw-") ? auth.slice("Bearer ".length) : null;
   if (!gatewayToken) return c.json({ error: "unauthorized" }, 403);
 
-  const session = lookupToken(gatewayToken);
+  const session = await lookupToken(gatewayToken);
   if (!session) return c.json({ error: "unauthorized" }, 403);
 
   // Route to OpenAI/Codex path when the bound account is an OpenAI provider

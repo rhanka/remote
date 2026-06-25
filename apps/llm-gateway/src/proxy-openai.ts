@@ -824,7 +824,28 @@ export async function handleMessagesViaOpenAI(
     const errBody = await upstream.text();
     return new Response(errBody, {
       status: upstream.status,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+    });
+  }
+
+  // Codex OAuth Responses API always streams in this gateway path. Some Claude
+  // clients/subagents still send non-streaming Anthropic requests; return a
+  // translated Anthropic SSE stream rather than trying to parse Codex SSE as JSON
+  // (which produced 500s: Unexpected token 'e', "event: res"...).
+  if (isCodex && upstream.body) {
+    const stream = translateCodexStreamToAnthropic(
+      upstream.body,
+      originalModel,
+      messageId,
+      estimatedInputTokens,
+    );
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+        "x-accel-buffering": "no",
+      },
     });
   }
 

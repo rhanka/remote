@@ -163,6 +163,7 @@ describe("startLocalSession agent pane metadata", () => {
   it("passes Anthropic gateway env explicitly to tmux new-session", () => {
     process.env.ANTHROPIC_BASE_URL = "http://localhost:3002";
     process.env.ANTHROPIC_AUTH_TOKEN = "gw-test";
+    process.env.ANTHROPIC_API_KEY = "gw-test";
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "tmux" && args[0] === "-V") return { status: 0 };
       if (cmd === "tmux" && args[0] === "list-sessions")
@@ -176,6 +177,7 @@ describe("startLocalSession agent pane metadata", () => {
     const newSession = tmuxCalls("new-session")[0]!;
     expect(newSession[1]).toContain("ANTHROPIC_BASE_URL=http://localhost:3002");
     expect(newSession[1]).toContain("ANTHROPIC_AUTH_TOKEN=gw-test");
+    expect(newSession[1]).toContain("ANTHROPIC_API_KEY=gw-test");
   });
 
   it("stores the agent pane on the tmux session after creation", () => {

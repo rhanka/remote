@@ -30,12 +30,26 @@ const currentTmuxSessionIs = vi.fn();
 const findLocalSession = vi.fn();
 const killLocalSession = vi.fn();
 const localSessionIdle = vi.fn();
+const localSessionGatewayEnvStatus = vi.fn();
 const runLocalCliForeground = vi.fn();
 const migrateForward = vi.fn();
 const migrateBack = vi.fn();
 const localConvStat = vi.fn();
 const acquireLlmMeshSessionEnv = vi.fn();
 const readLlmMeshSessionEnv = vi.fn();
+const readLlmMeshConfig = vi.fn(
+  (): {
+    accounts: Array<{
+      id: string;
+      provider: "anthropic" | "openai";
+      label: string;
+      token: string;
+    }>;
+  } => ({ accounts: [] }),
+);
+const getLlmMeshRuntimeConfig = vi.fn(() => ({ enabled: true }));
+const startGateway = vi.fn();
+const readGatewayPid = vi.fn(() => null);
 
 vi.mock("./attach.js", () => ({
   attach: vi.fn(),
@@ -62,6 +76,8 @@ vi.mock("./config.js", () => ({
   setPlugins: () => {},
   getH2aConfig: () => ({ enabled: false }),
   setH2aConfig: () => {},
+  getLlmMeshRuntimeConfig,
+  setLlmMeshRuntimeConfig: vi.fn(),
   DEFAULT_SESSION_TARGET: "scaleway-kapsule",
   authHeaders: () => ({}),
   resolveConfigPath: () => CONFIG_PATH,
@@ -77,6 +93,7 @@ vi.mock("./tmux.js", () => ({
   killLocalSession,
   listLocalSessions: () => [],
   localSessionIdle,
+  localSessionGatewayEnvStatus,
   localSessionName: (slug: string) =>
     slug.startsWith("remote-") ? slug : `remote-${slug}`,
   slugify: (p: string) => {
@@ -96,11 +113,11 @@ vi.mock("./migrate.js", () => ({
 
 vi.mock("./llm-mesh.js", () => ({
   enrollCodexAccount: vi.fn(),
-  readLlmMeshConfig: vi.fn(() => ({ accounts: [] })),
-  startGateway: vi.fn(),
+  readLlmMeshConfig,
+  startGateway,
   stopGateway: vi.fn(),
   writeLlmMeshConfig: vi.fn(),
-  readGatewayPid: vi.fn(() => null),
+  readGatewayPid,
   llmMeshLogPath: vi.fn(() => "llm-mesh.log"),
   jwtExpiry: vi.fn(() => null),
   acquireLlmMeshSessionEnv,
@@ -189,6 +206,8 @@ beforeEach(() => {
   killLocalSession.mockReturnValue(true);
   localSessionIdle.mockReset();
   localSessionIdle.mockReturnValue(false);
+  localSessionGatewayEnvStatus.mockReset();
+  localSessionGatewayEnvStatus.mockReturnValue("unknown");
   runLocalCliForeground.mockReset();
   runLocalCliForeground.mockReturnValue(0);
   migrateForward.mockReset();
@@ -199,6 +218,13 @@ beforeEach(() => {
   acquireLlmMeshSessionEnv.mockResolvedValue(null);
   readLlmMeshSessionEnv.mockReset();
   readLlmMeshSessionEnv.mockReturnValue(null);
+  readLlmMeshConfig.mockReset();
+  readLlmMeshConfig.mockReturnValue({ accounts: [] });
+  getLlmMeshRuntimeConfig.mockReset();
+  getLlmMeshRuntimeConfig.mockReturnValue({ enabled: true });
+  startGateway.mockReset();
+  readGatewayPid.mockReset();
+  readGatewayPid.mockReturnValue(null);
   stderrWrite.mockClear();
   stdoutWrite.mockClear();
   delete process.env.ANTHROPIC_BASE_URL;
@@ -372,6 +398,48 @@ describe("remote resume <slug>", () => {
     expect(stderrText()).toContain("already inside remote-cli");
   });
 
+  it("does not restart an active Claude session when it lacks the current llm-mesh env", async () => {
+    localConvStat.mockReturnValue({
+      convId: "claude-last",
+      bytes: 12,
+      lines: 2,
+      sha: "abc123",
+    });
+    acquireLlmMeshSessionEnv.mockResolvedValue({
+      ANTHROPIC_BASE_URL: "http://localhost:3002",
+      ANTHROPIC_AUTH_TOKEN: "gw-current",
+    });
+    findLocalSession.mockReturnValue({
+      name: "remote-remote-cli",
+      slug: "remote-cli",
+      profile: "claude",
+      path: process.cwd(),
+      attached: true,
+    });
+    localSessionIdle.mockReturnValue(false);
+    localSessionGatewayEnvStatus.mockReturnValue("missing");
+    startLocalSession.mockReturnValue({
+      name: "remote-remote-cli",
+      slug: "remote-cli",
+    });
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "--claude",
+      "--last",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(killLocalSession).not.toHaveBeenCalled();
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(attachLocalSession).toHaveBeenCalledWith("remote-remote-cli");
+    expect(stderrText()).toContain("without current llm-mesh env");
+    expect(stderrText()).toContain("not restarting an active session automatically");
+    expect(stderrText()).toContain("remote resume remote-cli --replace");
+  });
+
   it("resumes Codex's native last session with --codex --last", async () => {
     const cwd = process.cwd();
     const expectedSlug = cwd.split("/").filter(Boolean).pop() ?? "session";
@@ -471,7 +539,7 @@ describe("remote resume <slug>", () => {
     expect(stderrText()).toContain("remote attach projA");
   });
 
-  it("uses Anthropic gateway auth token without forcing claude --bare", async () => {
+  it("uses Anthropic gateway auth token with claude --bare", async () => {
     acquireLlmMeshSessionEnv.mockResolvedValue({
       ANTHROPIC_BASE_URL: "http://localhost:3002",
       ANTHROPIC_AUTH_TOKEN: "gw-test",
@@ -485,11 +553,77 @@ describe("remote resume <slug>", () => {
       "claude",
       "claude",
       "/home/u/src/projA",
-      ["--resume", "conv-dup"],
+      ["--bare", "--resume", "conv-dup"],
       "projA",
     );
     expect(process.env.ANTHROPIC_BASE_URL).toBe("http://localhost:3002");
     expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("gw-test");
+  });
+
+  it("starts configured llm-mesh automatically before resuming Claude", async () => {
+    readLlmMeshConfig.mockReturnValue({
+      accounts: [
+        {
+          id: "codex-oauth",
+          provider: "openai",
+          label: "Codex",
+          token: "tok",
+        },
+      ],
+    });
+    startGateway.mockResolvedValue({
+      pid: 123,
+      port: 3002,
+      gatewayToken: "gw-started",
+    });
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main(["node", "remote", "resume", "projA"]);
+
+    expect(exitCode).toBe(0);
+    expect(startGateway).toHaveBeenCalled();
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--bare", "--resume", "conv-dup"],
+      "projA",
+    );
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("gw-started");
+    expect(stderrText()).toContain("gateway was stopped; started");
+  });
+
+  it("does not auto-start llm-mesh when the runtime config is disabled", async () => {
+    getLlmMeshRuntimeConfig.mockReturnValue({ enabled: false });
+    readLlmMeshConfig.mockReturnValue({
+      accounts: [
+        {
+          id: "codex-oauth",
+          provider: "openai",
+          label: "Codex",
+          token: "tok",
+        },
+      ],
+    });
+    startGateway.mockResolvedValue({
+      pid: 123,
+      port: 3002,
+      gatewayToken: "gw-started",
+    });
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main(["node", "remote", "resume", "projA"]);
+
+    expect(exitCode).toBe(0);
+    expect(startGateway).not.toHaveBeenCalled();
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--resume", "conv-dup"],
+      "projA",
+    );
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
   it("does not replace an existing non-idle session", async () => {

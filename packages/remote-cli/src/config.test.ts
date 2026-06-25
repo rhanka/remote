@@ -10,6 +10,8 @@ import {
   setPlugins,
   getH2aConfig,
   setH2aConfig,
+  getLlmMeshRuntimeConfig,
+  setLlmMeshRuntimeConfig,
   getMaxConcurrent,
   setMaxConcurrent,
   readRemoteConfig,
@@ -122,6 +124,24 @@ describe("h2a config", () => {
       enabled: false,
       command: DEFAULT_H2A_COMMAND,
     });
+  });
+});
+
+describe("llm-mesh runtime config", () => {
+  it("defaults to disabled", () => {
+    expect(getLlmMeshRuntimeConfig()).toEqual({ enabled: false });
+  });
+
+  it("round-trips enabled", () => {
+    setLlmMeshRuntimeConfig({ enabled: true });
+    expect(getLlmMeshRuntimeConfig()).toEqual({ enabled: true });
+    expect(readRemoteConfig().llmMesh).toEqual({ enabled: true });
+  });
+
+  it("ignores malformed config", () => {
+    setLlmMeshRuntimeConfig({ enabled: "yes" } as never);
+    expect(readRemoteConfig().llmMesh).toBeUndefined();
+    expect(getLlmMeshRuntimeConfig()).toEqual({ enabled: false });
   });
 });
 

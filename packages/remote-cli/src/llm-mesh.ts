@@ -11,7 +11,8 @@
  *
  * Config path: ~/.sentropic/llm-mesh.json  (0600)
  * PID file:    ~/.sentropic/llm-mesh.pid
- * Token file:  ~/.sentropic/llm-mesh-token.json (0600, gw-token for the CLI)
+ * Token file:  ~/.sentropic/llm-mesh-token.json (0600, runtime metadata + derived gw-token)
+ * Seed file:   ~/.sentropic/llm-mesh-seed (0600, sole durable gateway-token secret)
  */
 
 import {
@@ -20,6 +21,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -27,6 +29,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Config types
@@ -70,6 +73,14 @@ export function llmMeshTokenPath(dir?: string): string {
   return join(dir ?? sentropicDir(), "llm-mesh-token.json");
 }
 
+export function llmMeshSeedPath(dir?: string): string {
+  return join(dir ?? sentropicDir(), "llm-mesh-seed");
+}
+
+export function llmMeshStickyPath(dir?: string): string {
+  return join(dir ?? sentropicDir(), "llm-mesh-sticky.json");
+}
+
 export function llmMeshLogPath(config?: LlmMeshConfig, dir?: string): string {
   return config?.logFile ?? join(dir ?? sentropicDir(), "llm-mesh.log");
 }
@@ -94,12 +105,41 @@ function writeSecret(path: string, value: unknown): void {
   renameSync(tmp, path);
 }
 
+function writeSecretString(path: string, value: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmp, value + "\n", { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
+}
+
 export function readLlmMeshConfig(dir?: string): LlmMeshConfig | null {
   return readJson<LlmMeshConfig>(llmMeshConfigPath(dir));
 }
 
 export function writeLlmMeshConfig(config: LlmMeshConfig, dir?: string): void {
   writeSecret(llmMeshConfigPath(dir), config);
+}
+
+export function readOrCreateLlmMeshSeed(dir?: string): string {
+  const path = llmMeshSeedPath(dir);
+  try {
+    const seed = readFileSync(path, "utf8").trim();
+    if (seed) {
+      try {
+        const mode = statSync(path).mode & 0o777;
+        if (mode !== 0o600) chmodSync(path, 0o600);
+      } catch {
+        // best effort only
+      }
+      return seed;
+    }
+  } catch {
+    // create below
+  }
+  const seed = randomBytes(32).toString("base64url");
+  writeSecretString(path, seed);
+  return seed;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +343,8 @@ export async function startGateway(
   const gatewayEnv: NodeJS.ProcessEnv = {
     ...process.env,
     GATEWAY_ACCOUNTS: buildGatewayAccountsEnv(refreshedAccounts),
+    LLM_GATEWAY_TOKEN_SEED: readOrCreateLlmMeshSeed(),
+    LLM_GATEWAY_STICKY_FILE: llmMeshStickyPath(),
     PORT: String(port),
   };
 
@@ -380,6 +422,12 @@ interface LlmMeshTokenFile {
   pid: number;
 }
 
+function configuredGatewayBaseUrl(dir?: string): string | null {
+  const config = readLlmMeshConfig(dir);
+  if (!config) return null;
+  return `http://localhost:${config.port ?? 3002}`;
+}
+
 /**
  * Returns {ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN} for the running local
  * gateway, or null if not running or token file absent.
@@ -390,6 +438,7 @@ interface LlmMeshTokenFile {
 export function readLlmMeshSessionEnv(dir?: string): {
   ANTHROPIC_BASE_URL: string;
   ANTHROPIC_AUTH_TOKEN: string;
+  ANTHROPIC_API_KEY: string;
 } | null {
   try {
     const raw = readFileSync(llmMeshTokenPath(dir), "utf8");
@@ -397,7 +446,14 @@ export function readLlmMeshSessionEnv(dir?: string): {
     if (!gatewayToken || !baseUrl) return null;
     // Verify the gateway process is still alive
     try { process.kill(pid, 0); } catch { return null; }
-    return { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: gatewayToken };
+    return {
+      ANTHROPIC_BASE_URL: baseUrl,
+      ANTHROPIC_AUTH_TOKEN: gatewayToken,
+      // Claude Code subagents may re-read API-key style env instead of the
+      // auth-token env used by the parent process. Keep both pointed at the
+      // same opaque gateway token; do not write Claude config.
+      ANTHROPIC_API_KEY: gatewayToken,
+    };
   } catch {
     return null;
   }
@@ -411,10 +467,20 @@ export function readLlmMeshSessionEnv(dir?: string): {
 export async function acquireLlmMeshSessionEnv(dir?: string): Promise<{
   ANTHROPIC_BASE_URL: string;
   ANTHROPIC_AUTH_TOKEN: string;
+  ANTHROPIC_API_KEY: string;
 } | null> {
   try {
-    const raw = readFileSync(llmMeshTokenPath(dir), "utf8");
-    const { baseUrl, pid } = JSON.parse(raw) as LlmMeshTokenFile;
+    let baseUrl: string | undefined;
+    let pid: number | undefined;
+    try {
+      const raw = readFileSync(llmMeshTokenPath(dir), "utf8");
+      const tokenFile = JSON.parse(raw) as LlmMeshTokenFile;
+      baseUrl = tokenFile.baseUrl;
+      pid = tokenFile.pid;
+    } catch {
+      baseUrl = configuredGatewayBaseUrl(dir) ?? undefined;
+      pid = readGatewayPid(dir) ?? undefined;
+    }
     if (!baseUrl || !pid) return null;
     try {
       process.kill(pid, 0);
@@ -437,6 +503,7 @@ export async function acquireLlmMeshSessionEnv(dir?: string): Promise<{
     return {
       ANTHROPIC_BASE_URL: baseUrl,
       ANTHROPIC_AUTH_TOKEN: session.gatewayToken,
+      ANTHROPIC_API_KEY: session.gatewayToken,
     };
   } catch {
     return null;

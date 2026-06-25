@@ -35,11 +35,13 @@ import {
   getH2aConfig,
   getJobMaxAgeHours,
   getMaxConcurrent,
+  getLlmMeshRuntimeConfig,
   getTunnel,
   resolveConfigPath,
   setDefaultRemote,
   setDefaultTarget,
   setDefaultTools,
+  setLlmMeshRuntimeConfig,
   setToken,
   setTunnel,
   type TunnelConfig,
@@ -64,6 +66,7 @@ import {
   fanoutLabels,
   findLocalSession,
   killLocalSession,
+  localSessionGatewayEnvStatus,
   listLocalSessions,
   localSessionIdle,
   localSessionName,
@@ -1685,14 +1688,37 @@ function localStartArgs(
 function shouldUseClaudeBare(profile: string): boolean {
   return (
     (profile === "claude" || profile === "claude-code") &&
-    Boolean(process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY)
+    Boolean(process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_AUTH_TOKEN)
   );
 }
 
 async function injectLlmMeshGatewayEnv(): Promise<string | undefined> {
-  if (process.env.ANTHROPIC_BASE_URL) return undefined;
-  const meshEnv =
-    (await acquireLlmMeshSessionEnv()) ?? readLlmMeshSessionEnv();
+  if (process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_AUTH_TOKEN) {
+    return process.env.ANTHROPIC_BASE_URL;
+  }
+  if (!getLlmMeshRuntimeConfig().enabled) return undefined;
+  let meshEnv =
+    readLlmMeshSessionEnv() ?? (await acquireLlmMeshSessionEnv());
+  if (!meshEnv) {
+    const config = readLlmMeshConfig();
+    if (config?.accounts.length) {
+      try {
+        const result = await startGateway(config);
+        meshEnv = {
+          ANTHROPIC_BASE_URL: `http://localhost:${result.port}`,
+          ANTHROPIC_AUTH_TOKEN: result.gatewayToken,
+          ANTHROPIC_API_KEY: result.gatewayToken,
+        };
+        process.stderr.write(
+          `[remote] llm-mesh: gateway was stopped; started on ${meshEnv.ANTHROPIC_BASE_URL}\n`,
+        );
+      } catch (err) {
+        process.stderr.write(
+          `[remote] llm-mesh: gateway env unavailable (${String(err)}); Claude may ask for login.\n`,
+        );
+      }
+    }
+  }
   if (!meshEnv) return undefined;
   for (const [k, v] of Object.entries(meshEnv)) {
     process.env[k] = v;
@@ -1701,6 +1727,35 @@ async function injectLlmMeshGatewayEnv(): Promise<string | undefined> {
     `[remote] llm-mesh: injecting gateway env (${meshEnv.ANTHROPIC_BASE_URL})\n`,
   );
   return meshEnv.ANTHROPIC_BASE_URL;
+}
+
+async function prepareLlmMeshForRestore(opts: {
+  dryRun?: boolean;
+} = {}): Promise<void> {
+  if (!getLlmMeshRuntimeConfig().enabled) return;
+  const config = readLlmMeshConfig();
+  if (!config?.accounts.length) {
+    process.stderr.write(
+      "[remote] llm-mesh: restore config enabled, but no llm-mesh account is enrolled; Claude may ask for login.\n",
+    );
+    return;
+  }
+  const port = config.port ?? 3002;
+  const pid = readGatewayPid();
+  if (opts.dryRun) {
+    process.stderr.write(
+      pid
+        ? `[remote] llm-mesh: restore config enabled; gateway running (pid ${pid}, port ${port})\n`
+        : `[remote] llm-mesh: restore config enabled; gateway would be started on port ${port}\n`,
+    );
+    return;
+  }
+  const gateway = await injectLlmMeshGatewayEnv();
+  if (gateway) {
+    process.stderr.write(
+      `[remote] llm-mesh: restore context active (${gateway})\n`,
+    );
+  }
 }
 
 function registryEntryForResumeTarget(
@@ -2597,6 +2652,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const tools = getDefaultTools();
       if (tools.length > 0)
         process.stdout.write(`tools: ${tools.join(", ")}\n`);
+      process.stdout.write(
+        `llm-mesh: ${getLlmMeshRuntimeConfig().enabled ? "enabled" : "disabled"}\n`,
+      );
       const tunnel = getTunnel();
       if (tunnel) {
         process.stdout.write(
@@ -4419,6 +4477,27 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
         if (local && !localIdle && !opts.replace) {
+          const gatewayEnvStatus =
+            explicitProfile === "claude" &&
+            (profile === "claude" || profile === "claude-code") &&
+            process.env.ANTHROPIC_BASE_URL &&
+            process.env.ANTHROPIC_AUTH_TOKEN
+              ? localSessionGatewayEnvStatus(local.name, {
+                  baseUrl: process.env.ANTHROPIC_BASE_URL,
+                  authToken: process.env.ANTHROPIC_AUTH_TOKEN,
+                })
+              : "unknown";
+          if (
+            gatewayEnvStatus === "missing" ||
+            gatewayEnvStatus === "stale"
+          ) {
+            process.stderr.write(
+              `[remote] local session ${displaySlug} is running without current llm-mesh env (${gatewayEnvStatus}); not restarting an active session automatically.\n`,
+            );
+            process.stderr.write(
+              `[remote] to relaunch with gateway env, confirm explicitly: remote resume ${displaySlug} --replace\n`,
+            );
+          }
           process.stderr.write(
             `[remote] local session ${displaySlug} already exists and does not look idle; no new ${profile} was started.\n`,
           );
@@ -6693,6 +6772,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
 
       if (opts.reattach) restoreOpts.reattach = true;
+      await prepareLlmMeshForRestore({ dryRun: Boolean(opts.dryRun) });
       const { total } = restoreLayout(restoreOpts);
       if (total === 0) {
         process.stderr.write(
@@ -7699,17 +7779,36 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
       const existing = readGatewayPid();
       if (existing) {
-        process.stderr.write(`[remote] llm-mesh: already running (pid ${existing}). Use \`remote llm-mesh stop\` first.\n`);
-        process.exitCode = 1;
+        setLlmMeshRuntimeConfig({ enabled: true });
+        process.stdout.write(`[remote] llm-mesh: already running (pid ${existing})\n`);
+        process.stdout.write(`[remote] llm-mesh: restore config enabled\n`);
         return;
       }
       process.stdout.write(`[remote] llm-mesh: starting gateway…\n`);
       const result = await startGateway(config, { verbose: opts.verbose });
+      setLlmMeshRuntimeConfig({ enabled: true });
       const port = result.port;
       process.stdout.write(`[remote] llm-mesh: gateway started (pid ${result.pid}, port ${port})\n`);
+      process.stdout.write(`[remote] llm-mesh: restore config enabled\n`);
       process.stdout.write(`\nTo use with Claude Code:\n`);
       process.stdout.write(`  export ANTHROPIC_BASE_URL=http://localhost:${port}\n`);
       process.stdout.write(`  export ANTHROPIC_AUTH_TOKEN=${result.gatewayToken}\n`);
+    });
+
+  llmMeshCommand
+    .command("enable")
+    .description("Enable llm-mesh auto-reactivation for local sessions and remote restore")
+    .action(() => {
+      setLlmMeshRuntimeConfig({ enabled: true });
+      process.stdout.write(`[remote] llm-mesh: restore/local auto-reactivation enabled\n`);
+    });
+
+  llmMeshCommand
+    .command("disable")
+    .description("Disable llm-mesh auto-reactivation for local sessions and remote restore")
+    .action(() => {
+      setLlmMeshRuntimeConfig({ enabled: false });
+      process.stdout.write(`[remote] llm-mesh: restore/local auto-reactivation disabled\n`);
     });
 
   llmMeshCommand
@@ -7725,10 +7824,46 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     });
 
   llmMeshCommand
+    .command("restart")
+    .description("Restart only the local LLM gateway; never restarts tmux/Claude sessions")
+    .option("-v, --verbose", "verbose output")
+    .action(async (opts: { verbose?: boolean }) => {
+      const config = readLlmMeshConfig();
+      if (!config || config.accounts.length === 0) {
+        process.stderr.write(
+          `[remote] llm-mesh: no accounts configured. Run \`remote llm-mesh enroll codex\` first.\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const stopped = stopGateway();
+      if (stopped.stopped) {
+        process.stdout.write(`[remote] llm-mesh: stopped gateway (pid ${stopped.pid})\n`);
+      } else {
+        process.stdout.write(`[remote] llm-mesh: gateway was not running\n`);
+      }
+      process.stdout.write(`[remote] llm-mesh: starting gateway…\n`);
+      const result = await startGateway(config, { verbose: opts.verbose });
+      setLlmMeshRuntimeConfig({ enabled: true });
+      process.stdout.write(
+        `[remote] llm-mesh: gateway restarted (pid ${result.pid}, port ${result.port})\n`,
+      );
+      process.stdout.write(`[remote] llm-mesh: restore config enabled\n`);
+      process.stdout.write(
+        `[remote] llm-mesh: no tmux/Claude session was restarted; active sessions may keep their old gateway token until explicitly relaunched.\n`,
+      );
+      process.stdout.write(`\nTo use with new Claude Code processes:\n`);
+      process.stdout.write(`  export ANTHROPIC_BASE_URL=http://localhost:${result.port}\n`);
+      process.stdout.write(`  export ANTHROPIC_AUTH_TOKEN=${result.gatewayToken}\n`);
+      process.stdout.write(`  export ANTHROPIC_API_KEY=${result.gatewayToken}\n`);
+    });
+
+  llmMeshCommand
     .command("status")
     .description("Show llm-mesh status")
     .action(() => {
       const config = readLlmMeshConfig();
+      const runtime = getLlmMeshRuntimeConfig();
       const pid = readGatewayPid();
       const port = config?.port ?? 3002;
       if (pid) {
@@ -7736,6 +7871,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       } else {
         process.stdout.write(`[remote] llm-mesh: stopped\n`);
       }
+      process.stdout.write(
+        `  restore/local auto-reactivation: ${runtime.enabled ? "enabled" : "disabled"}\n`,
+      );
       if (config) {
         for (const acc of config.accounts) {
           let status = "ok";

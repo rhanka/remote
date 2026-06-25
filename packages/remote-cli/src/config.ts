@@ -110,6 +110,16 @@ export type H2aConfig = {
 export const DEFAULT_H2A_COMMAND =
   "h2a mcp-serve --auto-open --auto-upgrade --wake local-tmux";
 
+/**
+ * Local LLM gateway runtime policy. The credential/account material itself
+ * lives in ~/.sentropic/llm-mesh.json; this config only records whether remote
+ * should reactivate that gateway for local sessions and restore.
+ */
+export type LlmMeshRuntimeConfig = {
+  /** Auto-inject/reactivate llm-mesh for local Claude sessions. Default false. */
+  enabled?: boolean;
+};
+
 export type RemoteCliConfig = {
   defaultRemote?: string;
   token?: string;
@@ -124,6 +134,8 @@ export type RemoteCliConfig = {
   plugins?: PluginEntry[];
   /** h2a launcher contract for `remote run` (opt-in side window). */
   h2a?: H2aConfig;
+  /** Local LLM gateway runtime policy (credentials remain in ~/.sentropic). */
+  llmMesh?: LlmMeshRuntimeConfig;
   /** P4 — default concurrency cap for delegated jobs (local AND remote). */
   maxConcurrent?: number;
 };
@@ -159,6 +171,14 @@ function parseH2a(raw: unknown): H2aConfig | undefined {
   if (typeof h.enabled === "boolean") h2a.enabled = h.enabled;
   if (typeof h.command === "string") h2a.command = h.command;
   return Object.keys(h2a).length > 0 ? h2a : undefined;
+}
+
+function parseLlmMeshRuntime(raw: unknown): LlmMeshRuntimeConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const llmMesh: LlmMeshRuntimeConfig = {};
+  if (typeof r.enabled === "boolean") llmMesh.enabled = r.enabled;
+  return Object.keys(llmMesh).length > 0 ? llmMesh : undefined;
 }
 
 function parsePluginMcp(raw: unknown): PluginMcp | undefined {
@@ -265,6 +285,8 @@ export function readRemoteConfig(): RemoteCliConfig {
       if (plugins) config.plugins = plugins;
       const h2a = parseH2a(parsed.h2a);
       if (h2a) config.h2a = h2a;
+      const llmMesh = parseLlmMeshRuntime(parsed.llmMesh);
+      if (llmMesh) config.llmMesh = llmMesh;
       if (
         typeof parsed.maxConcurrent === "number" &&
         Number.isFinite(parsed.maxConcurrent) &&
@@ -340,6 +362,19 @@ export function getH2aConfig(): Required<H2aConfig> {
 
 export function setH2aConfig(h2a: H2aConfig): void {
   writeRemoteConfig({ ...readRemoteConfig(), h2a });
+}
+
+export function getLlmMeshRuntimeConfig(): Required<LlmMeshRuntimeConfig> {
+  const raw = readRemoteConfig().llmMesh ?? {};
+  return {
+    enabled: raw.enabled ?? false,
+  };
+}
+
+export function setLlmMeshRuntimeConfig(
+  llmMesh: LlmMeshRuntimeConfig,
+): void {
+  writeRemoteConfig({ ...readRemoteConfig(), llmMesh });
 }
 
 /**
