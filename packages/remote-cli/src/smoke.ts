@@ -3,7 +3,7 @@ import type {
   RemoteEventEnvelope,
   SessionTarget,
   TerminalOpened,
-} from "@sentropic/remote-protocol";
+} from "./protocol-local.js";
 
 import { createRemoteSession, stopRemoteSession } from "./attach.js";
 import {

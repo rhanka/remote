@@ -300,7 +300,7 @@ import {
   type AccountProvider,
 } from "./account-pool.js";
 
-import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
+import { CLI_PROFILES, type CliProfile } from "./protocol-local.js";
 import {
   enrollCodexAccount,
   readLlmMeshConfig,

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { CliProfile } from "@sentropic/remote-protocol";
+import type { CliProfile } from "./protocol-local.js";
 
 /**
  * For each CLI profile, the set of HOME-relative files we copy to the Pod's

@@ -70,7 +70,7 @@ import {
   releaseLineageLease,
 } from "./lineage-client.js";
 
-import { CLI_PROFILES } from "@sentropic/remote-protocol";
+import { CLI_PROFILES } from "./protocol-local.js";
 
 // ---------------------------------------------------------------------------
 // Types

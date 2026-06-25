@@ -1,4 +1,4 @@
-import type { RemoteEventEnvelope } from "@sentropic/remote-protocol";
+import type { RemoteEventEnvelope } from "./protocol-local.js";
 
 import { authHeaders, DEFAULT_SESSION_TARGET } from "./config.js";
 import { ensureConnected } from "./tunnel.js";

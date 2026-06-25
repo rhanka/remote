@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
-import type { SessionTarget } from "@sentropic/remote-protocol";
+import type { SessionTarget } from "./protocol-local.js";
 
 /**
  * How the CLI reaches the control-plane when the configured URL is not directly

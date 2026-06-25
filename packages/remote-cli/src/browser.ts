@@ -25,8 +25,8 @@ import {
   NOVNC_POD_PORT,
   type ExposureRequester,
   type RandomBytes,
-} from "@sentropic/remote-browser-bridge";
-import type { UatExposurePolicy } from "@sentropic/remote-protocol";
+} from "./browser-bridge-local.js";
+import type { UatExposurePolicy } from "./protocol-local.js";
 
 export type BrowserOpenPlan =
   | {

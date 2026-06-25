@@ -1,4 +1,4 @@
-import { CLI_PROFILES, type CliProfile } from "@sentropic/remote-protocol";
+import { CLI_PROFILES, type CliProfile } from "./protocol-local.js";
 
 export type ProfileConfig = {
   readonly profile: CliProfile;

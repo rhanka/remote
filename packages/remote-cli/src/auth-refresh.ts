@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import type { CliProfile } from "@sentropic/remote-protocol";
+import type { CliProfile } from "./protocol-local.js";
 
 type AuthStatusCommand = {
   readonly command: string;

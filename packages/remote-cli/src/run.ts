@@ -4,7 +4,7 @@ import {
   REMOTE_PROTOCOL_VERSION,
   REMOTE_SCHEMA_VERSION,
   type RemoteEventEnvelope,
-} from "@sentropic/remote-protocol";
+} from "./protocol-local.js";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 

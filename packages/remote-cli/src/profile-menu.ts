@@ -1,4 +1,4 @@
-import type { CliProfile } from "@sentropic/remote-protocol";
+import type { CliProfile } from "./protocol-local.js";
 
 export const MENU_PROFILES: ReadonlyArray<CliProfile> = [
   "claude",
