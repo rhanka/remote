@@ -116,7 +116,10 @@ export function checkReadiness(
   // Claude-profile only: verify a conversation exists for this cwd.
   // Other profiles (codex/agy) don't use path-keyed conversations.
   // ------------------------------------------------------------------
-  if (profile !== undefined && (profile === "claude" || profile === "claude-code")) {
+  if (
+    profile !== undefined &&
+    (profile === "claude" || profile === "claude-code")
+  ) {
     try {
       const conv = localConvStat(cwd, home);
       if (!conv) {
@@ -144,15 +147,11 @@ export function checkReadiness(
   if (gitOk) {
     try {
       // Modified/staged files relative to HEAD
-      const diffResult = spawn(
-        "git",
-        ["diff", "--name-only", "HEAD", "--"],
-        {
-          cwd,
-          encoding: "utf8",
-          timeout: 15_000,
-        },
-      );
+      const diffResult = spawn("git", ["diff", "--name-only", "HEAD", "--"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 15_000,
+      });
       // Untracked files (not in .gitignore)
       const untrackedResult = spawn(
         "git",

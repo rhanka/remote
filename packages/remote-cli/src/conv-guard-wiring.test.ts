@@ -47,7 +47,7 @@ const readLlmMeshConfig = vi.fn(
     }>;
   } => ({ accounts: [] }),
 );
-const getLlmMeshRuntimeConfig = vi.fn(() => ({ enabled: true }));
+const getLlmMeshRuntimeConfig = vi.fn(() => ({ enabled: false }));
 const startGateway = vi.fn();
 const readGatewayPid = vi.fn(() => null);
 
@@ -78,6 +78,8 @@ vi.mock("./config.js", () => ({
   setH2aConfig: () => {},
   getLlmMeshRuntimeConfig,
   setLlmMeshRuntimeConfig: vi.fn(),
+  getTmuxProfileConfig: () => ({ profile: "remote" }),
+  setTmuxProfileConfig: vi.fn(),
   DEFAULT_SESSION_TARGET: "scaleway-kapsule",
   authHeaders: () => ({}),
   resolveConfigPath: () => CONFIG_PATH,
@@ -176,11 +178,7 @@ function liveRemoteWriter(convId: string) {
 }
 
 function writeRegistry(entries: unknown[]): void {
-  writeFileSync(
-    REGISTRY_PATH,
-    JSON.stringify({ version: 1, entries }),
-    "utf8",
-  );
+  writeFileSync(REGISTRY_PATH, JSON.stringify({ version: 1, entries }), "utf8");
 }
 
 function stderrText(): string {
@@ -221,7 +219,7 @@ beforeEach(() => {
   readLlmMeshConfig.mockReset();
   readLlmMeshConfig.mockReturnValue({ accounts: [] });
   getLlmMeshRuntimeConfig.mockReset();
-  getLlmMeshRuntimeConfig.mockReturnValue({ enabled: true });
+  getLlmMeshRuntimeConfig.mockReturnValue({ enabled: false });
   startGateway.mockReset();
   readGatewayPid.mockReset();
   readGatewayPid.mockReturnValue(null);
@@ -318,6 +316,7 @@ describe("remote resume <slug>", () => {
       "resume",
       "--claude",
       "--last",
+      "--gw",
     ]);
 
     expect(exitCode).toBe(0);
@@ -353,6 +352,7 @@ describe("remote resume <slug>", () => {
       "resume",
       "--claude",
       "--last",
+      "--gw",
     ]);
 
     expect(exitCode).toBe(0);
@@ -408,6 +408,7 @@ describe("remote resume <slug>", () => {
     acquireLlmMeshSessionEnv.mockResolvedValue({
       ANTHROPIC_BASE_URL: "http://localhost:3002",
       ANTHROPIC_AUTH_TOKEN: "gw-current",
+      ANTHROPIC_API_KEY: "gw-current",
     });
     findLocalSession.mockReturnValue({
       name: "remote-remote-cli",
@@ -429,6 +430,7 @@ describe("remote resume <slug>", () => {
       "resume",
       "--claude",
       "--last",
+      "--gw",
     ]);
 
     expect(exitCode).toBe(0);
@@ -436,7 +438,9 @@ describe("remote resume <slug>", () => {
     expect(startLocalSession).not.toHaveBeenCalled();
     expect(attachLocalSession).toHaveBeenCalledWith("remote-remote-cli");
     expect(stderrText()).toContain("without current llm-mesh env");
-    expect(stderrText()).toContain("not restarting an active session automatically");
+    expect(stderrText()).toContain(
+      "not restarting an active session automatically",
+    );
     expect(stderrText()).toContain("remote resume remote-cli --replace");
   });
 
@@ -543,10 +547,11 @@ describe("remote resume <slug>", () => {
     acquireLlmMeshSessionEnv.mockResolvedValue({
       ANTHROPIC_BASE_URL: "http://localhost:3002",
       ANTHROPIC_AUTH_TOKEN: "gw-test",
+      ANTHROPIC_API_KEY: "gw-test",
     });
     writeRegistry([registrySession()]);
 
-    const exitCode = await main(["node", "remote", "resume", "projA"]);
+    const exitCode = await main(["node", "remote", "resume", "projA", "--gw"]);
 
     expect(exitCode).toBe(0);
     expect(startLocalSession).toHaveBeenCalledWith(
@@ -558,6 +563,34 @@ describe("remote resume <slug>", () => {
     );
     expect(process.env.ANTHROPIC_BASE_URL).toBe("http://localhost:3002");
     expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("gw-test");
+    expect(process.env.ANTHROPIC_API_KEY).toBe("gw-test");
+  });
+
+  it("overwrites stale parent Anthropic env with current llm-mesh token", async () => {
+    process.env.ANTHROPIC_BASE_URL = "http://localhost:3002";
+    process.env.ANTHROPIC_AUTH_TOKEN = "gw-stale";
+    delete process.env.ANTHROPIC_API_KEY;
+    readLlmMeshSessionEnv.mockReturnValue({
+      ANTHROPIC_BASE_URL: "http://localhost:3002",
+      ANTHROPIC_AUTH_TOKEN: "gw-current",
+      ANTHROPIC_API_KEY: "gw-current",
+    });
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main(["node", "remote", "resume", "projA", "--gw"]);
+
+    expect(exitCode).toBe(0);
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--bare", "--resume", "conv-dup"],
+      "projA",
+    );
+    expect(process.env.ANTHROPIC_BASE_URL).toBe("http://localhost:3002");
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("gw-current");
+    expect(process.env.ANTHROPIC_API_KEY).toBe("gw-current");
+    expect(stderrText()).toContain("injecting gateway env");
   });
 
   it("starts configured llm-mesh automatically before resuming Claude", async () => {
@@ -578,7 +611,7 @@ describe("remote resume <slug>", () => {
     });
     writeRegistry([registrySession()]);
 
-    const exitCode = await main(["node", "remote", "resume", "projA"]);
+    const exitCode = await main(["node", "remote", "resume", "projA", "--gw"]);
 
     expect(exitCode).toBe(0);
     expect(startGateway).toHaveBeenCalled();
@@ -590,10 +623,11 @@ describe("remote resume <slug>", () => {
       "projA",
     );
     expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("gw-started");
+    expect(process.env.ANTHROPIC_API_KEY).toBe("gw-started");
     expect(stderrText()).toContain("gateway was stopped; started");
   });
 
-  it("does not auto-start llm-mesh when the runtime config is disabled", async () => {
+  it("does not auto-start llm-mesh by default", async () => {
     getLlmMeshRuntimeConfig.mockReturnValue({ enabled: false });
     readLlmMeshConfig.mockReturnValue({
       accounts: [
@@ -613,6 +647,45 @@ describe("remote resume <slug>", () => {
     writeRegistry([registrySession()]);
 
     const exitCode = await main(["node", "remote", "resume", "projA"]);
+
+    expect(exitCode).toBe(0);
+    expect(startGateway).not.toHaveBeenCalled();
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--resume", "conv-dup"],
+      "projA",
+    );
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  it("--no-gw forces direct auth even when llm-mesh config is enabled", async () => {
+    getLlmMeshRuntimeConfig.mockReturnValue({ enabled: true });
+    readLlmMeshConfig.mockReturnValue({
+      accounts: [
+        {
+          id: "codex-oauth",
+          provider: "openai",
+          label: "Codex",
+          token: "tok",
+        },
+      ],
+    });
+    startGateway.mockResolvedValue({
+      pid: 123,
+      port: 3002,
+      gatewayToken: "gw-started",
+    });
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "projA",
+      "--no-gw",
+    ]);
 
     expect(exitCode).toBe(0);
     expect(startGateway).not.toHaveBeenCalled();
@@ -748,7 +821,9 @@ describe("remote resume <slug>", () => {
       ["--resume", "conv-dup"],
       "projA",
     );
-    expect(stderrText()).toContain("--replace will kill tmux session remote-projA");
+    expect(stderrText()).toContain(
+      "--replace will kill tmux session remote-projA",
+    );
   });
 });
 
@@ -791,7 +866,12 @@ describe("remote run -r <conv> single-writer guard", () => {
     listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "run", "claude", "--resume", "conv-dup",
+      "node",
+      "remote",
+      "run",
+      "claude",
+      "--resume",
+      "conv-dup",
     ]);
 
     expect(exitCode).toBe(1);
@@ -803,7 +883,12 @@ describe("remote run -r <conv> single-writer guard", () => {
     writeRegistry([unverifiableLocalWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "run", "claude", "--resume", "conv-dup",
+      "node",
+      "remote",
+      "run",
+      "claude",
+      "--resume",
+      "conv-dup",
     ]);
 
     // No hard block: a no-pid hook entry can't be verified, so it must not
@@ -818,7 +903,13 @@ describe("remote run -r <conv> single-writer guard", () => {
     listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "run", "claude", "--resume", "conv-dup", "--force",
+      "node",
+      "remote",
+      "run",
+      "claude",
+      "--resume",
+      "conv-dup",
+      "--force",
     ]);
 
     expect(exitCode).toBe(0);
@@ -831,7 +922,12 @@ describe("remote run -r <conv> single-writer guard", () => {
     writeRegistry([unverifiableLocalWriter("conv-other")]);
 
     const exitCode = await main([
-      "node", "remote", "run", "claude", "--resume", "conv-dup",
+      "node",
+      "remote",
+      "run",
+      "claude",
+      "--resume",
+      "conv-dup",
     ]);
 
     expect(exitCode).toBe(0);
@@ -845,7 +941,13 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     writeRegistry([unverifiableLocalWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "migrate", "forward", "claude", "-r", "conv-dup",
+      "node",
+      "remote",
+      "migrate",
+      "forward",
+      "claude",
+      "-r",
+      "conv-dup",
     ]);
 
     expect(exitCode).toBe(0);
@@ -858,7 +960,13 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "migrate", "forward", "claude", "-r", "conv-dup",
+      "node",
+      "remote",
+      "migrate",
+      "forward",
+      "claude",
+      "-r",
+      "conv-dup",
     ]);
 
     expect(exitCode).toBe(1);
@@ -871,7 +979,14 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "migrate", "forward", "claude", "-r", "conv-dup", "--force",
+      "node",
+      "remote",
+      "migrate",
+      "forward",
+      "claude",
+      "-r",
+      "conv-dup",
+      "--force",
     ]);
 
     expect(exitCode).toBe(0);
@@ -893,7 +1008,12 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "migrate", "forward", "claude", "-r",
+      "node",
+      "remote",
+      "migrate",
+      "forward",
+      "claude",
+      "-r",
     ]);
 
     expect(exitCode).toBe(1);
@@ -913,7 +1033,13 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     listRemoteSessions.mockResolvedValue([liveRemoteWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "migrate", "forward", "claude", "-r", "--force",
+      "node",
+      "remote",
+      "migrate",
+      "forward",
+      "claude",
+      "-r",
+      "--force",
     ]);
 
     expect(exitCode).toBe(0);
@@ -929,7 +1055,12 @@ describe("remote migrate forward -r <conv> single-writer guard", () => {
     writeRegistry([unverifiableLocalWriter("conv-dup")]);
 
     const exitCode = await main([
-      "node", "remote", "migrate", "forward", "claude", "-r",
+      "node",
+      "remote",
+      "migrate",
+      "forward",
+      "claude",
+      "-r",
     ]);
 
     expect(exitCode).toBe(0);

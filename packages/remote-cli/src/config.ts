@@ -120,6 +120,11 @@ export type LlmMeshRuntimeConfig = {
   enabled?: boolean;
 };
 
+export type TmuxProfileConfig = {
+  /** Remote-managed tmux profile name applied to local sessions. Default: remote. */
+  profile?: string;
+};
+
 export type RemoteCliConfig = {
   defaultRemote?: string;
   token?: string;
@@ -136,6 +141,8 @@ export type RemoteCliConfig = {
   h2a?: H2aConfig;
   /** Local LLM gateway runtime policy (credentials remain in ~/.sentropic). */
   llmMesh?: LlmMeshRuntimeConfig;
+  /** Remote-managed tmux config profile for local tmux sessions. */
+  tmux?: TmuxProfileConfig;
   /** P4 — default concurrency cap for delegated jobs (local AND remote). */
   maxConcurrent?: number;
 };
@@ -179,6 +186,16 @@ function parseLlmMeshRuntime(raw: unknown): LlmMeshRuntimeConfig | undefined {
   const llmMesh: LlmMeshRuntimeConfig = {};
   if (typeof r.enabled === "boolean") llmMesh.enabled = r.enabled;
   return Object.keys(llmMesh).length > 0 ? llmMesh : undefined;
+}
+
+function parseTmuxProfile(raw: unknown): TmuxProfileConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const tmux: TmuxProfileConfig = {};
+  if (typeof r.profile === "string" && r.profile.trim()) {
+    tmux.profile = r.profile.trim();
+  }
+  return Object.keys(tmux).length > 0 ? tmux : undefined;
 }
 
 function parsePluginMcp(raw: unknown): PluginMcp | undefined {
@@ -243,7 +260,13 @@ function configHome(): string {
 }
 
 export function resolveConfigPath(): string {
-  return join(configHome(), ".config", "sentropic", "remote-cli", "config.json");
+  return join(
+    configHome(),
+    ".config",
+    "sentropic",
+    "remote-cli",
+    "config.json",
+  );
 }
 
 export function normalizeRemoteUrl(rawUrl: string): string {
@@ -287,6 +310,8 @@ export function readRemoteConfig(): RemoteCliConfig {
       if (h2a) config.h2a = h2a;
       const llmMesh = parseLlmMeshRuntime(parsed.llmMesh);
       if (llmMesh) config.llmMesh = llmMesh;
+      const tmux = parseTmuxProfile(parsed.tmux);
+      if (tmux) config.tmux = tmux;
       if (
         typeof parsed.maxConcurrent === "number" &&
         Number.isFinite(parsed.maxConcurrent) &&
@@ -299,7 +324,9 @@ export function readRemoteConfig(): RemoteCliConfig {
     return {};
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw new Error(`failed to read remote config: ${(error as Error).message}`);
+    throw new Error(
+      `failed to read remote config: ${(error as Error).message}`,
+    );
   }
 }
 
@@ -371,10 +398,17 @@ export function getLlmMeshRuntimeConfig(): Required<LlmMeshRuntimeConfig> {
   };
 }
 
-export function setLlmMeshRuntimeConfig(
-  llmMesh: LlmMeshRuntimeConfig,
-): void {
+export function setLlmMeshRuntimeConfig(llmMesh: LlmMeshRuntimeConfig): void {
   writeRemoteConfig({ ...readRemoteConfig(), llmMesh });
+}
+
+export function getTmuxProfileConfig(): Required<TmuxProfileConfig> {
+  const raw = readRemoteConfig().tmux ?? {};
+  return { profile: raw.profile ?? "remote" };
+}
+
+export function setTmuxProfileConfig(tmux: TmuxProfileConfig): void {
+  writeRemoteConfig({ ...readRemoteConfig(), tmux });
 }
 
 /**
@@ -433,11 +467,17 @@ export function getLayoutConfig(): LayoutConfig {
   const raw = readRemoteConfig().layout ?? {};
   return {
     maxAgeHours:
-      typeof raw.maxAgeHours === "number" ? raw.maxAgeHours : DEFAULT_LAYOUT.maxAgeHours,
+      typeof raw.maxAgeHours === "number"
+        ? raw.maxAgeHours
+        : DEFAULT_LAYOUT.maxAgeHours,
     maxPerWindow:
-      typeof raw.maxPerWindow === "number" ? raw.maxPerWindow : DEFAULT_LAYOUT.maxPerWindow,
+      typeof raw.maxPerWindow === "number"
+        ? raw.maxPerWindow
+        : DEFAULT_LAYOUT.maxPerWindow,
     sharedWindows:
-      typeof raw.sharedWindows === "number" ? raw.sharedWindows : DEFAULT_LAYOUT.sharedWindows,
+      typeof raw.sharedWindows === "number"
+        ? raw.sharedWindows
+        : DEFAULT_LAYOUT.sharedWindows,
     multiSession:
       raw.multiSession && typeof raw.multiSession === "object"
         ? raw.multiSession

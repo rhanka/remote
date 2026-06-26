@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   acquireLlmMeshSessionEnv,
+  gatewayScriptPath,
   llmMeshSeedPath,
   llmMeshTokenPath,
   readOrCreateLlmMeshSeed,
@@ -35,6 +36,13 @@ describe("llm-mesh seed", () => {
     expect(seed).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(readOrCreateLlmMeshSeed(SCRATCH)).toBe(seed);
     expect(statSync(llmMeshSeedPath(SCRATCH)).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("gateway runtime path", () => {
+  it("uses the remote-cli embedded gateway runtime, not apps/llm-gateway", () => {
+    expect(gatewayScriptPath()).toMatch(/\/(src|dist)\/llm-gateway-runtime\/index\.js$/);
+    expect(gatewayScriptPath()).not.toContain("apps/llm-gateway");
   });
 });
 

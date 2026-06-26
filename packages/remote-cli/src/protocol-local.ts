@@ -12,7 +12,10 @@ export const CLI_PROFILES = [
 
 export type CliProfile = (typeof CLI_PROFILES)[number];
 export type SessionTarget = "docker" | "k3s" | "scaleway-kapsule" | "gke";
-export type UatExposurePolicy = "operator-only" | "session-private" | "public-expiring";
+export type UatExposurePolicy =
+  | "operator-only"
+  | "session-private"
+  | "public-expiring";
 export type RemoteEventEnvelope = {
   protocolVersion: typeof REMOTE_PROTOCOL_VERSION;
   schemaVersion: typeof REMOTE_SCHEMA_VERSION;

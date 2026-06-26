@@ -71,6 +71,37 @@ it("pipes upstream response on valid token", async () => {
   expect(headers["authorization"]).toBeUndefined();
 });
 
+it("accepts the gateway token via x-api-key and does not forward it upstream", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "msg_123", type: "message" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+  );
+
+  const req = new Request("http://localhost/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": "gw-validtoken",
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({ model: "claude-sonnet-4-6", messages: [] }),
+  });
+
+  const res = await app.fetch(req);
+  expect(res.status).toBe(200);
+
+  const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls;
+  const upstreamReq = calls[0]![1] as RequestInit;
+  const headers = upstreamReq.headers as Record<string, string>;
+  expect(headers["x-api-key"]).toBe("sk-ant-real");
+  expect(headers["authorization"]).toBeUndefined();
+});
+
 it("forwards 429 + retry-after from upstream", async () => {
   vi.stubGlobal(
     "fetch",

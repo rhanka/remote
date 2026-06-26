@@ -180,6 +180,40 @@ describe("startLocalSession agent pane metadata", () => {
     expect(newSession[1]).toContain("ANTHROPIC_API_KEY=gw-test");
   });
 
+  it("scrubs stale Anthropic env inherited from the tmux server when launching direct", () => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "tmux" && args[0] === "-V") return { status: 0 };
+      if (cmd === "tmux" && args[0] === "list-sessions")
+        return { status: 1, stdout: "" };
+      if (cmd === "tmux" && args[0] === "new-session") return { status: 0 };
+      return { status: 0, stdout: "" };
+    });
+
+    startLocalSession(
+      "claude",
+      "claude",
+      "/home/u/src/impots2025",
+      [],
+      "Impots",
+    );
+
+    const newSession = tmuxCalls("new-session")[0]![1] as string[];
+    const envIndex = newSession.indexOf("env");
+    expect(envIndex).toBeGreaterThan(-1);
+    expect(newSession.slice(envIndex, envIndex + 7)).toEqual([
+      "env",
+      "-u",
+      "ANTHROPIC_BASE_URL",
+      "-u",
+      "ANTHROPIC_AUTH_TOKEN",
+      "-u",
+      "ANTHROPIC_API_KEY",
+    ]);
+  });
+
   it("stores the agent pane on the tmux session after creation", () => {
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === "tmux" && args[0] === "-V") return { status: 0 };
@@ -353,8 +387,8 @@ describe("startH2aWindow", () => {
 });
 
 describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)", () => {
-  const flat = (clip?: string) =>
-    buildTmuxGlobalOptions(clip).map((c) => c.join(" "));
+  const flat = (clip?: string, profile?: string) =>
+    buildTmuxGlobalOptions(clip, profile).map((c) => c.join(" "));
 
   it("turns set-titles ON so tmux forwards the agent's OSC title to the GNOME tab", () => {
     expect(flat()).toContain("set -g set-titles on");
@@ -377,6 +411,7 @@ describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)
 
   it("keeps the old-PC scroll/clipboard contract intact (no regression)", () => {
     const lines = flat("wl-copy");
+    expect(lines).toContain("set -g @remote_profile remote");
     expect(lines).toContain("set -g allow-passthrough on");
     expect(lines).toContain("set -g history-limit 50000");
     expect(lines).toContain("set -g default-terminal tmux-256color");
@@ -396,6 +431,12 @@ describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)
     expect(lines.some((l) => l.startsWith("bind -n WheelDownPane"))).toBe(true);
     expect(lines.some((l) => l.startsWith("bind -n PPage"))).toBe(true);
     expect(lines.some((l) => l.startsWith("bind -n C-v if-shell"))).toBe(true);
+  });
+
+  it("marks a custom tmux profile when requested", () => {
+    expect(flat("wl-copy", "old-pc")).toContain(
+      "set -g @remote_profile old-pc",
+    );
   });
 
   it("omits copy-command when no clipboard tool is detected", () => {
@@ -612,11 +653,7 @@ describe("resolveAgentPaneForInstance", () => {
    * given profile option, then arrange show-options to return the pane id for
    * @remote_agent_host and @remote_agent_pane reads.
    */
-  function arrangeSession(
-    label: string,
-    host: string,
-    paneId: string,
-  ): void {
+  function arrangeSession(label: string, host: string, paneId: string): void {
     spawnSyncMock.mockImplementation(
       (cmd: string, args: string[], _opts?: unknown) => {
         if (cmd !== "tmux") return { status: 0, stdout: "" };
@@ -657,7 +694,8 @@ describe("resolveAgentPaneForInstance", () => {
       if (cmd !== "tmux") return { status: 0, stdout: "" };
       const sub = Array.isArray(args) ? args[0] : "";
       if (sub === "-V") return { status: 0, stdout: "tmux 3.4\n" };
-      if (sub === "list-sessions") return { status: 0, stdout: "remote-other\t0\t/tmp\tcodex\t\n" };
+      if (sub === "list-sessions")
+        return { status: 0, stdout: "remote-other\t0\t/tmp\tcodex\t\n" };
       if (sub === "show-options") return { status: 0, stdout: "\n" };
       return { status: 0, stdout: "" };
     });
@@ -670,10 +708,12 @@ describe("resolveAgentPaneForInstance", () => {
       if (cmd !== "tmux") return { status: 0, stdout: "" };
       const sub = Array.isArray(args) ? args[0] : "";
       if (sub === "-V") return { status: 0, stdout: "tmux 3.4\n" };
-      if (sub === "list-sessions") return { status: 0, stdout: "remote-remote\t0\t/tmp\tclaude\t\n" };
+      if (sub === "list-sessions")
+        return { status: 0, stdout: "remote-remote\t0\t/tmp\tclaude\t\n" };
       if (sub === "show-options") {
         const option = (args as string[])[args.length - 1];
-        if (option === "@remote_agent_host") return { status: 0, stdout: "claude\n" };
+        if (option === "@remote_agent_host")
+          return { status: 0, stdout: "claude\n" };
         return { status: 0, stdout: "\n" };
       }
       return { status: 0, stdout: "" };

@@ -5,8 +5,8 @@
  *   (supports both raw OPENAI_API_KEY and ChatGPT Pro OAuth JWT) and writes
  *   ~/.sentropic/llm-mesh.json.
  *
- * Startup:    `remote llm-mesh start` reads the config, starts the gateway
- *   (apps/llm-gateway) as a background process, and prints the env vars to
+ * Startup:    `remote llm-mesh start` reads the config, starts the embedded
+ *   gateway runtime as a background process, and prints the env vars to
  *   configure Claude Code.
  *
  * Config path: ~/.sentropic/llm-mesh.json  (0600)
@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -41,6 +41,7 @@ export interface LlmMeshAccount {
   provider: "anthropic" | "openai";
   label: string;
   token: string;
+  authType?: "api-key" | "bearer";
   refreshToken?: string;
   expiresAt?: string;
 }
@@ -275,14 +276,10 @@ export async function refreshAccountToken(
 // Gateway process management
 // ---------------------------------------------------------------------------
 
-/**
- * Resolve the gateway entry point relative to this package.
- * Monorepo layout: packages/remote-cli/dist/ → ../../.. → repo root → apps/llm-gateway/dist/index.js
- */
+/** Resolve the embedded gateway runtime entry point relative to this package. */
 export function gatewayScriptPath(): string {
   const thisFile = fileURLToPath(import.meta.url);
-  const repoRoot = resolve(dirname(thisFile), "..", "..", "..");
-  return join(repoRoot, "apps", "llm-gateway", "dist", "index.js");
+  return join(dirname(thisFile), "llm-gateway-runtime", "index.js");
 }
 
 /** Build GATEWAY_ACCOUNTS from the llm-mesh config accounts */
@@ -293,8 +290,18 @@ function buildGatewayAccountsEnv(accounts: LlmMeshAccount[]): string {
       provider: a.provider,
       label: a.label,
       token: a.token,
+      ...(a.refreshToken ? { refreshToken: a.refreshToken } : {}),
       ...(a.expiresAt ? { expiresAt: a.expiresAt } : {}),
     })),
+  );
+}
+
+function isUnsupportedClaudeOAuthAccount(account: LlmMeshAccount): boolean {
+  return (
+    account.provider === "anthropic" &&
+    (account.authType === "bearer" ||
+      account.id === "claude-oauth" ||
+      account.token.startsWith("sk-ant-oat"))
   );
 }
 
@@ -319,7 +326,7 @@ export async function startGateway(
   if (!existsSync(gatewayScript)) {
     throw new Error(
       `Gateway script not found: ${gatewayScript}\n` +
-        `Run \`npm run build -w apps/llm-gateway\` first.`,
+        `Run \`npm run build -w @sentropic/remote-cli\` first.`,
     );
   }
 
@@ -340,9 +347,18 @@ export async function startGateway(
     }
   }
 
+  const gatewayAccounts = refreshedAccounts.filter(
+    (account) => !isUnsupportedClaudeOAuthAccount(account),
+  );
+  if (gatewayAccounts.length === 0) {
+    throw new Error(
+      "llm-mesh has no gateway-supported accounts: Claude Code OAuth cannot be proxied through Anthropic /v1/messages yet",
+    );
+  }
+
   const gatewayEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    GATEWAY_ACCOUNTS: buildGatewayAccountsEnv(refreshedAccounts),
+    GATEWAY_ACCOUNTS: buildGatewayAccountsEnv(gatewayAccounts),
     LLM_GATEWAY_TOKEN_SEED: readOrCreateLlmMeshSeed(),
     LLM_GATEWAY_STICKY_FILE: llmMeshStickyPath(),
     PORT: String(port),

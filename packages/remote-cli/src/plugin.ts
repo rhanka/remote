@@ -41,7 +41,13 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -116,9 +122,14 @@ export function buildInstallCommand(plugin: PluginEntry): {
   if (method === "curl") {
     const url = plugin.install?.spec ?? "";
     if (!/^https:\/\/[^'"\s]+$/.test(url)) {
-      throw new Error(`invalid curl install url "${url}" (need a clean https URL)`);
+      throw new Error(
+        `invalid curl install url "${url}" (need a clean https URL)`,
+      );
     }
-    return { cmd: `curl -fsSL '${url}' | bash`, label: `installed ${plugin.pkg} (curl)` };
+    return {
+      cmd: `curl -fsSL '${url}' | bash`,
+      label: `installed ${plugin.pkg} (curl)`,
+    };
   }
   // script: the user's own shell command, run verbatim.
   const sh = (plugin.install?.spec ?? "").trim();
@@ -127,7 +138,8 @@ export function buildInstallCommand(plugin: PluginEntry): {
 }
 
 function assertSafeVersion(version: string): void {
-  if (!SAFE_VERSION.test(version)) throw new Error(`invalid version "${version}"`);
+  if (!SAFE_VERSION.test(version))
+    throw new Error(`invalid version "${version}"`);
 }
 
 function assertSafeRel(rel: string): void {
@@ -168,7 +180,9 @@ export function parseMcpSpecs(specs: readonly string[]): McpRequest[] {
  * Heuristic when no --mcp is given: every bin ending in `-mcp` is an MCP
  * server named after the bin minus the suffix (track-mcp → track).
  */
-export function detectMcpBins(bins: Readonly<Record<string, string>>): McpRequest[] {
+export function detectMcpBins(
+  bins: Readonly<Record<string, string>>,
+): McpRequest[] {
   const requests: McpRequest[] = [];
   for (const bin of Object.keys(bins).sort()) {
     if (!bin.endsWith("-mcp")) continue;
@@ -236,9 +250,11 @@ export function upsertCodexMcpServer(
   while (end < lines.length && !/^\s*\[/.test(lines[end]!)) end++;
   const replacement = block.split("\n");
   if (end < lines.length) replacement.push("");
-  const next = [...lines.slice(0, start), ...replacement, ...lines.slice(end)].join(
-    "\n",
-  );
+  const next = [
+    ...lines.slice(0, start),
+    ...replacement,
+    ...lines.slice(end),
+  ].join("\n");
   // A section at EOF swallows the final-newline "" line element — restore it.
   return end >= lines.length && toml.endsWith("\n") && !next.endsWith("\n")
     ? next + "\n"
@@ -365,7 +381,10 @@ export function mcpTargetForProfile(
  * meaningless there), then registers the MCP server for the Pod's profile.
  * Every step echoes one line — the CLI prints them as the per-session recap.
  */
-export function buildPodSyncScript(plugin: PluginEntry, profile: string): string {
+export function buildPodSyncScript(
+  plugin: PluginEntry,
+  profile: string,
+): string {
   const { cmd, label } = buildInstallCommand(plugin);
   const lines: string[] = [
     "set -e",
@@ -430,7 +449,9 @@ function npmGlobalRoot(): string {
 }
 
 function commandExists(cmd: string): boolean {
-  const r = spawnSync("bash", ["-lc", `command -v ${cmd}`], { stdio: "ignore" });
+  const r = spawnSync("bash", ["-lc", `command -v ${cmd}`], {
+    stdio: "ignore",
+  });
   return r.status === 0;
 }
 
@@ -487,7 +508,9 @@ function registerClaudeLocal(
         `claude mcp add ${name} failed: ${(r.stderr || r.stdout || "").trim()}`,
       );
     }
-    stderr.write(`[remote] claude: MCP ${name} -> node ${scriptPath} (scope user)\n`);
+    stderr.write(
+      `[remote] claude: MCP ${name} -> node ${scriptPath} (scope user)\n`,
+    );
     return;
   }
   const path = join(homedir(), ".claude.json");
@@ -582,7 +605,11 @@ function execPod(
   const r = spawnSync(
     "kubectl",
     [...base, pod, "-c", "session-agent", "--", "bash", "-lc", script],
-    { encoding: "utf8", env: kubeEnv(tunnel), ...(input !== undefined ? { input } : {}) },
+    {
+      encoding: "utf8",
+      env: kubeEnv(tunnel),
+      ...(input !== undefined ? { input } : {}),
+    },
   );
   if (r.status !== 0) {
     throw new Error(
@@ -670,9 +697,14 @@ export function manifestPodIo(
       // the command string) then record the hash. SAFE_PKG/SAFE_NAME bound the
       // JSON to tame chars; it still rides stdin so nothing is shell-interpolated.
       execPod(tunnel, pod, `cat > "$HOME/${MANIFEST_FILE}"`, json);
-      execPod(tunnel, pod, `printf %s '${hash}' > "$HOME/${MANIFEST_HASH_FILE}"`);
+      execPod(
+        tunnel,
+        pod,
+        `printf %s '${hash}' > "$HOME/${MANIFEST_HASH_FILE}"`,
+      );
     },
-    runSync: (plugin) => execPod(tunnel, pod, buildPodSyncScript(plugin, profile)),
+    runSync: (plugin) =>
+      execPod(tunnel, pod, buildPodSyncScript(plugin, profile)),
   };
 }
 
@@ -735,7 +767,10 @@ export function probePodPluginState(
   desiredPkgs: ReadonlyArray<string>,
   deps: PodProbeDeps,
 ): PodPluginState {
-  const pluginVersions = parseNpmLsVersions(deps.npmLs(desiredPkgs), desiredPkgs);
+  const pluginVersions = parseNpmLsVersions(
+    deps.npmLs(desiredPkgs),
+    desiredPkgs,
+  );
   const { json, toml } = deps.readMcpConfigs();
   const mcpRegistered = parseRegisteredMcpServers({ json, toml });
   return { pluginVersions, mcpRegistered };
@@ -747,8 +782,14 @@ function podProbeDeps(tunnel: TunnelConfig, pod: string): PodProbeDeps {
     npmLs: (pkgs) =>
       // `npm ls -g --json <pkg…>`: argv-safe (pkgs are SAFE_PKG-validated by the
       // caller). npm exits non-zero on extraneous deps but still prints the JSON.
-      execPodArgv(tunnel, pod, ["npm", "ls", "-g", "--json", "--depth=0", ...pkgs])
-        .stdout,
+      execPodArgv(tunnel, pod, [
+        "npm",
+        "ls",
+        "-g",
+        "--json",
+        "--depth=0",
+        ...pkgs,
+      ]).stdout,
     readMcpConfigs: () => {
       // One bash read of the three config bodies, each delimited by a marker so
       // we can split them back apart. Static markers — no untrusted interpolation.
@@ -773,12 +814,18 @@ function podProbeDeps(tunnel: TunnelConfig, pod: string): PodProbeDeps {
 }
 
 /** Extract the text between two markers (start-exclusive, end-exclusive). */
-function sliceBetween(text: string, start: string, end: string | undefined): string {
+function sliceBetween(
+  text: string,
+  start: string,
+  end: string | undefined,
+): string {
   const s = text.indexOf(start);
   if (s === -1) return "";
   const from = s + start.length;
   const e = end ? text.indexOf(end, from) : -1;
-  return (e === -1 ? text.slice(from) : text.slice(from, e)).replace(/^\n/, "").trim();
+  return (e === -1 ? text.slice(from) : text.slice(from, e))
+    .replace(/^\n/, "")
+    .trim();
 }
 
 /**
@@ -797,7 +844,12 @@ export function reconcilePodManifest(
   manifest: PluginManifest,
   plugins: ReadonlyArray<PluginEntry>,
   stderr: { write: (s: string) => unknown } = process.stderr,
-): { reconciled: boolean; localHash: string; podHash: string; failures: number } {
+): {
+  reconciled: boolean;
+  localHash: string;
+  podHash: string;
+  failures: number;
+} {
   return reconcilePodManifestVia(
     manifestPodIo(tunnel, pod, profile),
     pod,
@@ -826,7 +878,12 @@ export function reconcilePodManifestVia(
   manifest: PluginManifest,
   plugins: ReadonlyArray<PluginEntry>,
   stderr: { write: (s: string) => unknown } = process.stderr,
-): { reconciled: boolean; localHash: string; podHash: string; failures: number } {
+): {
+  reconciled: boolean;
+  localHash: string;
+  podHash: string;
+  failures: number;
+} {
   const localHash = manifestHash(manifest);
   const podHash = io.readHash();
   if (podHash === localHash) {
@@ -880,7 +937,14 @@ export function reconcileSessionPlugins(
   if (!tunnel) return { reconciled: false };
   const pod = `session-${sessionId}`;
   const manifest = renderManifest(plugins);
-  const r = reconcilePodManifest(tunnel, pod, profile, manifest, plugins, stderr);
+  const r = reconcilePodManifest(
+    tunnel,
+    pod,
+    profile,
+    manifest,
+    plugins,
+    stderr,
+  );
   return { reconciled: r.reconciled };
 }
 
@@ -904,7 +968,9 @@ export function pluginAdd(
   installGlobally(npmSpec, stderr);
 
   const pkgDir = join(npmGlobalRoot(), pkg);
-  const pkgJson = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")) as {
+  const pkgJson = JSON.parse(
+    readFileSync(join(pkgDir, "package.json"), "utf8"),
+  ) as {
     version?: string;
     bin?: unknown;
   };
@@ -962,7 +1028,12 @@ export function pluginAddInstaller(
   stderr: NodeJS.WriteStream = process.stderr,
 ): PluginEntry {
   assertSafePkg(name);
-  const entry: PluginEntry = { pkg: name, version: "installer", mcp: [], install };
+  const entry: PluginEntry = {
+    pkg: name,
+    version: "installer",
+    mcp: [],
+    install,
+  };
   buildInstallCommand(entry); // throws on a bad curl url / empty script
   setPlugins([...getPlugins().filter((p) => p.pkg !== name), entry]);
   stderr.write(
@@ -988,7 +1059,9 @@ export async function pluginLs(
 ): Promise<void> {
   const plugins = getPlugins();
   if (plugins.length === 0) {
-    stdout.write("[remote] no plugins configured (remote plugin add <npmPkg>)\n");
+    stdout.write(
+      "[remote] no plugins configured (remote plugin add <npmPkg>)\n",
+    );
     return;
   }
   let root: string | undefined;
@@ -1010,7 +1083,10 @@ export async function pluginLs(
       const worst = new Map<string, string>();
       for (const session of sessions) {
         const pod = `session-${session.id}`;
-        const state = probePodPluginState(desiredPkgs, podProbeDeps(tunnel, pod));
+        const state = probePodPluginState(
+          desiredPkgs,
+          podProbeDeps(tunnel, pod),
+        );
         for (const r of diffManifest(manifest, pod, state)) {
           if (!r.item.startsWith("plugin:")) continue;
           const pkg = r.item.slice("plugin:".length);
@@ -1039,7 +1115,7 @@ export async function pluginLs(
   stdout.write(
     remoteByPkg
       ? "\n(REMOTE: real per-Pod status, worst across live sessions — `remote plugin sync --check` for the full per-Pod table.)\n"
-      : "\n(REMOTE \"?\": not connected to the control-plane — `remote plugin sync --check` (with the tunnel up) shows real per-Pod status.)\n",
+      : '\n(REMOTE "?": not connected to the control-plane — `remote plugin sync --check` (with the tunnel up) shows real per-Pod status.)\n',
   );
 }
 
@@ -1066,7 +1142,9 @@ export async function pluginSync(
 ): Promise<void> {
   const plugins = getPlugins();
   if (plugins.length === 0) {
-    stderr.write("[remote] no plugins configured (remote plugin add <npmPkg>)\n");
+    stderr.write(
+      "[remote] no plugins configured (remote plugin add <npmPkg>)\n",
+    );
     return;
   }
   const tunnel = getTunnel();
@@ -1087,7 +1165,11 @@ export async function pluginSync(
     stderr.write(`[remote] ${session.id} (${session.profile}):\n`);
     for (const plugin of plugins) {
       try {
-        const out = execPod(tunnel, pod, buildPodSyncScript(plugin, session.profile));
+        const out = execPod(
+          tunnel,
+          pod,
+          buildPodSyncScript(plugin, session.profile),
+        );
         for (const line of out.trim().split("\n").filter(Boolean)) {
           stderr.write(`    ${line}\n`);
         }
@@ -1132,12 +1214,16 @@ export async function pluginSyncCheck(
 ): Promise<DriftRow[]> {
   const plugins = getPlugins();
   if (plugins.length === 0) {
-    stderr.write("[remote] no plugins configured (remote plugin add <npmPkg>)\n");
+    stderr.write(
+      "[remote] no plugins configured (remote plugin add <npmPkg>)\n",
+    );
     return [];
   }
   const tunnel = getTunnel();
   if (!tunnel) {
-    throw new Error("plugin sync --check needs a tunnel configured (remote config tunnel …)");
+    throw new Error(
+      "plugin sync --check needs a tunnel configured (remote config tunnel …)",
+    );
   }
   const sessions = await listRemoteSessions(url);
   if (sessions.length === 0) {
@@ -1175,11 +1261,12 @@ export async function pluginSyncCheck(
 }
 
 /** Render the drift rows as an aligned POD / ITEM / STATUS / DETAIL table. */
-function printDriftTable(rows: ReadonlyArray<DriftRow>, stdout: NodeJS.WriteStream): void {
+function printDriftTable(
+  rows: ReadonlyArray<DriftRow>,
+  stdout: NodeJS.WriteStream,
+): void {
   const w = (s: string, n: number) => s.padEnd(n);
-  stdout.write(
-    `${w("POD", 22)} ${w("ITEM", 30)} ${w("STATUS", 18)} DETAIL\n`,
-  );
+  stdout.write(`${w("POD", 22)} ${w("ITEM", 30)} ${w("STATUS", 18)} DETAIL\n`);
   for (const r of rows) {
     stdout.write(
       `${w(r.pod, 22)} ${w(r.item, 30)} ${w(r.status, 18)} ${r.detail}\n`,

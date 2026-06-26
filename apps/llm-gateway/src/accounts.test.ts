@@ -29,6 +29,38 @@ describe("getAccounts", () => {
     resetAccountsCache();
     expect(() => getAccounts()).toThrow("non-empty");
   });
+
+  it("filters Claude Code OAuth accounts because they are not API upstream credentials", async () => {
+    const accounts = [
+      {
+        id: "claude-oauth",
+        provider: "anthropic",
+        label: "Claude OAuth",
+        token: "sk-ant-oat01-local",
+        authType: "bearer",
+      },
+      { id: "codex-oauth", provider: "openai", label: "Codex", token: "jwt.token.value" },
+    ];
+    vi.stubEnv("GATEWAY_ACCOUNTS", JSON.stringify(accounts));
+    const { getAccounts, resetAccountsCache } = await import("./accounts.js");
+    resetAccountsCache();
+    expect(getAccounts().map((a) => a.id)).toEqual(["codex-oauth"]);
+  });
+
+  it("throws when only unsupported Claude Code OAuth accounts are configured", async () => {
+    const accounts = [
+      {
+        id: "claude-oauth",
+        provider: "anthropic",
+        label: "Claude OAuth",
+        token: "sk-ant-oat01-local",
+      },
+    ];
+    vi.stubEnv("GATEWAY_ACCOUNTS", JSON.stringify(accounts));
+    const { getAccounts, resetAccountsCache } = await import("./accounts.js");
+    resetAccountsCache();
+    expect(() => getAccounts()).toThrow("Claude Code OAuth is not a supported upstream transport");
+  });
 });
 
 describe("selectAccount", () => {

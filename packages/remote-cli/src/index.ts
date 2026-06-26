@@ -36,12 +36,14 @@ import {
   getJobMaxAgeHours,
   getMaxConcurrent,
   getLlmMeshRuntimeConfig,
+  getTmuxProfileConfig,
   getTunnel,
   resolveConfigPath,
   setDefaultRemote,
   setDefaultTarget,
   setDefaultTools,
   setLlmMeshRuntimeConfig,
+  setTmuxProfileConfig,
   setToken,
   setTunnel,
   type TunnelConfig,
@@ -214,6 +216,10 @@ import {
   assertRequiredAuthBundle,
   collectProfileAuth,
 } from "./auth-bundle.js";
+import {
+  findProjectedAgent,
+  projectRemoteAgents,
+} from "./agents-projection.js";
 import {
   coerceCliProfileName,
   isCliProfile,
@@ -1243,7 +1249,13 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
       const ws = originMarker
         ? { id: originMarker.workspaceId }
         : await createWorkspace(url, { displayName: `job-${job.id}` });
-      const remoteArgs = buildRemoteDelegate(job.tool, task, headless, job.model, job.effort);
+      const remoteArgs = buildRemoteDelegate(
+        job.tool,
+        task,
+        headless,
+        job.model,
+        job.effort,
+      );
       // Bundle local CLI credentials (e.g. ~/.claude/.credentials.json for
       // "claude", ~/.codex/auth.json for "codex") so the pod has them at start.
       // Best-effort: a missing bundle is not fatal — the session starts without
@@ -1322,14 +1334,17 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
   // If no accounts are enrolled or all are exhausted, we proceed with existing env.
   const accountEnvOverrides: Record<string, string> = {};
   if (job.tool === "claude" || job.tool === "codex") {
-    const preferredProvider: AccountProvider = job.tool === "claude" ? "claude-code" : "codex";
+    const preferredProvider: AccountProvider =
+      job.tool === "claude" ? "claude-code" : "codex";
     // Forced account (--account <id>): look it up directly, bypassing the pool.
-    const forcedCandidate = job.accountId !== undefined
-      ? loadCandidates(undefined).find((c) => c.id === job.accountId)
-      : undefined;
-    const sel = forcedCandidate !== undefined
-      ? ({ candidate: forcedCandidate, crossProvider: false } as const)
-      : selectAccountWithFallback(preferredProvider, job.id);
+    const forcedCandidate =
+      job.accountId !== undefined
+        ? loadCandidates(undefined).find((c) => c.id === job.accountId)
+        : undefined;
+    const sel =
+      forcedCandidate !== undefined
+        ? ({ candidate: forcedCandidate, crossProvider: false } as const)
+        : selectAccountWithFallback(preferredProvider, job.id);
     if (!("allExhausted" in sel) && sel.candidate !== undefined) {
       if (sel.crossProvider) {
         const msg =
@@ -1353,7 +1368,10 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
       });
       if (sel.candidate.provider === "codex") {
         accountEnvOverrides["OPENAI_API_KEY"] = sel.candidate.accessToken;
-      } else if (sel.candidate.provider === "claude-code" && sel.candidate.configDir) {
+      } else if (
+        sel.candidate.provider === "claude-code" &&
+        sel.candidate.configDir
+      ) {
         accountEnvOverrides["CLAUDE_CONFIG_DIR"] = sel.candidate.configDir;
       }
     }
@@ -1377,15 +1395,16 @@ export async function startJob(job: RegistryEntry): Promise<StartJobResult> {
     prevAccountEnvs[k] = process.env[k];
     process.env[k] = v;
   }
-  // Inject llm-mesh gateway env if running — only when not already set by the user.
+  // Inject llm-mesh gateway env if running. Do not trust a parent env that may
+  // contain an old gateway token from a previous restart.
   // tmux inherits process.env, so claude + its subagents all get the gateway automatically.
-  if (!process.env.ANTHROPIC_BASE_URL) {
-    const meshEnv = readLlmMeshSessionEnv();
-    if (meshEnv) {
-      for (const [k, v] of Object.entries(meshEnv)) {
-        prevAccountEnvs[k] = process.env[k];
-        process.env[k] = v;
-      }
+  const meshEnv = getLlmMeshRuntimeConfig().enabled
+    ? readLlmMeshSessionEnv()
+    : null;
+  if (meshEnv) {
+    for (const [k, v] of Object.entries(meshEnv)) {
+      prevAccountEnvs[k] = process.env[k];
+      process.env[k] = v;
     }
   }
   let tmuxSession: string;
@@ -1486,22 +1505,36 @@ export function resumeThrottledJob(job: RegistryEntry): StartJobResult {
   }
 
   // Same env plumbing as startJob (depth budget + REMOTE_JOB_ID + account pool).
-  const preferredProvider: AccountProvider = job.tool === "codex" ? "codex" : "claude-code";
+  const preferredProvider: AccountProvider =
+    job.tool === "codex" ? "codex" : "claude-code";
   const sel = selectAccountWithFallback(preferredProvider, job.id);
   const accountEnvOverrides: Record<string, string> = {};
   if ("allExhausted" in sel) {
-    process.stderr.write(`[remote] account-pool: all accounts exhausted for job ${job.id} — resuming without account override (may throttle again)\n`);
+    process.stderr.write(
+      `[remote] account-pool: all accounts exhausted for job ${job.id} — resuming without account override (may throttle again)\n`,
+    );
   } else if (sel.candidate !== undefined) {
     if (sel.crossProvider) {
       const msg = `[remote] account-pool: all ${preferredProvider} accounts exhausted — falling back to ${sel.candidate.provider} (${sel.candidate.label}) for resume`;
       process.stderr.write(msg + "\n");
-      if (process.env.TMUX) spawnSync("tmux", ["display-message", msg], { stdio: "ignore" });
+      if (process.env.TMUX)
+        spawnSync("tmux", ["display-message", msg], { stdio: "ignore" });
     }
     stickyBind(job.id, sel.candidate.id, sel.candidate.provider);
-    appendSessionLogEntry({ jobId: job.id, preferredProvider, selectedProvider: sel.candidate.provider, accountId: sel.candidate.id, accountLabel: sel.candidate.label, crossProvider: sel.crossProvider });
+    appendSessionLogEntry({
+      jobId: job.id,
+      preferredProvider,
+      selectedProvider: sel.candidate.provider,
+      accountId: sel.candidate.id,
+      accountLabel: sel.candidate.label,
+      crossProvider: sel.crossProvider,
+    });
     if (sel.candidate.provider === "codex") {
       accountEnvOverrides["OPENAI_API_KEY"] = sel.candidate.accessToken;
-    } else if (sel.candidate.provider === "claude-code" && sel.candidate.configDir) {
+    } else if (
+      sel.candidate.provider === "claude-code" &&
+      sel.candidate.configDir
+    ) {
       accountEnvOverrides["CLAUDE_CONFIG_DIR"] = sel.candidate.configDir;
     }
   }
@@ -1685,6 +1718,28 @@ function localStartArgs(
   }
 }
 
+function gatewayModeFromOptions(opts: {
+  llmGateway?: boolean | undefined;
+  gw?: boolean | undefined;
+  noLlmGateway?: boolean | undefined;
+  noGw?: boolean | undefined;
+}): "auto" | "gateway" | "direct" {
+  const wantsGateway = opts.llmGateway === true || opts.gw === true;
+  const wantsDirect =
+    opts.llmGateway === false ||
+    opts.gw === false ||
+    opts.noLlmGateway === true ||
+    opts.noGw === true;
+  if (wantsGateway && wantsDirect) {
+    throw new Error(
+      "pass either --llm-gateway/--gw or --no-llm-gateway/--no-gw, not both",
+    );
+  }
+  if (wantsGateway) return "gateway";
+  if (wantsDirect) return "direct";
+  return "auto";
+}
+
 function shouldUseClaudeBare(profile: string): boolean {
   return (
     (profile === "claude" || profile === "claude-code") &&
@@ -1692,13 +1747,22 @@ function shouldUseClaudeBare(profile: string): boolean {
   );
 }
 
-async function injectLlmMeshGatewayEnv(): Promise<string | undefined> {
-  if (process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_AUTH_TOKEN) {
-    return process.env.ANTHROPIC_BASE_URL;
+async function injectLlmMeshGatewayEnv(
+  mode: "auto" | "gateway" | "direct" = "auto",
+): Promise<string | undefined> {
+  if (mode === "direct") {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+    return undefined;
   }
-  if (!getLlmMeshRuntimeConfig().enabled) return undefined;
-  let meshEnv =
-    readLlmMeshSessionEnv() ?? (await acquireLlmMeshSessionEnv());
+  if (mode !== "gateway" && !getLlmMeshRuntimeConfig().enabled) {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+    return undefined;
+  }
+  let meshEnv = readLlmMeshSessionEnv() ?? (await acquireLlmMeshSessionEnv());
   if (!meshEnv) {
     const config = readLlmMeshConfig();
     if (config?.accounts.length) {
@@ -1720,18 +1784,24 @@ async function injectLlmMeshGatewayEnv(): Promise<string | undefined> {
     }
   }
   if (!meshEnv) return undefined;
-  for (const [k, v] of Object.entries(meshEnv)) {
-    process.env[k] = v;
+  const alreadyCurrent =
+    process.env.ANTHROPIC_BASE_URL === meshEnv.ANTHROPIC_BASE_URL &&
+    process.env.ANTHROPIC_AUTH_TOKEN === meshEnv.ANTHROPIC_AUTH_TOKEN &&
+    process.env.ANTHROPIC_API_KEY === meshEnv.ANTHROPIC_API_KEY;
+  for (const [k, v] of Object.entries(meshEnv)) process.env[k] = v;
+  if (!alreadyCurrent) {
+    process.stderr.write(
+      `[remote] llm-mesh: injecting gateway env (${meshEnv.ANTHROPIC_BASE_URL})\n`,
+    );
   }
-  process.stderr.write(
-    `[remote] llm-mesh: injecting gateway env (${meshEnv.ANTHROPIC_BASE_URL})\n`,
-  );
   return meshEnv.ANTHROPIC_BASE_URL;
 }
 
-async function prepareLlmMeshForRestore(opts: {
-  dryRun?: boolean;
-} = {}): Promise<void> {
+async function prepareLlmMeshForRestore(
+  opts: {
+    dryRun?: boolean;
+  } = {},
+): Promise<void> {
   if (!getLlmMeshRuntimeConfig().enabled) return;
   const config = readLlmMeshConfig();
   if (!config?.accounts.length) {
@@ -1787,9 +1857,8 @@ async function confirmReplace(slug: string): Promise<boolean> {
   if (process.stdin.isTTY !== true || process.stderr.isTTY !== true) {
     return false;
   }
-  const { createInterface: createPromisesInterface } = await import(
-    "node:readline/promises",
-  );
+  const { createInterface: createPromisesInterface } =
+    await import("node:readline/promises");
   const rl = createPromisesInterface({
     input: process.stdin,
     output: process.stderr,
@@ -2633,6 +2702,18 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     });
 
   configCommand
+    .command("tmux-profile <name>")
+    .description(
+      "Set the remote-managed tmux profile name applied to local sessions",
+    )
+    .action((name: string) => {
+      setTmuxProfileConfig({ profile: name });
+      process.stderr.write(
+        `[remote] tmux profile set to ${getTmuxProfileConfig().profile}\n`,
+      );
+    });
+
+  configCommand
     .command("clear")
     .description("Clear default remote URL")
     .action(() => {
@@ -2655,6 +2736,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       process.stdout.write(
         `llm-mesh: ${getLlmMeshRuntimeConfig().enabled ? "enabled" : "disabled"}\n`,
       );
+      process.stdout.write(`tmux-profile: ${getTmuxProfileConfig().profile}\n`);
       const tunnel = getTunnel();
       if (tunnel) {
         process.stdout.write(
@@ -2971,10 +3053,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--remote <url>",
       "control-plane URL (defaults to configured remote)",
     )
-    .option(
-      "--watch",
-      "repeat the sync on a loop (Ctrl-C to stop)",
-    )
+    .option("--watch", "repeat the sync on a loop (Ctrl-C to stop)")
     .option(
       "--interval <seconds>",
       "seconds between sync passes in --watch mode (default: 30)",
@@ -3101,69 +3180,72 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   program
     .command("sync-status")
-    .description("show sync status for the current session (reads ~/.remote/sync-status/<sessionId>.json)")
+    .description(
+      "show sync status for the current session (reads ~/.remote/sync-status/<sessionId>.json)",
+    )
     .option("--json", "output raw JSON")
-    .option("--session <id>", "session id (defaults to .remote/workspace.json marker)")
-    .action(
-      (opts: { json?: boolean; session?: string }) => {
-        const marker = readWorkspaceMarker(process.cwd());
-        const sessionId = opts.session ?? marker?.workspaceId;
-        let status: SyncStatus;
-        if (!sessionId) {
-          // No session — synthesize a synced/safe-to-close placeholder
+    .option(
+      "--session <id>",
+      "session id (defaults to .remote/workspace.json marker)",
+    )
+    .action((opts: { json?: boolean; session?: string }) => {
+      const marker = readWorkspaceMarker(process.cwd());
+      const sessionId = opts.session ?? marker?.workspaceId;
+      let status: SyncStatus;
+      if (!sessionId) {
+        // No session — synthesize a synced/safe-to-close placeholder
+        status = {
+          state: "synced",
+          safeToClose: true,
+          updatedAt: new Date().toISOString(),
+          conv: emptyMetrics(),
+          hot: emptyMetrics(),
+          cold: emptyMetrics(),
+        };
+      } else {
+        const persisted = readSyncStatus(sessionId);
+        if (!persisted) {
+          // No status file yet — unknown state. Default to pending/not-safe
+          // (conservative): if even 1 byte of delta hasn't been ack'd, SAFE
+          // TO CLOSE would be a false positive. The sync loop writes the file
+          // on its first successful round-trip, so this only fires before the
+          // first ack.
           status = {
-            state: "synced",
-            safeToClose: true,
+            state: "pending",
+            safeToClose: false,
             updatedAt: new Date().toISOString(),
             conv: emptyMetrics(),
             hot: emptyMetrics(),
             cold: emptyMetrics(),
           };
         } else {
-          const persisted = readSyncStatus(sessionId);
-          if (!persisted) {
-            // No status file yet — unknown state. Default to pending/not-safe
-            // (conservative): if even 1 byte of delta hasn't been ack'd, SAFE
-            // TO CLOSE would be a false positive. The sync loop writes the file
-            // on its first successful round-trip, so this only fires before the
-            // first ack.
-            status = {
-              state: "pending",
-              safeToClose: false,
-              updatedAt: new Date().toISOString(),
-              conv: emptyMetrics(),
-              hot: emptyMetrics(),
-              cold: emptyMetrics(),
-            };
-          } else {
-            status = persisted;
-          }
+          status = persisted;
         }
+      }
 
-        if (opts.json) {
-          process.stdout.write(JSON.stringify(status, null, 2) + "\n");
-          return;
-        }
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(status, null, 2) + "\n");
+        return;
+      }
 
-        // Human-readable output
-        const safeLabel = status.safeToClose ? "YES" : "NO";
-        const fmtMetrics = (label: string, m: typeof status.conv): string => {
-          if (m.pendingCount === 0) return `  ${label.padEnd(6)} synced`;
-          const kb = (m.pendingBytes / 1024).toFixed(0);
-          return (
-            `  ${label.padEnd(6)} ${m.pendingCount === 0 ? "synced" : "pending"}` +
-            `  ${m.pendingCount} files / ${kb} KB` +
-            (m.oldestPendingAge > 0 ? `  oldest ${m.oldestPendingAge}s` : "") +
-            (m.estimatedCatchup > 0 ? `  ETA ${m.estimatedCatchup}s` : "")
-          );
-        };
-        process.stdout.write(`State: ${status.state}\n`);
-        process.stdout.write(`Safe to close: ${safeLabel}\n`);
-        process.stdout.write(fmtMetrics("Conv:", status.conv) + "\n");
-        process.stdout.write(fmtMetrics("Hot:", status.hot) + "\n");
-        process.stdout.write(fmtMetrics("Cold:", status.cold) + "\n");
-      },
-    );
+      // Human-readable output
+      const safeLabel = status.safeToClose ? "YES" : "NO";
+      const fmtMetrics = (label: string, m: typeof status.conv): string => {
+        if (m.pendingCount === 0) return `  ${label.padEnd(6)} synced`;
+        const kb = (m.pendingBytes / 1024).toFixed(0);
+        return (
+          `  ${label.padEnd(6)} ${m.pendingCount === 0 ? "synced" : "pending"}` +
+          `  ${m.pendingCount} files / ${kb} KB` +
+          (m.oldestPendingAge > 0 ? `  oldest ${m.oldestPendingAge}s` : "") +
+          (m.estimatedCatchup > 0 ? `  ETA ${m.estimatedCatchup}s` : "")
+        );
+      };
+      process.stdout.write(`State: ${status.state}\n`);
+      process.stdout.write(`Safe to close: ${safeLabel}\n`);
+      process.stdout.write(fmtMetrics("Conv:", status.conv) + "\n");
+      process.stdout.write(fmtMetrics("Hot:", status.hot) + "\n");
+      process.stdout.write(fmtMetrics("Cold:", status.cold) + "\n");
+    });
 
   // ---------------------------------------------------------------------------
   // sync-files — Phase B2 incremental git-based file sync
@@ -3185,14 +3267,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option("--dry-run", "show what would be sent without uploading")
     .action(
-      async (opts: {
-        remote?: string;
-        session?: string;
-        dryRun?: boolean;
-      }) => {
+      async (opts: { remote?: string; session?: string; dryRun?: boolean }) => {
         const cwd = process.cwd();
-        const { isGitRepo: checkGit, getHeadSha, buildGitBundle, buildIncrementalManifest, buildUntrackedTarball } =
-          await import("./workspace-sync-incremental.js");
+        const {
+          isGitRepo: checkGit,
+          getHeadSha,
+          buildGitBundle,
+          buildIncrementalManifest,
+          buildUntrackedTarball,
+        } = await import("./workspace-sync-incremental.js");
 
         if (!checkGit(cwd)) {
           process.stderr.write(
@@ -3232,7 +3315,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         );
         let baseSha: string | null = null;
         if (baseRes.ok) {
-          const baseJson = (await baseRes.json()) as { baseSha?: string | null };
+          const baseJson = (await baseRes.json()) as {
+            baseSha?: string | null;
+          };
           baseSha = baseJson.baseSha ?? null;
         }
 
@@ -3301,7 +3386,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.stderr.write(
             `[remote] sync-files: bootstrap complete, base=${headSha}\n`,
           );
-          const { writeSyncStatus, emptyMetrics: em } = await import("./sync-status.js");
+          const { writeSyncStatus, emptyMetrics: em } =
+            await import("./sync-status.js");
           writeSyncStatus(sessionId, {
             state: "synced",
             safeToClose: true,
@@ -3317,7 +3403,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           );
           const manifest = buildIncrementalManifest(cwd, baseSha);
           const untrackedPaths = manifest.untrackedManifest.map((e) => e.path);
-          const trackedBytes = Buffer.from(manifest.tracked, "base64").byteLength;
+          const trackedBytes = Buffer.from(
+            manifest.tracked,
+            "base64",
+          ).byteLength;
           process.stderr.write(
             `[remote] sync-files: tracked diff ${(trackedBytes / 1024).toFixed(1)} KiB, ${untrackedPaths.length} untracked file(s)\n`,
           );
@@ -3364,7 +3453,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           process.stderr.write(
             `[remote] sync-files: incremental complete, base=${headSha}\n`,
           );
-          const { writeSyncStatus: wss, emptyMetrics: em2 } = await import("./sync-status.js");
+          const { writeSyncStatus: wss, emptyMetrics: em2 } =
+            await import("./sync-status.js");
           wss(sessionId, {
             state: "synced",
             safeToClose: true,
@@ -3903,7 +3993,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             l.incarnation.remote === null,
         );
         const lineageRecord =
-          existingLineage ?? createLineage(resolvedProfile, "local", wsHex, cwd);
+          existingLineage ??
+          createLineage(resolvedProfile, "local", wsHex, cwd);
         const lineageId = lineageRecord.lineage;
 
         // Step 4: acquire lease for this local incarnation
@@ -4333,6 +4424,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--replace",
       "replace an existing idle local tmux session without interactive confirmation",
     )
+    .option(
+      "--llm-gateway",
+      "launch the CLI through the local llm-mesh gateway",
+    )
+    .option("--gw", "alias for --llm-gateway")
+    .option("--no-llm-gateway", "launch without llm-mesh gateway env")
+    .option("--no-gw", "alias for --no-llm-gateway")
     .action(
       async (
         slug: string | undefined,
@@ -4342,6 +4440,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           claude?: string | boolean;
           codex?: string | boolean;
           last?: boolean;
+          llmGateway?: boolean;
+          gw?: boolean;
+          noLlmGateway?: boolean;
+          noGw?: boolean;
         },
       ) => {
         if (!tmuxAvailable()) {
@@ -4432,7 +4534,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             process.exitCode = attachLocalSession(local.name);
             return;
           }
-          process.stderr.write(`[remote] attach: remote attach ${displaySlug}\n`);
+          process.stderr.write(
+            `[remote] attach: remote attach ${displaySlug}\n`,
+          );
           process.exitCode = 2;
           return;
         }
@@ -4444,7 +4548,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             process.stderr.write(
               `[remote] local session ${displaySlug} exists but cannot be relaunched without a recorded convId.\n`,
             );
-            process.stderr.write(`[remote] attach: remote attach ${displaySlug}\n`);
+            process.stderr.write(
+              `[remote] attach: remote attach ${displaySlug}\n`,
+            );
           } else {
             process.stderr.write(
               `[remote] start explicitly: remote resume ${displaySlug} --claude [convId]\n`,
@@ -4462,7 +4568,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           return;
         }
         const profile = entry.tool;
-        const gateway = await injectLlmMeshGatewayEnv();
+        let gatewayMode: "auto" | "gateway" | "direct";
+        try {
+          gatewayMode = gatewayModeFromOptions(opts);
+        } catch (error) {
+          process.stderr.write(`[remote] ${(error as Error).message}.\n`);
+          process.exitCode = 1;
+          return;
+        }
+        const gateway = await injectLlmMeshGatewayEnv(gatewayMode);
         const useBare = shouldUseClaudeBare(profile);
         const command = localCliCommand(profile);
         const args = localResumeArgs(profile, entry.convId, {
@@ -4487,10 +4601,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
                   authToken: process.env.ANTHROPIC_AUTH_TOKEN,
                 })
               : "unknown";
-          if (
-            gatewayEnvStatus === "missing" ||
-            gatewayEnvStatus === "stale"
-          ) {
+          if (gatewayEnvStatus === "missing" || gatewayEnvStatus === "stale") {
             process.stderr.write(
               `[remote] local session ${displaySlug} is running without current llm-mesh env (${gatewayEnvStatus}); not restarting an active session automatically.\n`,
             );
@@ -4515,7 +4626,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             process.exitCode = attachLocalSession(local.name);
             return;
           }
-          process.stderr.write(`[remote] attach: remote attach ${displaySlug}\n`);
+          process.stderr.write(
+            `[remote] attach: remote attach ${displaySlug}\n`,
+          );
           process.exitCode = 2;
           return;
         }
@@ -4536,7 +4649,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
               `[remote] If another CLI is still writing this conversation, replacing can corrupt the .jsonl.\n`,
             );
             if (!(await confirmReplace(displaySlug))) {
-              process.stderr.write(`[remote] takeover requires confirmation.\n`);
+              process.stderr.write(
+                `[remote] takeover requires confirmation.\n`,
+              );
               process.stderr.write(
                 `[remote] interactive: remote resume ${displaySlug}\n`,
               );
@@ -4664,6 +4779,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--h2a",
       'also start the h2a MCP server in a side tmux window "h2a" (launcher contract: agent reachable/wakeable via ~/h2a-workspace/.h2a); config key `h2a: {enabled, command}` makes it the default',
     )
+    .option(
+      "--llm-gateway",
+      "launch the CLI through the local llm-mesh gateway",
+    )
+    .option("--gw", "alias for --llm-gateway")
+    .option("--no-llm-gateway", "launch without llm-mesh gateway env")
+    .option("--no-gw", "alias for --no-llm-gateway")
     .action(
       async (
         profile: string,
@@ -4675,6 +4797,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           name?: string;
           count?: string;
           h2a?: boolean;
+          llmGateway?: boolean;
+          gw?: boolean;
+          noLlmGateway?: boolean;
+          noGw?: boolean;
         },
       ) => {
         if (!tmuxAvailable()) {
@@ -4748,10 +4874,17 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             return;
           }
         }
-        // Inject llm-mesh gateway env before building argv. The gateway uses
-        // ANTHROPIC_AUTH_TOKEN, so normal Claude Code startup keeps settings
-        // and avoids the API-key onboarding prompts.
-        await injectLlmMeshGatewayEnv();
+        // By default launches are direct. --llm-gateway/--gw opts into the
+        // local gateway for any profile that consumes Anthropic-compatible env.
+        let gatewayMode: "auto" | "gateway" | "direct";
+        try {
+          gatewayMode = gatewayModeFromOptions(opts);
+        } catch (error) {
+          process.stderr.write(`[remote] ${(error as Error).message}.\n`);
+          process.exitCode = 1;
+          return;
+        }
+        await injectLlmMeshGatewayEnv(gatewayMode);
         const useBare = shouldUseClaudeBare(profile);
         const command = localCliCommand(profile);
         const args = opts.resume
@@ -5090,6 +5223,52 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     );
 
   // ---------------------------------------------------------------------------
+  // agents — read-only projection over jobs + local tmux sessions
+  // ---------------------------------------------------------------------------
+
+  const agentsCommand = program
+    .command("agents")
+    .description(
+      "Project remote-visible agents (read-only; not objective-state authoritative).",
+    );
+
+  const buildAgentsProjection = () =>
+    projectRemoteAgents({ jobs: listJobs(), localRows: listLocalForLs() });
+
+  agentsCommand
+    .command("ls")
+    .option("--json", "emit a JSON envelope", true)
+    .description("List projected agents as a stable JSON envelope.")
+    .action(() => {
+      process.stdout.write(
+        `${JSON.stringify(buildAgentsProjection(), null, 2)}\n`,
+      );
+    });
+
+  agentsCommand
+    .command("inspect")
+    .argument(
+      "<id>",
+      "agent id, job id, tmux session, remote session, h2a instance or label",
+    )
+    .option("--json", "emit a JSON envelope", true)
+    .description("Inspect one projected agent as a stable JSON envelope.")
+    .action((id: string) => {
+      const projection = buildAgentsProjection();
+      const agent = findProjectedAgent(projection.agents, id);
+      if (!agent) {
+        process.stderr.write(
+          `[remote] no projected agent \"${id}\" (see: remote agents ls --json)\n`,
+        );
+        process.exitCode = 2;
+        return;
+      }
+      process.stdout.write(
+        `${JSON.stringify({ ok: true, ownerSystem: "remote", authoritativeForObjectiveState: false, agent }, null, 2)}\n`,
+      );
+    });
+
+  // ---------------------------------------------------------------------------
   // jobs — supervise delegated jobs (ls / status / attach / logs)
   // ---------------------------------------------------------------------------
 
@@ -5167,9 +5346,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     // Auto-exhaust the account that was rate-limited so new jobs avoid it.
     const binding = lookupBinding(job.id);
     if (binding) {
-      markExhausted(binding.accountId, QUOTA_WINDOW_5H_MS, verdict.signature ?? "rate-limit");
+      markExhausted(
+        binding.accountId,
+        QUOTA_WINDOW_5H_MS,
+        verdict.signature ?? "rate-limit",
+      );
       const accounts = loadCandidates(undefined);
-      const accountLabel = accounts.find((a) => a.id === binding.accountId)?.label ?? binding.accountId.slice(0, 8);
+      const accountLabel =
+        accounts.find((a) => a.id === binding.accountId)?.label ??
+        binding.accountId.slice(0, 8);
       appendSessionLogEntry({
         kind: "exhaust",
         jobId: job.id,
@@ -5178,7 +5363,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         accountId: binding.accountId,
         accountLabel,
         crossProvider: false,
-        ...(verdict.signature !== undefined ? { signature: verdict.signature } : {}),
+        ...(verdict.signature !== undefined
+          ? { signature: verdict.signature }
+          : {}),
       });
     }
     const nowMs = Date.now();
@@ -5360,13 +5547,17 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     .action(async () => {
       const jobs = await reconcileJobs();
       const accounts = listAccounts();
-      const resolveAccountLabel = accounts.length > 0
-        ? (jobId: string): string | undefined => {
-            const binding = lookupBinding(jobId);
-            if (!binding) return undefined;
-            return accounts.find((a) => a.id === binding.accountId)?.label ?? binding.accountId.slice(0, 8);
-          }
-        : undefined;
+      const resolveAccountLabel =
+        accounts.length > 0
+          ? (jobId: string): string | undefined => {
+              const binding = lookupBinding(jobId);
+              if (!binding) return undefined;
+              return (
+                accounts.find((a) => a.id === binding.accountId)?.label ??
+                binding.accountId.slice(0, 8)
+              );
+            }
+          : undefined;
       const rows = buildJobRows(jobs, jobLive, Date.now(), resolveAccountLabel);
       process.stdout.write(`${renderJobsTable(rows)}\n`);
       // M3 — warn (don't self-heal) when queued jobs have no conductor draining.
@@ -5410,7 +5601,8 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
       const binding = lookupBinding(job.id);
       const accountLabel = binding
-        ? (listAccounts().find((a) => a.id === binding.accountId)?.label ?? binding.accountId.slice(0, 8))
+        ? (listAccounts().find((a) => a.id === binding.accountId)?.label ??
+          binding.accountId.slice(0, 8))
         : undefined;
       const lines = [
         `id:      ${job.id}`,
@@ -6148,7 +6340,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const { target, reason } = parsed;
       // Idempotence: skip if we already woke this target within 60s (belt).
       const lastWake = readWakeStampMs(localRoot, target);
-      if (lastWake !== undefined && now - lastWake < WAKE_REQUEST_IDEMPOTENCE_MS) {
+      if (
+        lastWake !== undefined &&
+        now - lastWake < WAKE_REQUEST_IDEMPOTENCE_MS
+      ) {
         process.stderr.write(
           `[remote] wake-request: skipping ${target} (already woken ${Math.round((now - lastWake) / 1000)}s ago)\n`,
         );
@@ -6233,7 +6428,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .option("--root <path>", "h2a root (default: ~/h2a-workspace/.h2a)")
     .option("--watch", "loop forever, polling every 30s")
-    .option("--interval <seconds>", "poll interval in seconds (default: 30)", "30")
+    .option(
+      "--interval <seconds>",
+      "poll interval in seconds (default: 30)",
+      "30",
+    )
     .action(
       async (opts: { root?: string; watch?: boolean; interval?: string }) => {
         if (!tmuxAvailable()) {
@@ -6732,58 +6931,66 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       'Relance les sessions dev dans leur layout (fenêtre par groupe, onglet par session). Sans argument: tous les groupes. Avec [group]: ce lot seulement (ex: `remote restore "full remote"`). Groupes LOCAUX = claude/codex sous ~/src/* (tmux via `remote run`); groupes REMOTE = sessions SCW (`remote attach <id> --exec`). Layout: champ `layout` de la config.',
     )
     .option("--dry-run", "affiche le layout calculé sans ouvrir de terminaux")
-    .option("--reattach", "ouvre aussi un onglet pour les sessions déjà actives en tmux (ré-attache)")
-    .action(async (group: string | undefined, opts: { dryRun?: boolean; reattach?: boolean }) => {
-      if (!tmuxAvailable()) {
-        process.stderr.write(
-          "[remote] tmux requis pour restore (sudo apt install tmux)\n",
-        );
-        process.exitCode = 1;
-        return;
-      }
-      const norm = (s: string) =>
-        s
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "");
-      const cfg = getLayoutConfig();
-      const needRemote = cfg.groups.some(
-        (g) => g.remote && (!group || norm(g.title) === norm(group)),
-      );
-
-      const restoreOpts: RestoreOptions = {};
-      if (group) restoreOpts.group = group;
-      if (opts.dryRun) restoreOpts.dryRun = true;
-
-      if (needRemote) {
-        const url = getConfiguredRemote();
-        await ensureConnected(url);
-        const sessions = await listRemoteSessions(url);
-        restoreOpts.remoteTabs = sessions.map((s) => {
-          const wp = s.workspacePath;
-          const cwd = wp && existsSync(wp) ? wp : homedir();
-          return { id: s.id, label: projectName(s), cwd };
-        });
-        if (restoreOpts.remoteTabs.length === 0) {
+    .option(
+      "--reattach",
+      "ouvre aussi un onglet pour les sessions déjà actives en tmux (ré-attache)",
+    )
+    .action(
+      async (
+        group: string | undefined,
+        opts: { dryRun?: boolean; reattach?: boolean },
+      ) => {
+        if (!tmuxAvailable()) {
           process.stderr.write(
-            "[remote] aucune session SCW (remote ls vide) pour le groupe remote\n",
+            "[remote] tmux requis pour restore (sudo apt install tmux)\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const norm = (s: string) =>
+          s
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "");
+        const cfg = getLayoutConfig();
+        const needRemote = cfg.groups.some(
+          (g) => g.remote && (!group || norm(g.title) === norm(group)),
+        );
+
+        const restoreOpts: RestoreOptions = {};
+        if (group) restoreOpts.group = group;
+        if (opts.dryRun) restoreOpts.dryRun = true;
+
+        if (needRemote) {
+          const url = getConfiguredRemote();
+          await ensureConnected(url);
+          const sessions = await listRemoteSessions(url);
+          restoreOpts.remoteTabs = sessions.map((s) => {
+            const wp = s.workspacePath;
+            const cwd = wp && existsSync(wp) ? wp : homedir();
+            return { id: s.id, label: projectName(s), cwd };
+          });
+          if (restoreOpts.remoteTabs.length === 0) {
+            process.stderr.write(
+              "[remote] aucune session SCW (remote ls vide) pour le groupe remote\n",
+            );
+          }
+        }
+
+        if (opts.reattach) restoreOpts.reattach = true;
+        await prepareLlmMeshForRestore({ dryRun: Boolean(opts.dryRun) });
+        const { total } = restoreLayout(restoreOpts);
+        if (total === 0) {
+          process.stderr.write(
+            `[remote] rien à relancer${group ? ` pour le groupe "${group}"` : ""}\n`,
+          );
+        } else {
+          process.stderr.write(
+            `[remote] ${total} onglet(s)${opts.dryRun ? " (dry-run, rien ouvert)" : " relancé(s)"}\n`,
           );
         }
-      }
-
-      if (opts.reattach) restoreOpts.reattach = true;
-      await prepareLlmMeshForRestore({ dryRun: Boolean(opts.dryRun) });
-      const { total } = restoreLayout(restoreOpts);
-      if (total === 0) {
-        process.stderr.write(
-          `[remote] rien à relancer${group ? ` pour le groupe "${group}"` : ""}\n`,
-        );
-      } else {
-        process.stderr.write(
-          `[remote] ${total} onglet(s)${opts.dryRun ? " (dry-run, rien ouvert)" : " relancé(s)"}\n`,
-        );
-      }
-    });
+      },
+    );
 
   // ---------------------------------------------------------------------------
   // enroll — live-session registry plumbing (called by Claude Code hooks)
@@ -6948,7 +7155,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             return;
           }
         }
-        const { url, sessionId: rawSessionId } = resolveUrlAndSessionId(first, second);
+        const { url, sessionId: rawSessionId } = resolveUrlAndSessionId(
+          first,
+          second,
+        );
         await ensureConnected(url);
         // Resolve displayName → real UUID so attachPodTmux builds the right pod
         // name (session-<uuid>) and the WS path hits the right session.
@@ -7277,10 +7487,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "LLM provider: claude-code | codex",
     )
     .requiredOption("--label <label>", "Human-readable account label")
-    .option(
-      "--id <id>",
-      "Unique account id (default: <provider>-<epoch>)",
-    )
+    .option("--id <id>", "Unique account id (default: <provider>-<epoch>)")
     .option(
       "--from-credentials",
       "Read access token from the CLI's local config file (~/.claude/.credentials.json " +
@@ -7291,7 +7498,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Custom config directory to read credentials from (used with --from-credentials).",
     )
     .action(
-      (opts: { provider: string; label: string; id?: string; fromCredentials?: boolean; configDir?: string }) => {
+      (opts: {
+        provider: string;
+        label: string;
+        id?: string;
+        fromCredentials?: boolean;
+        configDir?: string;
+      }) => {
         const provider = opts.provider as AccountProvider;
         if (provider !== "claude-code" && provider !== "codex") {
           process.stderr.write(
@@ -7364,19 +7577,29 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       const hasConfigDir = accounts.some((a) => a.configDir !== undefined);
-      const header = ["ID", "PROVIDER", "LABEL", "QUOTA", "ENROLLED"]
-        .concat(hasConfigDir ? ["CONFIG-DIR"] : []);
+      const header = ["ID", "PROVIDER", "LABEL", "QUOTA", "ENROLLED"].concat(
+        hasConfigDir ? ["CONFIG-DIR"] : [],
+      );
       const rows = accounts.map((a) => {
         const quota = a.exhausted
           ? `QUOTA_EXCEEDED (resets ${(a.quotaResetsAt ?? "?").slice(0, 19)})${a.exhaustionReason ? ` [${a.exhaustionReason}]` : ""}`
           : "ok";
-        return [a.id, a.provider, a.label, quota, a.enrolledAt.slice(0, 19)]
-          .concat(hasConfigDir ? [a.configDir ?? ""] : []);
+        return [
+          a.id,
+          a.provider,
+          a.label,
+          quota,
+          a.enrolledAt.slice(0, 19),
+        ].concat(hasConfigDir ? [a.configDir ?? ""] : []);
       });
       const widths = header.map((h, i) =>
         Math.max(h.length, ...rows.map((r) => r[i]!.length)),
       );
-      const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd();
+      const line = (cols: string[]) =>
+        cols
+          .map((c, i) => c.padEnd(widths[i]!))
+          .join("  ")
+          .trimEnd();
       process.stdout.write([line(header), ...rows.map(line)].join("\n") + "\n");
     });
 
@@ -7405,16 +7628,23 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       'Exhaustion window: "5h" (default), "week" (7d), or a raw number of hours.',
       "5h",
     )
-    .option("--reason <reason>", "Optional reason label (e.g. \"429 rate-limit\")")
+    .option(
+      "--reason <reason>",
+      'Optional reason label (e.g. "429 rate-limit")',
+    )
     .action((id: string, opts: { window?: string; reason?: string }) => {
       const windowMs = (() => {
         if (!opts.window || opts.window === "5h") return QUOTA_WINDOW_5H_MS;
         if (opts.window === "week") return QUOTA_WINDOW_WEEK_MS;
         const h = Number(opts.window.replace(/h$/i, ""));
-        return Number.isFinite(h) && h > 0 ? h * 60 * 60 * 1_000 : QUOTA_WINDOW_5H_MS;
+        return Number.isFinite(h) && h > 0
+          ? h * 60 * 60 * 1_000
+          : QUOTA_WINDOW_5H_MS;
       })();
       const rec = markExhausted(id, windowMs, opts.reason);
-      const resetsAt = new Date(new Date(rec.exhaustedAt).getTime() + windowMs).toISOString();
+      const resetsAt = new Date(
+        new Date(rec.exhaustedAt).getTime() + windowMs,
+      ).toISOString();
       process.stderr.write(
         `[remote] account ${id} marked exhausted — resets at ${resetsAt}` +
           (opts.reason ? ` (reason: ${opts.reason})` : "") +
@@ -7430,7 +7660,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
     )
     .action((id: string) => {
       clearExhaustion(id);
-      process.stderr.write(`[remote] account ${id} quota cleared — available for selection\n`);
+      process.stderr.write(
+        `[remote] account ${id} quota cleared — available for selection\n`,
+      );
     });
 
   accountCommand
@@ -7439,50 +7671,87 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "Dry-run: show which account selectAccount() would pick for a new session " +
         "(round-robin, no I/O, stub planner).",
     )
-    .option("--provider <provider>", "Filter by provider (required with --fallback)")
-    .option("--last-used <id>", "Pretend this account was used last (simple round-robin only)")
+    .option(
+      "--provider <provider>",
+      "Filter by provider (required with --fallback)",
+    )
+    .option(
+      "--last-used <id>",
+      "Pretend this account was used last (simple round-robin only)",
+    )
     .option(
       "--fallback",
       "Use selectAccountWithFallback() — quota-aware, cross-provider fallback — instead of plain round-robin. Requires --provider.",
     )
-    .option("--affinity-key <key>", "Sticky-binding key to test (used with --fallback, e.g. a job id)")
-    .action((opts: { provider?: string; lastUsed?: string; fallback?: boolean; affinityKey?: string }) => {
-      if (opts.fallback) {
-        if (!opts.provider || (opts.provider !== "claude-code" && opts.provider !== "codex")) {
-          process.stderr.write("[remote] account select --fallback requires --provider claude-code|codex\n");
-          process.exitCode = 1;
+    .option(
+      "--affinity-key <key>",
+      "Sticky-binding key to test (used with --fallback, e.g. a job id)",
+    )
+    .action(
+      (opts: {
+        provider?: string;
+        lastUsed?: string;
+        fallback?: boolean;
+        affinityKey?: string;
+      }) => {
+        if (opts.fallback) {
+          if (
+            !opts.provider ||
+            (opts.provider !== "claude-code" && opts.provider !== "codex")
+          ) {
+            process.stderr.write(
+              "[remote] account select --fallback requires --provider claude-code|codex\n",
+            );
+            process.exitCode = 1;
+            return;
+          }
+          const provider = opts.provider as AccountProvider;
+          const sel = selectAccountWithFallback(provider, opts.affinityKey);
+          if (!sel.candidate) {
+            process.stderr.write(
+              "[remote] account select: all accounts exhausted — no usable account available\n",
+            );
+            process.exitCode = 1;
+            return;
+          }
+          const { accessToken: _t, ...desc } = sel.candidate;
+          const crossProvider =
+            "crossProvider" in sel ? sel.crossProvider : false;
+          const originalProvider =
+            "originalProvider" in sel ? sel.originalProvider : undefined;
+          process.stdout.write(
+            JSON.stringify(
+              {
+                selected: desc,
+                crossProvider,
+                ...(originalProvider !== undefined ? { originalProvider } : {}),
+              },
+              null,
+              2,
+            ) + "\n",
+          );
           return;
         }
-        const provider = opts.provider as AccountProvider;
-        const sel = selectAccountWithFallback(provider, opts.affinityKey);
-        if (!sel.candidate) {
-          process.stderr.write("[remote] account select: all accounts exhausted — no usable account available\n");
-          process.exitCode = 1;
-          return;
-        }
-        const { accessToken: _t, ...desc } = sel.candidate;
-        const crossProvider = "crossProvider" in sel ? sel.crossProvider : false;
-        const originalProvider = "originalProvider" in sel ? sel.originalProvider : undefined;
-        process.stdout.write(
-          JSON.stringify({
-            selected: desc,
-            crossProvider,
-            ...(originalProvider !== undefined ? { originalProvider } : {}),
-          }, null, 2) + "\n",
+        const provider = opts.provider as AccountProvider | undefined;
+        const candidates = loadCandidates(provider).map(
+          ({ accessToken: _t, ...d }) => d,
         );
-        return;
-      }
-      const provider = opts.provider as AccountProvider | undefined;
-      const candidates = loadCandidates(provider).map(({ accessToken: _t, ...d }) => d);
-      const pick = selectAccount(candidates, opts.lastUsed);
-      if (!pick) {
-        process.stderr.write("[remote] account select: no candidates available\n");
-        return;
-      }
-      process.stdout.write(
-        JSON.stringify({ selected: pick, totalCandidates: candidates.length }, null, 2) + "\n",
-      );
-    });
+        const pick = selectAccount(candidates, opts.lastUsed);
+        if (!pick) {
+          process.stderr.write(
+            "[remote] account select: no candidates available\n",
+          );
+          return;
+        }
+        process.stdout.write(
+          JSON.stringify(
+            { selected: pick, totalCandidates: candidates.length },
+            null,
+            2,
+          ) + "\n",
+        );
+      },
+    );
 
   accountCommand
     .command("log")
@@ -7498,66 +7767,97 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         "If omitted, reads REMOTE_ACCOUNT_LOG_S3 from the environment. " +
         "Also reads AWS_ENDPOINT_URL (SCW: https://s3.fr-par.scw.cloud), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.",
     )
-    .action(async (opts: { last?: string; json?: boolean; exportS3?: string | boolean }) => {
-      if (opts.exportS3 !== undefined) {
-        const uri = typeof opts.exportS3 === "string" ? opts.exportS3 : process.env.REMOTE_ACCOUNT_LOG_S3;
-        if (!uri) {
-          process.stderr.write("[remote] account log --export-s3: no S3 URI provided and REMOTE_ACCOUNT_LOG_S3 is not set\n");
-          process.exit(1);
+    .action(
+      async (opts: {
+        last?: string;
+        json?: boolean;
+        exportS3?: string | boolean;
+      }) => {
+        if (opts.exportS3 !== undefined) {
+          const uri =
+            typeof opts.exportS3 === "string"
+              ? opts.exportS3
+              : process.env.REMOTE_ACCOUNT_LOG_S3;
+          if (!uri) {
+            process.stderr.write(
+              "[remote] account log --export-s3: no S3 URI provided and REMOTE_ACCOUNT_LOG_S3 is not set\n",
+            );
+            process.exit(1);
+          }
+          try {
+            await exportSessionLogToS3(uri);
+            process.stdout.write(`[remote] session log exported to ${uri}\n`);
+          } catch (err) {
+            process.stderr.write(
+              `[remote] account log --export-s3: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+            process.exit(1);
+          }
+          return;
         }
+        const logFile = sessionLogPath();
+        let raw: string;
         try {
-          await exportSessionLogToS3(uri);
-          process.stdout.write(`[remote] session log exported to ${uri}\n`);
-        } catch (err) {
-          process.stderr.write(`[remote] account log --export-s3: ${err instanceof Error ? err.message : String(err)}\n`);
-          process.exit(1);
+          raw = readFileSync(logFile, "utf8");
+        } catch {
+          process.stderr.write(
+            "[remote] account log: no session log yet (no jobs launched with accounts enrolled)\n",
+          );
+          return;
         }
-        return;
-      }
-      const logFile = sessionLogPath();
-      let raw: string;
-      try {
-        raw = readFileSync(logFile, "utf8");
-      } catch {
-        process.stderr.write("[remote] account log: no session log yet (no jobs launched with accounts enrolled)\n");
-        return;
-      }
-      const lines = raw.split("\n").filter(Boolean);
-      const n = opts.last !== undefined ? Number.parseInt(opts.last, 10) : 20;
-      const tail = Number.isFinite(n) && n > 0 ? lines.slice(-n) : lines;
-      if (opts.json) {
-        process.stdout.write(tail.join("\n") + "\n");
-        return;
-      }
-      if (tail.length === 0) {
-        process.stderr.write("[remote] account log: empty\n");
-        return;
-      }
-      process.stdout.write(
-        ["AT                       KIND      JOB-ID           ACCOUNT-LABEL    NOTE"]
-          .concat(
-            tail.map((line) => {
-              try {
-                const e = JSON.parse(line) as { at: string; kind?: string; jobId: string; preferredProvider: string; selectedProvider: string; accountLabel: string; crossProvider: boolean; signature?: string };
-                const kind = e.kind ?? "launch";
-                const note = kind === "exhaust"
-                  ? `throttled (${e.signature ?? "rate-limit"})`
-                  : (e.crossProvider ? `⚠ fallback ${e.preferredProvider}→${e.selectedProvider}` : "");
-                return [
-                  (e.at ?? "").slice(0, 23).padEnd(24),
-                  kind.padEnd(9),
-                  (e.jobId ?? "").slice(0, 16).padEnd(17),
-                  (e.accountLabel ?? "").slice(0, 16).padEnd(17),
-                  note,
-                ].join(" ").trimEnd();
-              } catch {
-                return line;
-              }
-            }),
-          )
-          .join("\n") + "\n",
-      );
-    });
+        const lines = raw.split("\n").filter(Boolean);
+        const n = opts.last !== undefined ? Number.parseInt(opts.last, 10) : 20;
+        const tail = Number.isFinite(n) && n > 0 ? lines.slice(-n) : lines;
+        if (opts.json) {
+          process.stdout.write(tail.join("\n") + "\n");
+          return;
+        }
+        if (tail.length === 0) {
+          process.stderr.write("[remote] account log: empty\n");
+          return;
+        }
+        process.stdout.write(
+          [
+            "AT                       KIND      JOB-ID           ACCOUNT-LABEL    NOTE",
+          ]
+            .concat(
+              tail.map((line) => {
+                try {
+                  const e = JSON.parse(line) as {
+                    at: string;
+                    kind?: string;
+                    jobId: string;
+                    preferredProvider: string;
+                    selectedProvider: string;
+                    accountLabel: string;
+                    crossProvider: boolean;
+                    signature?: string;
+                  };
+                  const kind = e.kind ?? "launch";
+                  const note =
+                    kind === "exhaust"
+                      ? `throttled (${e.signature ?? "rate-limit"})`
+                      : e.crossProvider
+                        ? `⚠ fallback ${e.preferredProvider}→${e.selectedProvider}`
+                        : "";
+                  return [
+                    (e.at ?? "").slice(0, 23).padEnd(24),
+                    kind.padEnd(9),
+                    (e.jobId ?? "").slice(0, 16).padEnd(17),
+                    (e.accountLabel ?? "").slice(0, 16).padEnd(17),
+                    note,
+                  ]
+                    .join(" ")
+                    .trimEnd();
+                } catch {
+                  return line;
+                }
+              }),
+            )
+            .join("\n") + "\n",
+        );
+      },
+    );
 
   accountCommand
     .command("rm-binding <affinityKey>")
@@ -7574,8 +7874,12 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
       clearBinding(affinityKey);
       const accounts = listAccounts();
-      const label = accounts.find((a) => a.id === existing.accountId)?.label ?? existing.accountId.slice(0, 8);
-      process.stderr.write(`[remote] binding removed: ${affinityKey} → ${label} (${existing.provider})\n`);
+      const label =
+        accounts.find((a) => a.id === existing.accountId)?.label ??
+        existing.accountId.slice(0, 8);
+      process.stderr.write(
+        `[remote] binding removed: ${affinityKey} → ${label} (${existing.provider})\n`,
+      );
     });
 
   accountCommand
@@ -7592,17 +7896,32 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         return;
       }
       if (bindings.length === 0) {
-        process.stderr.write("[remote] no active bindings (no jobs launched with accounts enrolled)\n");
+        process.stderr.write(
+          "[remote] no active bindings (no jobs launched with accounts enrolled)\n",
+        );
         return;
       }
       const accounts = listAccounts();
       const header = ["AFFINITY-KEY", "PROVIDER", "ACCOUNT-LABEL", "BOUND-AT"];
       const rows = bindings.map((b) => {
-        const label = accounts.find((a) => a.id === b.accountId)?.label ?? b.accountId.slice(0, 8);
-        return [b.affinityKey.slice(0, 20), b.provider, label, b.boundAt.slice(0, 19)];
+        const label =
+          accounts.find((a) => a.id === b.accountId)?.label ??
+          b.accountId.slice(0, 8);
+        return [
+          b.affinityKey.slice(0, 20),
+          b.provider,
+          label,
+          b.boundAt.slice(0, 19),
+        ];
       });
-      const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
-      const line = (cols: string[]) => cols.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd();
+      const widths = header.map((h, i) =>
+        Math.max(h.length, ...rows.map((r) => r[i]!.length)),
+      );
+      const line = (cols: string[]) =>
+        cols
+          .map((c, i) => c.padEnd(widths[i]!))
+          .join("  ")
+          .trimEnd();
       process.stdout.write([line(header), ...rows.map(line)].join("\n") + "\n");
     });
 
@@ -7628,7 +7947,10 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "llm-gateway-accounts",
     )
     .option("--dry-run", "Print the YAML to stdout instead of applying it")
-    .option("--json", "Print the accounts JSON only (no kubectl — for debugging)")
+    .option(
+      "--json",
+      "Print the accounts JSON only (no kubectl — for debugging)",
+    )
     .action(
       async (opts: {
         namespace: string;
@@ -7699,70 +8021,123 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   const llmMeshCommand = program
     .command("llm-mesh")
-    .description("Manage the local LLM gateway (solo-dev mesh: multi-account, cross-provider fallback)");
+    .description(
+      "Manage the local LLM gateway (solo-dev mesh: multi-account, cross-provider fallback)",
+    );
 
   llmMeshCommand
     .command("enroll <provider>")
     .description(
       "Enroll a local LLM provider account.\n" +
-      "  Providers:\n" +
-      "    codex     — import OAuth tokens from local Codex CLI installation (~/.codex/auth.json)\n" +
-      "    openai    — register an OpenAI API key (sk-...) via --token",
+        "  Providers:\n" +
+        "    codex     — import OAuth tokens from local Codex CLI installation (~/.codex/auth.json)\n" +
+        "    openai    — register an OpenAI API key (sk-...) via --token\n" +
+        "    anthropic — register an Anthropic API key (sk-ant-api...) via --token",
     )
-    .option("--from-local", "import credentials from the local provider CLI installation (codex: reads ~/.codex/auth.json)")
-    .option("--token <value>", "API key or bearer token to enroll manually (openai: sk-...)")
+    .option(
+      "--from-local",
+      "import credentials from the local provider CLI installation",
+    )
+    .option("--token <value>", "API key to enroll manually")
     .option("--label <label>", "human-readable label for this account")
     .option("--id <id>", "account id (default: derived from provider)")
-    .action(async (provider: string, opts: { fromLocal?: boolean; token?: string; label?: string; id?: string }) => {
-      let account;
-      if (provider === "codex") {
-        // Reads ~/.codex/auth.json: OAuth JWT (chatgpt_plan_type: pro).
-        // NOTE: this token works with the Codex CLI app-server (local) but NOT with
-        // api.openai.com Chat Completions (missing model.request scope).
-        // For a working gateway proxy, use `enroll openai --token sk-...` instead.
-        account = enrollCodexAccount();
-      } else if (provider === "openai") {
-        if (!opts.token) {
+    .action(
+      async (
+        provider: string,
+        opts: {
+          fromLocal?: boolean;
+          token?: string;
+          label?: string;
+          id?: string;
+        },
+      ) => {
+        let account;
+        if (provider === "claude") {
           process.stderr.write(
-            `[remote] llm-mesh: --token <sk-...> is required for provider "openai"\n` +
-            `  Example: remote llm-mesh enroll openai --token sk-proj-...\n`,
+            `[remote] llm-mesh: Claude Code OAuth is not a supported upstream transport yet.\n` +
+              `  Do not import ~/.claude/.credentials.json as an Anthropic API credential.\n` +
+              `  Use the existing gateway token with codex/openai, or enroll a real Anthropic API key via:\n` +
+              `  remote llm-mesh enroll anthropic --token sk-ant-api...\n`,
+          );
+          process.exitCode = 1;
+          return;
+        } else if (provider === "codex") {
+          // Reads ~/.codex/auth.json: OAuth JWT (chatgpt_plan_type: pro).
+          // NOTE: this token works with the Codex CLI app-server (local) but NOT with
+          // api.openai.com Chat Completions (missing model.request scope).
+          // For a working gateway proxy, use `enroll openai --token sk-...` instead.
+          account = enrollCodexAccount();
+        } else if (provider === "openai") {
+          if (!opts.token) {
+            process.stderr.write(
+              `[remote] llm-mesh: --token <sk-...> is required for provider "openai"\n` +
+                `  Example: remote llm-mesh enroll openai --token sk-proj-...\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          account = {
+            id: opts.id ?? "openai-1",
+            provider: "openai" as const,
+            label: opts.label ?? "OpenAI (API key)",
+            token: opts.token,
+          };
+        } else if (provider === "anthropic") {
+          if (!opts.token) {
+            process.stderr.write(
+              `[remote] llm-mesh: --token <sk-ant-api...> is required for provider "anthropic"\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          if (opts.token.startsWith("sk-ant-oat")) {
+            process.stderr.write(
+              `[remote] llm-mesh: refused Claude Code OAuth token for provider "anthropic".\n` +
+                `  Claude Code OAuth uses a separate Claude Code transport, not Anthropic /v1/messages.\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          account = {
+            id: opts.id ?? "anthropic-1",
+            provider: "anthropic" as const,
+            label: opts.label ?? "Anthropic (API key)",
+            token: opts.token,
+          };
+        } else {
+          process.stderr.write(
+            `[remote] llm-mesh: unsupported provider "${provider}".\n` +
+              `  Supported: codex (OAuth), openai (API key), anthropic (API key)\n`,
           );
           process.exitCode = 1;
           return;
         }
-        account = {
-          id: opts.id ?? "openai-1",
-          provider: "openai" as const,
-          label: opts.label ?? "OpenAI (API key)",
-          token: opts.token,
-        };
-      } else {
-        process.stderr.write(
-          `[remote] llm-mesh: unsupported provider "${provider}".\n` +
-          `  Supported: codex (OAuth, local-only), openai (API key, gateway-ready)\n`,
-        );
-        process.exitCode = 1;
-        return;
-      }
-      const existing = readLlmMeshConfig() ?? { accounts: [] };
-      const accounts = existing.accounts.filter((a) => a.id !== account.id);
-      accounts.push(account);
-      writeLlmMeshConfig({ ...existing, accounts });
-      process.stdout.write(`[remote] llm-mesh: enrolled ${account.label} (id: ${account.id}, provider: ${account.provider})\n`);
-      if ("expiresAt" in account && account.expiresAt) {
-        const exp = new Date(account.expiresAt as string);
-        const minsLeft = Math.round((exp.getTime() - Date.now()) / 60_000);
-        process.stdout.write(`[remote] llm-mesh: token expires ${account.expiresAt} (${minsLeft > 0 ? `in ${minsLeft}min` : "EXPIRED"})\n`);
-      }
-      if (provider === "codex") {
+        const existing = readLlmMeshConfig() ?? { accounts: [] };
+        const accounts = existing.accounts.filter((a) => a.id !== account.id);
+        accounts.push(account);
+        writeLlmMeshConfig({ ...existing, accounts });
         process.stdout.write(
-          `[remote] NOTE: Codex OAuth token works locally via codex app-server,\n` +
-          `  but NOT with api.openai.com (missing model.request scope).\n` +
-          `  For a fully working gateway, use: remote llm-mesh enroll openai --token sk-...\n`,
+          `[remote] llm-mesh: enrolled ${account.label} (id: ${account.id}, provider: ${account.provider})\n`,
         );
-      }
-      process.stdout.write(`[remote] Run \`remote llm-mesh start\` to launch the gateway.\n`);
-    });
+        if ("expiresAt" in account && account.expiresAt) {
+          const exp = new Date(account.expiresAt as string);
+          const minsLeft = Math.round((exp.getTime() - Date.now()) / 60_000);
+          process.stdout.write(
+            `[remote] llm-mesh: token expires ${account.expiresAt} (${minsLeft > 0 ? `in ${minsLeft}min` : "EXPIRED"})\n`,
+          );
+        }
+        if (provider === "codex") {
+          process.stdout.write(
+            `[remote] NOTE: Codex OAuth token works locally via codex app-server,\n` +
+              `  but NOT with api.openai.com (missing model.request scope).\n` +
+              `  For a fully working gateway, use: remote llm-mesh enroll openai --token sk-...\n`,
+          );
+        }
+        process.stdout.write(
+          `[remote] Run \`remote llm-mesh start\` to launch the gateway.\n`,
+        );
+      },
+    );
 
   llmMeshCommand
     .command("start")
@@ -7780,7 +8155,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const existing = readGatewayPid();
       if (existing) {
         setLlmMeshRuntimeConfig({ enabled: true });
-        process.stdout.write(`[remote] llm-mesh: already running (pid ${existing})\n`);
+        process.stdout.write(
+          `[remote] llm-mesh: already running (pid ${existing})\n`,
+        );
         process.stdout.write(`[remote] llm-mesh: restore config enabled\n`);
         return;
       }
@@ -7788,27 +8165,41 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const result = await startGateway(config, { verbose: opts.verbose });
       setLlmMeshRuntimeConfig({ enabled: true });
       const port = result.port;
-      process.stdout.write(`[remote] llm-mesh: gateway started (pid ${result.pid}, port ${port})\n`);
+      process.stdout.write(
+        `[remote] llm-mesh: gateway started (pid ${result.pid}, port ${port})\n`,
+      );
       process.stdout.write(`[remote] llm-mesh: restore config enabled\n`);
       process.stdout.write(`\nTo use with Claude Code:\n`);
-      process.stdout.write(`  export ANTHROPIC_BASE_URL=http://localhost:${port}\n`);
-      process.stdout.write(`  export ANTHROPIC_AUTH_TOKEN=${result.gatewayToken}\n`);
+      process.stdout.write(
+        `  export ANTHROPIC_BASE_URL=http://localhost:${port}\n`,
+      );
+      process.stdout.write(
+        `  export ANTHROPIC_AUTH_TOKEN=${result.gatewayToken}\n`,
+      );
     });
 
   llmMeshCommand
     .command("enable")
-    .description("Enable llm-mesh auto-reactivation for local sessions and remote restore")
+    .description(
+      "Enable llm-mesh auto-reactivation for local sessions and remote restore",
+    )
     .action(() => {
       setLlmMeshRuntimeConfig({ enabled: true });
-      process.stdout.write(`[remote] llm-mesh: restore/local auto-reactivation enabled\n`);
+      process.stdout.write(
+        `[remote] llm-mesh: restore/local auto-reactivation enabled\n`,
+      );
     });
 
   llmMeshCommand
     .command("disable")
-    .description("Disable llm-mesh auto-reactivation for local sessions and remote restore")
+    .description(
+      "Disable llm-mesh auto-reactivation for local sessions and remote restore",
+    )
     .action(() => {
       setLlmMeshRuntimeConfig({ enabled: false });
-      process.stdout.write(`[remote] llm-mesh: restore/local auto-reactivation disabled\n`);
+      process.stdout.write(
+        `[remote] llm-mesh: restore/local auto-reactivation disabled\n`,
+      );
     });
 
   llmMeshCommand
@@ -7825,7 +8216,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   llmMeshCommand
     .command("restart")
-    .description("Restart only the local LLM gateway; never restarts tmux/Claude sessions")
+    .description(
+      "Restart only the local LLM gateway; never restarts tmux/Claude sessions",
+    )
     .option("-v, --verbose", "verbose output")
     .action(async (opts: { verbose?: boolean }) => {
       const config = readLlmMeshConfig();
@@ -7838,7 +8231,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       }
       const stopped = stopGateway();
       if (stopped.stopped) {
-        process.stdout.write(`[remote] llm-mesh: stopped gateway (pid ${stopped.pid})\n`);
+        process.stdout.write(
+          `[remote] llm-mesh: stopped gateway (pid ${stopped.pid})\n`,
+        );
       } else {
         process.stdout.write(`[remote] llm-mesh: gateway was not running\n`);
       }
@@ -7853,9 +8248,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         `[remote] llm-mesh: no tmux/Claude session was restarted; active sessions may keep their old gateway token until explicitly relaunched.\n`,
       );
       process.stdout.write(`\nTo use with new Claude Code processes:\n`);
-      process.stdout.write(`  export ANTHROPIC_BASE_URL=http://localhost:${result.port}\n`);
-      process.stdout.write(`  export ANTHROPIC_AUTH_TOKEN=${result.gatewayToken}\n`);
-      process.stdout.write(`  export ANTHROPIC_API_KEY=${result.gatewayToken}\n`);
+      process.stdout.write(
+        `  export ANTHROPIC_BASE_URL=http://localhost:${result.port}\n`,
+      );
+      process.stdout.write(
+        `  export ANTHROPIC_AUTH_TOKEN=${result.gatewayToken}\n`,
+      );
+      process.stdout.write(
+        `  export ANTHROPIC_API_KEY=${result.gatewayToken}\n`,
+      );
     });
 
   llmMeshCommand
@@ -7867,7 +8268,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       const pid = readGatewayPid();
       const port = config?.port ?? 3002;
       if (pid) {
-        process.stdout.write(`[remote] llm-mesh: running (pid ${pid}, port ${port})\n`);
+        process.stdout.write(
+          `[remote] llm-mesh: running (pid ${pid}, port ${port})\n`,
+        );
       } else {
         process.stdout.write(`[remote] llm-mesh: stopped\n`);
       }
@@ -7880,12 +8283,19 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           if (acc.expiresAt) {
             const exp = new Date(acc.expiresAt);
             const mins = Math.round((exp.getTime() - Date.now()) / 60_000);
-            status = mins > 0 ? `expires in ${mins}min` : `EXPIRED ${Math.abs(mins)}min ago`;
+            status =
+              mins > 0
+                ? `expires in ${mins}min`
+                : `EXPIRED ${Math.abs(mins)}min ago`;
           }
-          process.stdout.write(`  account: ${acc.label} (${acc.provider}) — ${status}\n`);
+          process.stdout.write(
+            `  account: ${acc.label} (${acc.provider}) — ${status}\n`,
+          );
         }
       } else {
-        process.stdout.write(`  no config. Run \`remote llm-mesh enroll codex\` first.\n`);
+        process.stdout.write(
+          `  no config. Run \`remote llm-mesh enroll codex\` first.\n`,
+        );
       }
     });
 
@@ -7900,7 +8310,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         stdio: "inherit",
       });
       if (tail.error) {
-        process.stderr.write(`[remote] llm-mesh: log tail failed: ${String(tail.error)}\n`);
+        process.stderr.write(
+          `[remote] llm-mesh: log tail failed: ${String(tail.error)}\n`,
+        );
         process.exitCode = 1;
       }
     });

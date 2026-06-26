@@ -41,19 +41,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# tmux config for deported sessions. mouse ON: the wheel scrolls the pane's 50k
-# history (copy-mode) = the conversation. This works because `remote attach`
-# now exec's the tmux client straight into the Pod, so tmux's mouse-enable
-# escape reaches the user's terminal (the legacy WS proxy swallowed it at pod
-# start — wheel fell back to arrow keys cycling the CLI's input history, which
-# is what "scrolling scrolls the input history" was). mouse off is no better:
-# tmux holds the host terminal in alt-screen, so there is no host scrollback to
-# scroll. Copy: Shift+drag = native selection; set-clipboard keeps OSC52.
+# tmux config for deported sessions. Keep this aligned with the proven old-PC
+# baseline used by Antoine's local remote sessions: tmux owns the wheel, enters
+# copy-mode on first wheel-up, preserves OSC title forwarding, and keeps a large
+# scrollback history.
 RUN printf '%s\n' \
+        'set -g allow-passthrough on' \
         'set -g history-limit 50000' \
+        'set -g default-terminal "tmux-256color"' \
+        'set -ga terminal-overrides ",*256col*:Tc,xterm*:Tc,gnome*:Tc"' \
         'set -g set-clipboard on' \
         'set -g mouse on' \
         'set -g focus-events on' \
+        'set -g set-titles on' \
+        'set -g set-titles-string "#{pane_title}"' \
+        'set -g status-interval 1' \
+        'setw -g automatic-rename on' \
+        'setw -g automatic-rename-format "#{?pane_title,#{pane_title},#{pane_current_command}}"' \
+        'setw -g allow-rename off' \
         "set -g status-right '#[fg=green]remote#[default]'" \
         'bind -n WheelUpPane if -Ft= "#{pane_in_mode}" "send-keys -M" "copy-mode -e; send-keys -M"' \
         'bind -n WheelDownPane send-keys -M' \

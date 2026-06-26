@@ -12,6 +12,8 @@
  */
 
 import { spawnSync } from "node:child_process";
+
+import { getTmuxProfileConfig } from "./config.js";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
@@ -141,17 +143,28 @@ export function localSessionName(slug: string): string {
   return slug.startsWith(LOCAL_PREFIX) ? slug : `${LOCAL_PREFIX}${slug}`;
 }
 
+const ANTHROPIC_ENV_KEYS = [
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+] as const;
+
 function tmuxEnvironmentArgs(): string[] {
   const args: string[] = [];
-  for (const key of [
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-  ] as const) {
+  for (const key of ANTHROPIC_ENV_KEYS) {
     const value = process.env[key];
     if (value) args.push("-e", `${key}=${value}`);
   }
   return args;
+}
+
+function anthopicEnvUnsetCommandPrefix(): string[] {
+  // tmux sessions inherit the tmux *server* environment too. If remote deliberately
+  // launches direct/default with no Anthropic env in its own process, scrub stale
+  // gateway/API-key variables that an older tmux server may still carry.
+  return ANTHROPIC_ENV_KEYS.some((key) => Boolean(process.env[key]))
+    ? []
+    : ["env", ...ANTHROPIC_ENV_KEYS.flatMap((key) => ["-u", key])];
 }
 
 function expandHome(p: string): string {
@@ -292,18 +305,17 @@ function detectClipboardCommand(): string | undefined {
  */
 export function buildTmuxGlobalOptions(
   clip: string | undefined,
+  profile = "remote",
 ): Array<ReadonlyArray<string>> {
   const cmds: Array<ReadonlyArray<string>> = [
+    // Mark this server as remote-managed so diagnostics can tell user config
+    // apart from the embedded profile remote applies idempotently.
+    ["set", "-g", "@remote_profile", profile],
     // Match the proven old-PC tmux baseline used by Antoine's remote sessions.
     ["set", "-g", "allow-passthrough", "on"],
     ["set", "-g", "history-limit", "50000"],
     ["set", "-g", "default-terminal", "tmux-256color"],
-    [
-      "set",
-      "-g",
-      "terminal-overrides",
-      ",*256col*:Tc,xterm*:Tc,gnome*:Tc",
-    ],
+    ["set", "-g", "terminal-overrides", ",*256col*:Tc,xterm*:Tc,gnome*:Tc"],
     ["set", "-g", "mouse", "on"],
     ["set", "-g", "set-clipboard", "on"],
     ["set", "-g", "focus-events", "on"],
@@ -398,8 +410,10 @@ export function buildCodexImagePasteBinding(): ReadonlyArray<string> {
  * the agent's live title. Global, idempotent, applied at every run/attach so it
  * works even without ~/.tmux.conf.
  */
-export function ensureScrollConfig(): void {
-  const cmds = buildTmuxGlobalOptions(detectClipboardCommand());
+export function ensureScrollConfig(
+  profile = getTmuxProfileConfig().profile,
+): void {
+  const cmds = buildTmuxGlobalOptions(detectClipboardCommand(), profile);
   for (const args of cmds) {
     // Best-effort: no server yet / old tmux must never fail the caller.
     spawnSync(TMUX, [...args], { stdio: "ignore" });
@@ -418,10 +432,11 @@ export function startLocalSession(
   cwd: string,
   args: ReadonlyArray<string> = [],
   label?: string,
+  tmuxProfile = "remote",
 ): StartLocalResult {
   const slug = slugify(label ?? cwd);
   const name = localSessionName(slug);
-  ensureScrollConfig();
+  ensureScrollConfig(tmuxProfile);
   if (findLocalSession(name)) {
     persistAgentPaneMetadata(name, profile, cwd);
     return { name, slug };
@@ -442,6 +457,7 @@ export function startLocalSession(
       profile,
       "-c",
       cwd,
+      ...anthopicEnvUnsetCommandPrefix(),
       "/bin/bash",
       "-lc",
       LOCAL_WRAPPER,
@@ -477,10 +493,11 @@ export function startHeadlessSession(
   resultJson: string,
   outputLog: string,
   label: string,
+  tmuxProfile = "remote",
 ): StartLocalResult {
   const slug = slugify(label);
   const name = localSessionName(slug);
-  ensureScrollConfig();
+  ensureScrollConfig(tmuxProfile);
   if (findLocalSession(name)) return { name, slug };
 
   const r = spawnSync(
@@ -901,11 +918,9 @@ export function localSessionGatewayEnvStatus(
   name: string,
   expected: { baseUrl: string; authToken: string },
 ): LocalSessionGatewayEnvStatus {
-  const disp = spawnSync(
-    TMUX,
-    ["display", "-p", "-t", name, "#{pane_pid}"],
-    { encoding: "utf8" },
-  );
+  const disp = spawnSync(TMUX, ["display", "-p", "-t", name, "#{pane_pid}"], {
+    encoding: "utf8",
+  });
   if (disp.status !== 0 || !disp.stdout) return "unknown";
   const panePid = Number.parseInt(disp.stdout.trim(), 10);
   if (!Number.isInteger(panePid) || panePid <= 0) return "unknown";

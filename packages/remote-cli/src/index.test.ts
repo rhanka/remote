@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-const SCRATCH_ROOT = join(import.meta.dirname ?? process.cwd(), "..", ".test-scratch", "index-test");
+const SCRATCH_ROOT = join(
+  import.meta.dirname ?? process.cwd(),
+  "..",
+  ".test-scratch",
+  "index-test",
+);
 mkdirSync(SCRATCH_ROOT, { recursive: true });
 
 const createRemoteSession = vi.fn();
@@ -60,7 +65,10 @@ vi.mock("./config.js", () => ({
   setDefaultTools: () => {},
   getPlugins: () => [],
   setPlugins: () => {},
-  getH2aConfig: () => ({ enabled: false, command: "h2a mcp-serve --wake local-tmux" }),
+  getH2aConfig: () => ({
+    enabled: false,
+    command: "h2a mcp-serve --wake local-tmux",
+  }),
   setH2aConfig: () => {},
   getLayoutConfig: () => ({
     maxAgeHours: 48,
@@ -71,6 +79,8 @@ vi.mock("./config.js", () => ({
   }),
   getLlmMeshRuntimeConfig: () => ({ enabled: false }),
   setLlmMeshRuntimeConfig: () => {},
+  getTmuxProfileConfig: () => ({ profile: "remote" }),
+  setTmuxProfileConfig: () => {},
   DEFAULT_SESSION_TARGET: "scaleway-kapsule",
   authHeaders: () => ({}),
   resolveConfigPath: () => "/tmp/remote-cli-test-config.json",

@@ -12,6 +12,8 @@ import {
   setH2aConfig,
   getLlmMeshRuntimeConfig,
   setLlmMeshRuntimeConfig,
+  getTmuxProfileConfig,
+  setTmuxProfileConfig,
   getMaxConcurrent,
   setMaxConcurrent,
   readRemoteConfig,
@@ -142,6 +144,24 @@ describe("llm-mesh runtime config", () => {
     setLlmMeshRuntimeConfig({ enabled: "yes" } as never);
     expect(readRemoteConfig().llmMesh).toBeUndefined();
     expect(getLlmMeshRuntimeConfig()).toEqual({ enabled: false });
+  });
+});
+
+describe("tmux profile config", () => {
+  it("defaults to the embedded remote tmux profile", () => {
+    expect(getTmuxProfileConfig()).toEqual({ profile: "remote" });
+  });
+
+  it("round-trips a custom profile name", () => {
+    setTmuxProfileConfig({ profile: "old-pc" });
+    expect(getTmuxProfileConfig()).toEqual({ profile: "old-pc" });
+    expect(readRemoteConfig().tmux).toEqual({ profile: "old-pc" });
+  });
+
+  it("ignores malformed config", () => {
+    setTmuxProfileConfig({ profile: 42 } as never);
+    expect(readRemoteConfig().tmux).toBeUndefined();
+    expect(getTmuxProfileConfig()).toEqual({ profile: "remote" });
   });
 });
 
