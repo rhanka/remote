@@ -9,7 +9,7 @@
     }
   },
   "bin": {
-    "remote": "./dist/index.js"
+    "remote": "dist/index.js"
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
