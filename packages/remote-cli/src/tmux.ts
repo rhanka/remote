@@ -294,21 +294,31 @@ export function buildTmuxGlobalOptions(
   clip: string | undefined,
 ): Array<ReadonlyArray<string>> {
   const cmds: Array<ReadonlyArray<string>> = [
-    ["set", "-g", "mouse", "on"],
-    ["set", "-g", "set-clipboard", "on"],
-    ["set", "-g", "focus-events", "on"],
-    // Forward the agent's live OSC title (pane_title) out to the GNOME tab, with
-    // the window name (then session name) as the fallback when none is set yet.
-    ["set", "-g", "set-titles", "on"],
+    // Match the proven old-PC tmux baseline used by Antoine's remote sessions.
+    ["set", "-g", "allow-passthrough", "on"],
+    ["set", "-g", "history-limit", "50000"],
+    ["set", "-g", "default-terminal", "tmux-256color"],
     [
       "set",
       "-g",
-      "set-titles-string",
-      "#{?pane_title,#{pane_title},#{window_name}}",
+      "terminal-overrides",
+      ",*256col*:Tc,xterm*:Tc,gnome*:Tc",
     ],
-    // Let the window NAME follow the OSC title the agent emits (does not touch
-    // automatic-rename, which stays at its default `on`).
-    ["set", "-g", "allow-rename", "on"],
+    ["set", "-g", "mouse", "on"],
+    ["set", "-g", "set-clipboard", "on"],
+    ["set", "-g", "focus-events", "on"],
+    ["set", "-g", "set-titles", "on"],
+    ["set", "-g", "set-titles-string", "#{pane_title}"],
+    ["set", "-g", "status-interval", "1"],
+    ["setw", "-g", "automatic-rename", "on"],
+    [
+      "setw",
+      "-g",
+      "automatic-rename-format",
+      "#{?pane_title,#{pane_title},#{pane_current_command}}",
+    ],
+    // Ignore \033k manual renames so OSC pane_title keeps driving live names.
+    ["setw", "-g", "allow-rename", "off"],
     [
       "bind",
       "-n",
@@ -379,8 +389,11 @@ export function buildCodexImagePasteBinding(): ReadonlyArray<string> {
  * alternateScroll (wheel → arrow keys → the CLI's input history), which reads as
  * "scrolling scrolls the input history". With mouse on, a drag is tmux's
  * selection: `copy-command` pipes it to wl-copy/xclip so Ctrl+Shift+V / paste
- * works (VTE drops OSC52, so set-clipboard alone is not enough). Native
- * selection (for Ctrl+Shift+C) stays available via Shift+drag. ALSO turns on the
+ * works (VTE drops OSC52, so set-clipboard alone is not enough). Wheel events
+ * follow the proven old-PC baseline: enter copy-mode on wheel-up and forward the
+ * real mouse event (`send-keys -M`) instead of synthetic copy-mode scroll
+ * commands. Native selection (for Ctrl+Shift+C) stays available via Shift+drag.
+ * ALSO turns on the
  * title-following options (see buildTmuxGlobalOptions) so the GNOME tab tracks
  * the agent's live title. Global, idempotent, applied at every run/attach so it
  * works even without ~/.tmux.conf.

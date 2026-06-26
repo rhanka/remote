@@ -360,31 +360,39 @@ describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)
     expect(flat()).toContain("set -g set-titles on");
   });
 
-  it("points set-titles-string at pane_title with the window name as fallback", () => {
+  it("points set-titles-string directly at pane_title like the old-PC baseline", () => {
     const line = flat().find((l) => l.startsWith("set -g set-titles-string"));
     expect(line).toBeDefined();
-    // pane_title (the agent's live title) is preferred; window_name is the fallback.
-    expect(line).toContain("#{pane_title}");
-    expect(line).toContain("#{window_name}");
-    // precedence: pane_title BEFORE the fallback in the conditional.
-    expect(line!.indexOf("#{pane_title}")).toBeLessThan(
-      line!.lastIndexOf("#{window_name}"),
-    );
+    expect(line).toBe("set -g set-titles-string #{pane_title}");
   });
 
-  it("allows the window name to follow the OSC title (allow-rename on) and NEVER touches automatic-rename", () => {
+  it("uses automatic-rename and disables manual allow-rename like the old-PC baseline", () => {
     const lines = flat();
-    expect(lines).toContain("set -g allow-rename on");
-    expect(lines.some((l) => l.includes("automatic-rename"))).toBe(false);
+    expect(lines).toContain("setw -g automatic-rename on");
+    expect(lines).toContain(
+      "setw -g automatic-rename-format #{?pane_title,#{pane_title},#{pane_current_command}}",
+    );
+    expect(lines).toContain("setw -g allow-rename off");
   });
 
-  it("keeps the scroll/clipboard contract intact (no regression)", () => {
+  it("keeps the old-PC scroll/clipboard contract intact (no regression)", () => {
     const lines = flat("wl-copy");
+    expect(lines).toContain("set -g allow-passthrough on");
+    expect(lines).toContain("set -g history-limit 50000");
+    expect(lines).toContain("set -g default-terminal tmux-256color");
+    expect(lines).toContain(
+      "set -g terminal-overrides ,*256col*:Tc,xterm*:Tc,gnome*:Tc",
+    );
     expect(lines).toContain("set -g mouse on");
     expect(lines).toContain("set -g set-clipboard on");
     expect(lines).toContain("set -g focus-events on");
     expect(lines).toContain("set -g copy-command wl-copy");
-    expect(lines.some((l) => l.startsWith("bind -n WheelUpPane"))).toBe(true);
+    const wheelUp = lines.find((l) => l.startsWith("bind -n WheelUpPane"));
+    expect(wheelUp).toBeDefined();
+    expect(wheelUp).toContain("send-keys -M");
+    expect(wheelUp).toContain("copy-mode -e; send-keys -M");
+    expect(wheelUp).not.toContain("send-keys -X -N 5 scroll-up");
+    expect(wheelUp).not.toContain("#{alternate_on}");
     expect(lines.some((l) => l.startsWith("bind -n WheelDownPane"))).toBe(true);
     expect(lines.some((l) => l.startsWith("bind -n PPage"))).toBe(true);
     expect(lines.some((l) => l.startsWith("bind -n C-v if-shell"))).toBe(true);
