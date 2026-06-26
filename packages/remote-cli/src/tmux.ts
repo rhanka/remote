@@ -198,7 +198,7 @@ export function listLocalSessions(): LocalSession[] {
       slug: name.slice(LOCAL_PREFIX.length),
       profile: profile || "?",
       path: path || "",
-      attached: attached === "1",
+      attached: Number(attached) > 0,
     };
     if (displayName && displayName.trim()) {
       session.displayName = displayName.trim();

@@ -14,6 +14,7 @@ import {
   buildTmuxGlobalOptions,
   fanoutLabels,
   getLocalSessionDisplayName,
+  listLocalSessions,
   localRelaunchCommand,
   resolveAgentPaneForInstance,
   sessionAttachedCount,
@@ -541,6 +542,34 @@ describe("LOCAL_WRAPPER (real bash) — regression: cli runs with its args", () 
     const r = runWrapper("remote run codex /x", "true", []);
     expect(r.stdout).toContain("true exited (code 0)");
     expect(r.stdout).not.toContain("command not found");
+  });
+});
+
+describe("listLocalSessions", () => {
+  beforeEach(() => spawnSyncMock.mockReset());
+
+  it("treats any positive tmux client count as attached", () => {
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "tmux" && args[0] === "-V") return { status: 0, stdout: "tmux 3.4\n" };
+      if (cmd === "tmux" && args[0] === "list-sessions") {
+        return {
+          status: 0,
+          stdout: "remote-parent\t2\t/home/u/src/remote\tclaude\tParent session\n",
+        };
+      }
+      return { status: 1, stdout: "" };
+    });
+
+    expect(listLocalSessions()).toEqual([
+      {
+        name: "remote-parent",
+        slug: "parent",
+        profile: "claude",
+        path: "/home/u/src/remote",
+        attached: true,
+        displayName: "Parent session",
+      },
+    ]);
   });
 });
 
