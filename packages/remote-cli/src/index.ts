@@ -65,6 +65,7 @@ import {
   capturePane,
   conductorRunning,
   currentTmuxSessionIs,
+  ensureManagedTmuxProfile,
   fanoutLabels,
   findLocalSession,
   killLocalSession,
@@ -1783,7 +1784,14 @@ async function injectLlmMeshGatewayEnv(
       }
     }
   }
-  if (!meshEnv) return undefined;
+  if (!meshEnv) {
+    if (mode === "gateway") {
+      process.stderr.write(
+        "[remote] llm-mesh: --gw requested but no gateway env is available; continuing direct. Run `remote llm-mesh start` or enroll an account first.\n",
+      );
+    }
+    return undefined;
+  }
   const alreadyCurrent =
     process.env.ANTHROPIC_BASE_URL === meshEnv.ANTHROPIC_BASE_URL &&
     process.env.ANTHROPIC_AUTH_TOKEN === meshEnv.ANTHROPIC_AUTH_TOKEN &&
@@ -1888,6 +1896,7 @@ function resolveUrlAndSessionId(
 
 function setAndReportDefaultRemote(url: string): void {
   const configured = setDefaultRemote(url);
+  ensureManagedTmuxProfile(getTmuxProfileConfig().profile);
   process.stderr.write(`[remote] default remote set to ${configured}\n`);
 }
 
@@ -2037,7 +2046,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   program
     .command("install <url>")
-    .description("Set default remote URL for commands that omit remote URL")
+    .description(
+      "Set default remote URL and apply remote's managed local tmux profile",
+    )
     .action((url: string) => {
       setAndReportDefaultRemote(url);
     });
@@ -2647,7 +2658,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   const configCommand = program
     .command("config")
-    .description("Manage remote endpoint configuration");
+    .description("Manage remote endpoint and local tmux profile configuration");
 
   configCommand
     .command("set <url>")
@@ -2704,13 +2715,13 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   configCommand
     .command("tmux-profile <name>")
     .description(
-      "Set the remote-managed tmux profile name applied to local sessions",
+      "Set the marker name for remote's embedded tmux profile applied to local sessions",
     )
     .action((name: string) => {
       setTmuxProfileConfig({ profile: name });
-      process.stderr.write(
-        `[remote] tmux profile set to ${getTmuxProfileConfig().profile}\n`,
-      );
+      const profile = getTmuxProfileConfig().profile;
+      ensureManagedTmuxProfile(profile);
+      process.stderr.write(`[remote] tmux profile set to ${profile}\n`);
     });
 
   configCommand
@@ -2723,7 +2734,9 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
 
   configCommand
     .command("show")
-    .description("Display configured default remote URL (and tunnel, if any)")
+    .description(
+      "Display configured default remote URL, managed tmux profile, and tunnel",
+    )
     .action(() => {
       const remote = getDefaultRemote();
       process.stdout.write(
@@ -4753,7 +4766,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   program
     .command("run <profile> [path]")
     .description(
-      "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd). Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
+      "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd). Remote applies its embedded scroll-safe tmux profile at launch; no ~/.tmux.conf is required. Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
     )
     .option(
       "--attach",

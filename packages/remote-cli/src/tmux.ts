@@ -28,6 +28,42 @@ export const LOCAL_PREFIX = "remote-";
 /** Pod tmux session the session-agent runs the CLI in (see agent.ts). */
 export const POD_TMUX_SESSION = "main";
 
+/** Default remote-owned tmux profile name stored in remote CLI config. */
+export const REMOTE_TMUX_PROFILE_NAME = "remote";
+
+type TmuxProfileInvariant =
+  | { readonly line: string }
+  | { readonly prefix: string };
+
+/**
+ * The embedded, scroll-safe tmux profile remote owns. The commands are applied
+ * directly to the running tmux server; no user ~/.tmux.conf entry is required.
+ */
+export const REMOTE_TMUX_PROFILE = {
+  name: REMOTE_TMUX_PROFILE_NAME,
+  version: 1,
+  invariants: [
+    { line: "set -g allow-passthrough on" },
+    { line: "set -g history-limit 50000" },
+    { line: "set -g default-terminal tmux-256color" },
+    { line: "set -g terminal-overrides ,*256col*:Tc,xterm*:Tc,gnome*:Tc" },
+    { line: "set -g mouse on" },
+    { line: "set -g set-clipboard on" },
+    { line: "set -g focus-events on" },
+    { line: "set -g set-titles on" },
+    { line: "set -g set-titles-string #{pane_title}" },
+    { line: "setw -g automatic-rename on" },
+    {
+      line: "setw -g automatic-rename-format #{?pane_title,#{pane_title},#{pane_current_command}}",
+    },
+    { line: "setw -g allow-rename off" },
+    { prefix: "bind -n WheelUpPane " },
+    { line: "bind -n WheelDownPane send-keys -M" },
+    { line: "bind -n PPage copy-mode -eu" },
+    { prefix: "bind -n C-v if-shell " },
+  ] satisfies ReadonlyArray<TmuxProfileInvariant>,
+} as const;
+
 /**
  * Persistent-box wrapper (local twin of the Pod one): run the CLI, and when it
  * exits drop into a login shell on the workdir instead of ending the tmux
@@ -305,7 +341,7 @@ function detectClipboardCommand(): string | undefined {
  */
 export function buildTmuxGlobalOptions(
   clip: string | undefined,
-  profile = "remote",
+  profile = REMOTE_TMUX_PROFILE_NAME,
 ): Array<ReadonlyArray<string>> {
   const cmds: Array<ReadonlyArray<string>> = [
     // Mark this server as remote-managed so diagnostics can tell user config
@@ -350,6 +386,25 @@ export function buildTmuxGlobalOptions(
   // copy-pipe-and-cancel with no argument → they honour copy-command.
   if (clip) cmds.push(["set", "-g", "copy-command", clip]);
   return cmds;
+}
+
+function tmuxCommandLine(args: ReadonlyArray<string>): string {
+  return args.join(" ");
+}
+
+export function validateManagedTmuxProfile(
+  cmds: ReadonlyArray<ReadonlyArray<string>>,
+): string[] {
+  const lines = cmds.map(tmuxCommandLine);
+  const missing: string[] = [];
+  for (const invariant of REMOTE_TMUX_PROFILE.invariants) {
+    if ("line" in invariant) {
+      if (!lines.includes(invariant.line)) missing.push(invariant.line);
+    } else if (!lines.some((line) => line.startsWith(invariant.prefix))) {
+      missing.push(`${invariant.prefix}*`);
+    }
+  }
+  return missing;
 }
 
 /**
@@ -410,7 +465,7 @@ export function buildCodexImagePasteBinding(): ReadonlyArray<string> {
  * the agent's live title. Global, idempotent, applied at every run/attach so it
  * works even without ~/.tmux.conf.
  */
-export function ensureScrollConfig(
+export function ensureManagedTmuxProfile(
   profile = getTmuxProfileConfig().profile,
 ): void {
   const cmds = buildTmuxGlobalOptions(detectClipboardCommand(), profile);
@@ -418,6 +473,11 @@ export function ensureScrollConfig(
     // Best-effort: no server yet / old tmux must never fail the caller.
     spawnSync(TMUX, [...args], { stdio: "ignore" });
   }
+}
+
+/** Backwards-compatible name kept for older callers/tests. */
+export function ensureScrollConfig(profile?: string): void {
+  ensureManagedTmuxProfile(profile);
 }
 
 /**
@@ -432,7 +492,7 @@ export function startLocalSession(
   cwd: string,
   args: ReadonlyArray<string> = [],
   label?: string,
-  tmuxProfile = "remote",
+  tmuxProfile = getTmuxProfileConfig().profile,
 ): StartLocalResult {
   const slug = slugify(label ?? cwd);
   const name = localSessionName(slug);
@@ -493,7 +553,7 @@ export function startHeadlessSession(
   resultJson: string,
   outputLog: string,
   label: string,
-  tmuxProfile = "remote",
+  tmuxProfile = getTmuxProfileConfig().profile,
 ): StartLocalResult {
   const slug = slugify(label);
   const name = localSessionName(slug);

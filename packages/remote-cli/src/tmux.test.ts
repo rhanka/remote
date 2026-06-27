@@ -4,14 +4,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // user's real tmux server (or shells out at all).
 const spawnSyncMock = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawnSync: spawnSyncMock }));
+const tmuxProfileConfigMock = vi.hoisted(() =>
+  vi.fn(() => ({ profile: "remote" })),
+);
+vi.mock("./config.js", () => ({
+  getTmuxProfileConfig: tmuxProfileConfigMock,
+}));
 
 import {
   H2A_WINDOW_NAME,
   LOCAL_WRAPPER,
+  REMOTE_TMUX_PROFILE,
+  REMOTE_TMUX_PROFILE_NAME,
   attachLocalSession,
   buildCodexImagePasteBinding,
   buildSessionWindowArgs,
   buildTmuxGlobalOptions,
+  ensureManagedTmuxProfile,
   fanoutLabels,
   getLocalSessionDisplayName,
   listLocalSessions,
@@ -21,6 +30,7 @@ import {
   setLocalSessionDisplayName,
   startLocalSession,
   startH2aWindow,
+  validateManagedTmuxProfile,
 } from "./tmux.js";
 
 // child_process is mocked module-wide (above); the wrapper regression test needs
@@ -38,6 +48,8 @@ const ORIGINAL_ANTHROPIC_AUTH_TOKEN = process.env.ANTHROPIC_AUTH_TOKEN;
 
 beforeEach(() => {
   spawnSyncMock.mockReset();
+  tmuxProfileConfigMock.mockReset();
+  tmuxProfileConfigMock.mockReturnValue({ profile: REMOTE_TMUX_PROFILE_NAME });
 });
 
 afterEach(() => {
@@ -161,6 +173,22 @@ describe("buildSessionWindowArgs (pure)", () => {
 });
 
 describe("startLocalSession agent pane metadata", () => {
+  it("applies the configured managed tmux profile by default before creating a session", () => {
+    tmuxProfileConfigMock.mockReturnValue({ profile: "old-pc" });
+    spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "tmux" && args[0] === "-V") return { status: 0 };
+      if (cmd === "tmux" && args[0] === "list-sessions")
+        return { status: 1, stdout: "" };
+      if (cmd === "tmux" && args[0] === "new-session") return { status: 0 };
+      return { status: 0, stdout: "" };
+    });
+
+    startLocalSession("claude", "claude", "/home/u/src/remote", [], "remote");
+
+    const setLines = tmuxCalls("set").map((c) => (c[1] as string[]).join(" "));
+    expect(setLines).toContain("set -g @remote_profile old-pc");
+  });
+
   it("passes Anthropic gateway env explicitly to tmux new-session", () => {
     process.env.ANTHROPIC_BASE_URL = "http://localhost:3002";
     process.env.ANTHROPIC_AUTH_TOKEN = "gw-test";
@@ -391,6 +419,13 @@ describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)
   const flat = (clip?: string, profile?: string) =>
     buildTmuxGlobalOptions(clip, profile).map((c) => c.join(" "));
 
+  it("is the embedded remote profile and passes its invariants", () => {
+    const cmds = buildTmuxGlobalOptions("wl-copy");
+    expect(REMOTE_TMUX_PROFILE.name).toBe(REMOTE_TMUX_PROFILE_NAME);
+    expect(REMOTE_TMUX_PROFILE.version).toBe(1);
+    expect(validateManagedTmuxProfile(cmds)).toEqual([]);
+  });
+
   it("turns set-titles ON so tmux forwards the agent's OSC title to the GNOME tab", () => {
     expect(flat()).toContain("set -g set-titles on");
   });
@@ -442,6 +477,25 @@ describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)
 
   it("omits copy-command when no clipboard tool is detected", () => {
     expect(flat(undefined).some((l) => l.includes("copy-command"))).toBe(false);
+  });
+});
+
+describe("ensureManagedTmuxProfile", () => {
+  it("applies the embedded profile idempotently and uses the configured profile marker", () => {
+    tmuxProfileConfigMock.mockReturnValue({ profile: "old-pc" });
+    spawnSyncMock.mockImplementation((cmd: string) => {
+      if (cmd === "command") return { status: 1 };
+      return { status: 0, stdout: "" };
+    });
+
+    ensureManagedTmuxProfile();
+
+    const tmuxArgs = spawnSyncMock.mock.calls
+      .filter((c) => c[0] === "tmux")
+      .map((c) => c[1] as string[]);
+    const lines = tmuxArgs.map((args) => args.join(" "));
+    expect(lines).toContain("set -g @remote_profile old-pc");
+    expect(validateManagedTmuxProfile(tmuxArgs)).toEqual([]);
   });
 });
 
@@ -550,11 +604,13 @@ describe("listLocalSessions", () => {
 
   it("treats any positive tmux client count as attached", () => {
     spawnSyncMock.mockImplementation((cmd: string, args: string[]) => {
-      if (cmd === "tmux" && args[0] === "-V") return { status: 0, stdout: "tmux 3.4\n" };
+      if (cmd === "tmux" && args[0] === "-V")
+        return { status: 0, stdout: "tmux 3.4\n" };
       if (cmd === "tmux" && args[0] === "list-sessions") {
         return {
           status: 0,
-          stdout: "remote-parent\t2\t/home/u/src/remote\tclaude\tParent session\n",
+          stdout:
+            "remote-parent\t2\t/home/u/src/remote\tclaude\tParent session\n",
         };
       }
       return { status: 1, stdout: "" };

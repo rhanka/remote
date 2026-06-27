@@ -593,6 +593,47 @@ describe("remote resume <slug>", () => {
     expect(stderrText()).toContain("injecting gateway env");
   });
 
+  it("reports explicit --gw fallback when no gateway env or accounts exist", async () => {
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main(["node", "remote", "resume", "projA", "--gw"]);
+
+    expect(exitCode).toBe(0);
+    expect(startGateway).not.toHaveBeenCalled();
+    expect(startLocalSession).toHaveBeenCalledWith(
+      "claude",
+      "claude",
+      "/home/u/src/projA",
+      ["--resume", "conv-dup"],
+      "projA",
+    );
+    expect(process.env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(stderrText()).toContain(
+      "--gw requested but no gateway env is available",
+    );
+  });
+
+  it("rejects contradictory gateway flags", async () => {
+    writeRegistry([registrySession()]);
+
+    const exitCode = await main([
+      "node",
+      "remote",
+      "resume",
+      "projA",
+      "--llm-gateway",
+      "--no-gw",
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(stderrText()).toContain(
+      "pass either --llm-gateway/--gw or --no-llm-gateway/--no-gw, not both",
+    );
+  });
+
   it("starts configured llm-mesh automatically before resuming Claude", async () => {
     readLlmMeshConfig.mockReturnValue({
       accounts: [

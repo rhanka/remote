@@ -80,3 +80,67 @@ describe("selectAccount", () => {
     expect(third.id).toBe("c1");
   });
 });
+
+describe("account descriptors and route selection", () => {
+  it("exposes descriptor-only account views without raw tokens", async () => {
+    const accounts = [
+      {
+        id: "codex-a",
+        provider: "openai",
+        label: "Codex A",
+        token: "secret-token",
+        refreshToken: "secret-refresh",
+        modelIds: ["gpt-5.5"],
+      },
+    ];
+    vi.stubEnv("GATEWAY_ACCOUNTS", JSON.stringify(accounts));
+    const { listAccountDescriptors, resetAccountsCache } = await import("./accounts.js");
+    resetAccountsCache();
+
+    const descriptors = listAccountDescriptors();
+    expect(descriptors).toEqual([
+      {
+        id: "codex-a",
+        provider: "openai",
+        label: "Codex A",
+        modelIds: ["gpt-5.5"],
+        status: "active",
+      },
+    ]);
+    expect(JSON.stringify(descriptors)).not.toContain("secret");
+  });
+
+  it("selectAccountForRoute only chooses accounts that can serve the route", async () => {
+    vi.stubEnv(
+      "GATEWAY_ACCOUNTS",
+      JSON.stringify([
+        { id: "claude-a", provider: "anthropic", label: "Claude A", token: "sk-ant-a" },
+        { id: "codex-a", provider: "openai", label: "Codex A", token: "sk-openai-a" },
+        { id: "codex-b", provider: "codex", label: "Codex B", token: "jwt.token.value" },
+      ]),
+    );
+    const { selectAccountForRoute, resetAccountsCache } = await import("./accounts.js");
+    const { resolveModelRoute } = await import("./model-catalog.js");
+    resetAccountsCache();
+
+    const route = resolveModelRoute("gpt-5.5");
+    expect(route).toBeDefined();
+    expect(selectAccountForRoute(route!).id).toBe("codex-a");
+    expect(selectAccountForRoute(route!).id).toBe("codex-b");
+  });
+
+  it("selectAccountForRoute rejects when no account can serve the requested pool", async () => {
+    vi.stubEnv(
+      "GATEWAY_ACCOUNTS",
+      JSON.stringify([
+        { id: "claude-a", provider: "anthropic", label: "Claude A", token: "sk-ant-a" },
+      ]),
+    );
+    const { selectAccountForRoute, resetAccountsCache } = await import("./accounts.js");
+    const { resolveModelRoute } = await import("./model-catalog.js");
+    resetAccountsCache();
+
+    const route = resolveModelRoute("gpt-5.5");
+    expect(() => selectAccountForRoute(route!)).toThrow("no eligible codex account");
+  });
+});

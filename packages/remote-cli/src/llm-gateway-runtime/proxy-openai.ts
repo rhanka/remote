@@ -25,9 +25,10 @@ import {
 } from "@sentropic/llm-gateway";
 import { refreshOAuthToken } from "./accounts.js";
 import { updateSessionToken } from "./sticky.js";
+import { routeModelOrThrow } from "./model-catalog.js";
+import { recordSessionRequest } from "./session-ledger.js";
 
-const OPENAI_BASE =
-  process.env.OPENAI_UPSTREAM_URL ?? "https://api.openai.com";
+const OPENAI_BASE = process.env.OPENAI_UPSTREAM_URL ?? "https://api.openai.com";
 
 const DEFAULT_CODEX_MAX_INPUT_CHARS = 200_000;
 const CODEX_CONTEXT_TRUNCATION_NOTICE =
@@ -47,13 +48,16 @@ const TRANSIENT_UPSTREAM_ERROR_CODES = new Set([
   "UND_ERR_SOCKET",
 ]);
 
-const UPSTREAM_RETRY_DELAYS_MS = process.env.NODE_ENV === "test" ? [0, 0] : [250, 1000];
+const UPSTREAM_RETRY_DELAYS_MS =
+  process.env.NODE_ENV === "test" ? [0, 0] : [250, 1000];
 
 function abortError(err: unknown): boolean {
   return (err as { name?: string }).name === "AbortError";
 }
 
-function upstreamErrorCause(err: unknown): { code?: string; hostname?: string } | undefined {
+function upstreamErrorCause(
+  err: unknown,
+): { code?: string; hostname?: string } | undefined {
   const candidate = err as {
     code?: string;
     hostname?: string;
@@ -88,7 +92,9 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchUpstreamWithRetry(fetcher: () => Promise<Response>): Promise<Response> {
+async function fetchUpstreamWithRetry(
+  fetcher: () => Promise<Response>,
+): Promise<Response> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await fetcher();
@@ -109,30 +115,8 @@ async function fetchUpstreamWithRetry(fetcher: () => Promise<Response>): Promise
 // Model mapping
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MODEL_MAP: Record<string, string> = {
-  "gpt-5.5": "gpt-5.5",
-  "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
-  "claude-opus-4-8": "gpt-5.5",
-  "claude-opus-4-7": "gpt-5.5",
-  "claude-opus-4-6": "gpt-5.5",
-  "claude-sonnet-4-6": "gpt-5.5",
-  "claude-sonnet-4-5": "gpt-5.5",
-  "claude-haiku-4-5-20251001": "gpt-5.5",
-};
-
-let _modelMap: Record<string, string> | null = null;
-function modelMap(): Record<string, string> {
-  if (!_modelMap) {
-    _modelMap = process.env.OPENAI_MODEL_MAP
-      ? { ...DEFAULT_MODEL_MAP, ...(JSON.parse(process.env.OPENAI_MODEL_MAP) as Record<string, string>) }
-      : DEFAULT_MODEL_MAP;
-  }
-  return _modelMap;
-}
-
 export function mapModel(anthropicModel: string): string {
-  if (anthropicModel.startsWith("gpt-")) return anthropicModel;
-  return modelMap()[anthropicModel] ?? "gpt-5.5";
+  return routeModelOrThrow(anthropicModel).upstreamModel ?? anthropicModel;
 }
 
 /**
@@ -157,17 +141,38 @@ export function budgetToEffort(
 // ---------------------------------------------------------------------------
 
 type AntTextBlock = { type: "text"; text: string };
-type AntToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown };
+type AntToolUseBlock = {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+};
 type AntToolResultBlock = {
   type: "tool_result";
   tool_use_id: string;
   content: string | AntTextBlock[];
 };
-type AntThinkingBlock = { type: "thinking"; thinking: string; signature?: string };
-type AntContentBlock = AntTextBlock | AntToolUseBlock | AntToolResultBlock | AntThinkingBlock | { type: string };
+type AntThinkingBlock = {
+  type: "thinking";
+  thinking: string;
+  signature?: string;
+};
+type AntContentBlock =
+  | AntTextBlock
+  | AntToolUseBlock
+  | AntToolResultBlock
+  | AntThinkingBlock
+  | { type: string };
 
-type AntMessage = { role: "user" | "assistant"; content: string | AntContentBlock[] };
-type AntTool = { name: string; description?: string; input_schema: Record<string, unknown> };
+type AntMessage = {
+  role: "user" | "assistant";
+  content: string | AntContentBlock[];
+};
+type AntTool = {
+  name: string;
+  description?: string;
+  input_schema: Record<string, unknown>;
+};
 
 type AntRequest = {
   model: string;
@@ -195,10 +200,12 @@ type OAIToolCall = {
   function: { name: string; arguments: string };
 };
 
-function extractAssistantContent(
-  content: string | AntContentBlock[],
-): { text: string | null; toolCalls: OAIToolCall[] } {
-  if (typeof content === "string") return { text: content || null, toolCalls: [] };
+function extractAssistantContent(content: string | AntContentBlock[]): {
+  text: string | null;
+  toolCalls: OAIToolCall[];
+} {
+  if (typeof content === "string")
+    return { text: content || null, toolCalls: [] };
   const texts: string[] = [];
   const toolCalls: OAIToolCall[] = [];
   for (const item of content) {
@@ -223,7 +230,8 @@ function toOAIMessages(messages: AntMessage[]): OAIMessage[] {
     if (msg.role === "assistant") {
       const { text, toolCalls } = extractAssistantContent(msg.content);
       const entry: OAIMessage = { role: "assistant", content: text };
-      if (toolCalls.length > 0) (entry as { tool_calls?: OAIToolCall[] }).tool_calls = toolCalls;
+      if (toolCalls.length > 0)
+        (entry as { tool_calls?: OAIToolCall[] }).tool_calls = toolCalls;
       result.push(entry);
     } else {
       // user: may contain tool_result blocks
@@ -235,7 +243,11 @@ function toOAIMessages(messages: AntMessage[]): OAIMessage[] {
               typeof tr.content === "string"
                 ? tr.content
                 : (tr.content as AntTextBlock[]).map((b) => b.text).join("");
-            result.push({ role: "tool", tool_call_id: tr.tool_use_id, content: c });
+            result.push({
+              role: "tool",
+              tool_call_id: tr.tool_use_id,
+              content: c,
+            });
           }
         }
         const textItems = (msg.content as AntContentBlock[]).filter(
@@ -244,7 +256,10 @@ function toOAIMessages(messages: AntMessage[]): OAIMessage[] {
         if (textItems.length > 0) {
           result.push({
             role: "user",
-            content: textItems.map((t) => ({ type: "text" as const, text: t.text })),
+            content: textItems.map((t) => ({
+              type: "text" as const,
+              text: t.text,
+            })),
           });
         }
       } else {
@@ -283,7 +298,8 @@ function toCodexInput(messages: AntMessage[]): unknown[] {
       } else {
         for (const block of msg.content) {
           if (block.type === "text") texts.push((block as AntTextBlock).text);
-          else if (block.type === "tool_use") toolCalls.push(block as AntToolUseBlock);
+          else if (block.type === "tool_use")
+            toolCalls.push(block as AntToolUseBlock);
           // thinking blocks: skip
         }
       }
@@ -292,7 +308,12 @@ function toCodexInput(messages: AntMessage[]): unknown[] {
         items.push({ type: "message", role: "assistant", content: text });
       }
       for (const tc of toolCalls) {
-        items.push({ type: "function_call", call_id: tc.id, name: tc.name, arguments: JSON.stringify(tc.input) });
+        items.push({
+          type: "function_call",
+          call_id: tc.id,
+          name: tc.name,
+          arguments: JSON.stringify(tc.input),
+        });
       }
     } else {
       const texts: string[] = [];
@@ -302,14 +323,20 @@ function toCodexInput(messages: AntMessage[]): unknown[] {
       } else {
         for (const block of msg.content) {
           if (block.type === "text") texts.push((block as AntTextBlock).text);
-          else if (block.type === "tool_result") toolResults.push(block as AntToolResultBlock);
+          else if (block.type === "tool_result")
+            toolResults.push(block as AntToolResultBlock);
         }
       }
       for (const tr of toolResults) {
-        const output = typeof tr.content === "string"
-          ? tr.content
-          : (tr.content as AntTextBlock[]).map((b) => b.text).join("");
-        items.push({ type: "function_call_output", call_id: tr.tool_use_id, output });
+        const output =
+          typeof tr.content === "string"
+            ? tr.content
+            : (tr.content as AntTextBlock[]).map((b) => b.text).join("");
+        items.push({
+          type: "function_call_output",
+          call_id: tr.tool_use_id,
+          output,
+        });
       }
       const text = texts.join("");
       if (text) items.push({ type: "message", role: "user", content: text });
@@ -351,14 +378,18 @@ export function toCodexRequest(body: AntRequest): Record<string, unknown> {
 }
 
 function codexMaxInputChars(): number {
-  const configured = Number.parseInt(process.env.CODEX_MAX_INPUT_CHARS ?? "", 10);
+  const configured = Number.parseInt(
+    process.env.CODEX_MAX_INPUT_CHARS ?? "",
+    10,
+  );
   return Number.isFinite(configured) && configured > 0
     ? configured
     : DEFAULT_CODEX_MAX_INPUT_CHARS;
 }
 
 function anthropicInputChars(body: AntRequest): number {
-  return JSON.stringify({ system: body.system, messages: body.messages }).length;
+  return JSON.stringify({ system: body.system, messages: body.messages })
+    .length;
 }
 
 function trimTextTail(text: string, budget: number): string {
@@ -386,7 +417,10 @@ function trimContentTail(
       remaining -= size;
       continue;
     }
-    if (block.type === "text" && remaining > CODEX_CONTEXT_TRUNCATION_NOTICE.length + 32) {
+    if (
+      block.type === "text" &&
+      remaining > CODEX_CONTEXT_TRUNCATION_NOTICE.length + 32
+    ) {
       kept.unshift({
         ...block,
         text: trimTextTail((block as AntTextBlock).text, remaining),
@@ -394,7 +428,9 @@ function trimContentTail(
     }
     break;
   }
-  return kept.length > 0 ? kept : [{ type: "text", text: CODEX_CONTEXT_TRUNCATION_NOTICE }];
+  return kept.length > 0
+    ? kept
+    : [{ type: "text", text: CODEX_CONTEXT_TRUNCATION_NOTICE }];
 }
 
 function stripLeadingOrphanToolResults(messages: AntMessage[]): AntMessage[] {
@@ -402,7 +438,9 @@ function stripLeadingOrphanToolResults(messages: AntMessage[]): AntMessage[] {
   const first = messages[0]!;
   if (first.role !== "user" || !Array.isArray(first.content)) return messages;
 
-  const filtered = first.content.filter((block) => block.type !== "tool_result");
+  const filtered = first.content.filter(
+    (block) => block.type !== "tool_result",
+  );
   if (filtered.length === first.content.length) return messages;
   if (filtered.length === 0) return messages.slice(1);
   return [{ ...first, content: filtered }, ...messages.slice(1)];
@@ -411,13 +449,21 @@ function stripLeadingOrphanToolResults(messages: AntMessage[]): AntMessage[] {
 export function trimCodexBodyForContext(
   body: AntRequest,
   maxChars = codexMaxInputChars(),
-): { body: AntRequest; trimmed: boolean; beforeChars: number; afterChars: number } {
+): {
+  body: AntRequest;
+  trimmed: boolean;
+  beforeChars: number;
+  afterChars: number;
+} {
   const beforeChars = anthropicInputChars(body);
   if (beforeChars <= maxChars) {
     return { body, trimmed: false, beforeChars, afterChars: beforeChars };
   }
 
-  const notice: AntMessage = { role: "user", content: CODEX_CONTEXT_TRUNCATION_NOTICE };
+  const notice: AntMessage = {
+    role: "user",
+    content: CODEX_CONTEXT_TRUNCATION_NOTICE,
+  };
   const systemChars = JSON.stringify(body.system ?? "").length;
   const noticeChars = JSON.stringify(notice).length;
   let remaining = Math.max(1024, maxChars - systemChars - noticeChars);
@@ -432,7 +478,10 @@ export function trimCodexBodyForContext(
       continue;
     }
     if (kept.length === 0 && remaining > 1024) {
-      kept.unshift({ ...message, content: trimContentTail(message.content, remaining) });
+      kept.unshift({
+        ...message,
+        content: trimContentTail(message.content, remaining),
+      });
     }
     break;
   }
@@ -516,14 +565,25 @@ export function toAnthropicResponse(
 
   for (const tc of message?.tool_calls ?? []) {
     let input: unknown = {};
-    try { input = JSON.parse(tc.function.arguments); } catch { /* leave empty */ }
-    content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
+    try {
+      input = JSON.parse(tc.function.arguments);
+    } catch {
+      /* leave empty */
+    }
+    content.push({
+      type: "tool_use",
+      id: tc.id,
+      name: tc.function.name,
+      input,
+    });
   }
 
   const stopReason =
-    choice?.finish_reason === "tool_calls" ? "tool_use"
-    : choice?.finish_reason === "length" ? "max_tokens"
-    : "end_turn";
+    choice?.finish_reason === "tool_calls"
+      ? "tool_use"
+      : choice?.finish_reason === "length"
+        ? "max_tokens"
+        : "end_turn";
 
   return {
     id: openai.id ?? `msg_${Date.now().toString(36)}`,
@@ -554,7 +614,9 @@ function closeStreamWithGatewayError(
   message: string,
 ): void {
   try {
-    controller.enqueue(enc.encode(sseEvent("error", anthropicGatewayError(message))));
+    controller.enqueue(
+      enc.encode(sseEvent("error", anthropicGatewayError(message))),
+    );
   } catch {
     // The downstream client may already be gone.
   }
@@ -602,19 +664,21 @@ export function translateOpenAIStreamToAnthropic(
       let outputTokens = 0;
       let stopReason = "end_turn";
 
-      emit(sseEvent("message_start", {
-        type: "message_start",
-        message: {
-          id: messageId,
-          type: "message",
-          role: "assistant",
-          content: [],
-          model: originalModel,
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
-        },
-      }));
+      emit(
+        sseEvent("message_start", {
+          type: "message_start",
+          message: {
+            id: messageId,
+            type: "message",
+            role: "assistant",
+            content: [],
+            model: originalModel,
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
+          },
+        }),
+      );
       emit(sseEvent("ping", { type: "ping" }));
 
       const reader = openaiStream.getReader();
@@ -633,35 +697,54 @@ export function translateOpenAIStreamToAnthropic(
             if (raw === "[DONE]") {
               // Close any open blocks
               if (textBlockOpen) {
-                emit(sseEvent("content_block_stop", { type: "content_block_stop", index: textBlockIdx }));
+                emit(
+                  sseEvent("content_block_stop", {
+                    type: "content_block_stop",
+                    index: textBlockIdx,
+                  }),
+                );
               }
               for (const [, blockIdx] of toolBlockMap) {
-                emit(sseEvent("content_block_stop", { type: "content_block_stop", index: blockIdx }));
+                emit(
+                  sseEvent("content_block_stop", {
+                    type: "content_block_stop",
+                    index: blockIdx,
+                  }),
+                );
               }
-              emit(sseEvent("message_delta", {
-                type: "message_delta",
-                delta: { stop_reason: stopReason, stop_sequence: null },
-                usage: { output_tokens: outputTokens },
-              }));
+              emit(
+                sseEvent("message_delta", {
+                  type: "message_delta",
+                  delta: { stop_reason: stopReason, stop_sequence: null },
+                  usage: { output_tokens: outputTokens },
+                }),
+              );
               emit(sseEvent("message_stop", { type: "message_stop" }));
               controller.close();
               return;
             }
 
             let chunk: OAIStreamChunk;
-            try { chunk = JSON.parse(raw) as OAIStreamChunk; } catch { continue; }
+            try {
+              chunk = JSON.parse(raw) as OAIStreamChunk;
+            } catch {
+              continue;
+            }
 
             // Trailing usage (stream_options: {include_usage: true})
-            if (chunk.usage?.completion_tokens) outputTokens = chunk.usage.completion_tokens;
+            if (chunk.usage?.completion_tokens)
+              outputTokens = chunk.usage.completion_tokens;
 
             const choice = chunk.choices?.[0];
             if (!choice) continue;
 
             if (choice.finish_reason) {
               stopReason =
-                choice.finish_reason === "tool_calls" ? "tool_use"
-                : choice.finish_reason === "length" ? "max_tokens"
-                : "end_turn";
+                choice.finish_reason === "tool_calls"
+                  ? "tool_use"
+                  : choice.finish_reason === "length"
+                    ? "max_tokens"
+                    : "end_turn";
             }
 
             const delta = choice.delta;
@@ -672,65 +755,93 @@ export function translateOpenAIStreamToAnthropic(
               if (!textBlockOpen) {
                 textBlockIdx = nextBlockIdx++;
                 textBlockOpen = true;
-                emit(sseEvent("content_block_start", {
-                  type: "content_block_start",
-                  index: textBlockIdx,
-                  content_block: { type: "text", text: "" },
-                }));
+                emit(
+                  sseEvent("content_block_start", {
+                    type: "content_block_start",
+                    index: textBlockIdx,
+                    content_block: { type: "text", text: "" },
+                  }),
+                );
               }
-              emit(sseEvent("content_block_delta", {
-                type: "content_block_delta",
-                index: textBlockIdx,
-                delta: { type: "text_delta", text: delta.content },
-              }));
+              emit(
+                sseEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index: textBlockIdx,
+                  delta: { type: "text_delta", text: delta.content },
+                }),
+              );
             }
 
             // Tool calls
             for (const tc of delta.tool_calls ?? []) {
               // Close text block when tool calls start
               if (textBlockOpen) {
-                emit(sseEvent("content_block_stop", { type: "content_block_stop", index: textBlockIdx }));
+                emit(
+                  sseEvent("content_block_stop", {
+                    type: "content_block_stop",
+                    index: textBlockIdx,
+                  }),
+                );
                 textBlockOpen = false;
               }
 
               if (!toolBlockMap.has(tc.index)) {
                 const blockIdx = nextBlockIdx++;
                 toolBlockMap.set(tc.index, blockIdx);
-                emit(sseEvent("content_block_start", {
-                  type: "content_block_start",
-                  index: blockIdx,
-                  content_block: {
-                    type: "tool_use",
-                    id: tc.id ?? `toolu_${tc.index}`,
-                    name: tc.function?.name ?? "",
-                    input: {},
-                  },
-                }));
+                emit(
+                  sseEvent("content_block_start", {
+                    type: "content_block_start",
+                    index: blockIdx,
+                    content_block: {
+                      type: "tool_use",
+                      id: tc.id ?? `toolu_${tc.index}`,
+                      name: tc.function?.name ?? "",
+                      input: {},
+                    },
+                  }),
+                );
               }
 
               const blockIdx = toolBlockMap.get(tc.index)!;
               if (tc.function?.arguments) {
-                emit(sseEvent("content_block_delta", {
-                  type: "content_block_delta",
-                  index: blockIdx,
-                  delta: { type: "input_json_delta", partial_json: tc.function.arguments },
-                }));
+                emit(
+                  sseEvent("content_block_delta", {
+                    type: "content_block_delta",
+                    index: blockIdx,
+                    delta: {
+                      type: "input_json_delta",
+                      partial_json: tc.function.arguments,
+                    },
+                  }),
+                );
               }
             }
           }
         }
         // Stream ended without [DONE] — close gracefully
         if (textBlockOpen) {
-          emit(sseEvent("content_block_stop", { type: "content_block_stop", index: textBlockIdx }));
+          emit(
+            sseEvent("content_block_stop", {
+              type: "content_block_stop",
+              index: textBlockIdx,
+            }),
+          );
         }
         for (const [, blockIdx] of toolBlockMap) {
-          emit(sseEvent("content_block_stop", { type: "content_block_stop", index: blockIdx }));
+          emit(
+            sseEvent("content_block_stop", {
+              type: "content_block_stop",
+              index: blockIdx,
+            }),
+          );
         }
-        emit(sseEvent("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: stopReason, stop_sequence: null },
-          usage: { output_tokens: outputTokens },
-        }));
+        emit(
+          sseEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: stopReason, stop_sequence: null },
+            usage: { output_tokens: outputTokens },
+          }),
+        );
         emit(sseEvent("message_stop", { type: "message_stop" }));
         controller.close();
       } catch (err) {
@@ -764,24 +875,29 @@ export function translateCodexStreamToAnthropic(
 
       let nextBlockIdx = 0;
       // output_index → {type, idx}
-      const blockMap = new Map<number, { type: "text" | "tool"; idx: number }>();
+      const blockMap = new Map<
+        number,
+        { type: "text" | "tool"; idx: number }
+      >();
       let textBlockOpen = false;
       let outputTokens = 0;
       let stopReason = "end_turn";
 
-      emit(sseEvent("message_start", {
-        type: "message_start",
-        message: {
-          id: messageId,
-          type: "message",
-          role: "assistant",
-          content: [],
-          model: originalModel,
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
-        },
-      }));
+      emit(
+        sseEvent("message_start", {
+          type: "message_start",
+          message: {
+            id: messageId,
+            type: "message",
+            role: "assistant",
+            content: [],
+            model: originalModel,
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
+          },
+        }),
+      );
       emit(sseEvent("ping", { type: "ping" }));
 
       const reader = codexStream.getReader();
@@ -801,12 +917,19 @@ export function translateCodexStreamToAnthropic(
               currentEvent = line.slice(7).trim();
               continue;
             }
-            if (!line.startsWith("data: ")) { if (line === "") currentEvent = ""; continue; }
+            if (!line.startsWith("data: ")) {
+              if (line === "") currentEvent = "";
+              continue;
+            }
             const raw = line.slice(6).trim();
             if (raw === "[DONE]") continue;
 
             let data: Record<string, unknown>;
-            try { data = JSON.parse(raw) as Record<string, unknown>; } catch { continue; }
+            try {
+              data = JSON.parse(raw) as Record<string, unknown>;
+            } catch {
+              continue;
+            }
 
             const evType = (data.type as string | undefined) ?? currentEvent;
             const outputIndex = (data.output_index as number | undefined) ?? 0;
@@ -818,16 +941,20 @@ export function translateCodexStreamToAnthropic(
                 if (item.type === "function_call") {
                   const blockIdx = nextBlockIdx++;
                   blockMap.set(outputIndex, { type: "tool", idx: blockIdx });
-                  emit(sseEvent("content_block_start", {
-                    type: "content_block_start",
-                    index: blockIdx,
-                    content_block: {
-                      type: "tool_use",
-                      id: (item.call_id as string | undefined) ?? `toolu_${outputIndex}`,
-                      name: (item.name as string | undefined) ?? "",
-                      input: {},
-                    },
-                  }));
+                  emit(
+                    sseEvent("content_block_start", {
+                      type: "content_block_start",
+                      index: blockIdx,
+                      content_block: {
+                        type: "tool_use",
+                        id:
+                          (item.call_id as string | undefined) ??
+                          `toolu_${outputIndex}`,
+                        name: (item.name as string | undefined) ?? "",
+                        input: {},
+                      },
+                    }),
+                  );
                 }
                 break;
               }
@@ -839,18 +966,22 @@ export function translateCodexStreamToAnthropic(
                   const blockIdx = nextBlockIdx++;
                   blockMap.set(outputIndex, { type: "text", idx: blockIdx });
                   textBlockOpen = true;
-                  emit(sseEvent("content_block_start", {
-                    type: "content_block_start",
-                    index: blockIdx,
-                    content_block: { type: "text", text: "" },
-                  }));
+                  emit(
+                    sseEvent("content_block_start", {
+                      type: "content_block_start",
+                      index: blockIdx,
+                      content_block: { type: "text", text: "" },
+                    }),
+                  );
                 }
                 const tBlock = blockMap.get(outputIndex)!;
-                emit(sseEvent("content_block_delta", {
-                  type: "content_block_delta",
-                  index: tBlock.idx,
-                  delta: { type: "text_delta", text: delta },
-                }));
+                emit(
+                  sseEvent("content_block_delta", {
+                    type: "content_block_delta",
+                    index: tBlock.idx,
+                    delta: { type: "text_delta", text: delta },
+                  }),
+                );
                 break;
               }
 
@@ -859,11 +990,13 @@ export function translateCodexStreamToAnthropic(
                 if (!delta) break;
                 const fBlock = blockMap.get(outputIndex);
                 if (fBlock?.type === "tool") {
-                  emit(sseEvent("content_block_delta", {
-                    type: "content_block_delta",
-                    index: fBlock.idx,
-                    delta: { type: "input_json_delta", partial_json: delta },
-                  }));
+                  emit(
+                    sseEvent("content_block_delta", {
+                      type: "content_block_delta",
+                      index: fBlock.idx,
+                      delta: { type: "input_json_delta", partial_json: delta },
+                    }),
+                  );
                 }
                 break;
               }
@@ -871,7 +1004,12 @@ export function translateCodexStreamToAnthropic(
               case "response.output_item.done": {
                 const block = blockMap.get(outputIndex);
                 if (block) {
-                  emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+                  emit(
+                    sseEvent("content_block_stop", {
+                      type: "content_block_stop",
+                      index: block.idx,
+                    }),
+                  );
                   if (block.type === "text") textBlockOpen = false;
                 }
                 const item = data.item as Record<string, unknown> | undefined;
@@ -880,31 +1018,48 @@ export function translateCodexStreamToAnthropic(
               }
 
               case "response.completed": {
-                const response = data.response as Record<string, unknown> | undefined;
-                const usage = response?.usage as Record<string, unknown> | undefined;
-                if (typeof usage?.output_tokens === "number") outputTokens = usage.output_tokens;
+                const response = data.response as
+                  | Record<string, unknown>
+                  | undefined;
+                const usage = response?.usage as
+                  | Record<string, unknown>
+                  | undefined;
+                if (typeof usage?.output_tokens === "number")
+                  outputTokens = usage.output_tokens;
                 // Close any unclosed blocks (shouldn't happen but be safe)
                 for (const [, block] of blockMap) {
                   if (block.type === "text" && textBlockOpen) {
-                    emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+                    emit(
+                      sseEvent("content_block_stop", {
+                        type: "content_block_stop",
+                        index: block.idx,
+                      }),
+                    );
                     textBlockOpen = false;
                   }
                 }
-                emit(sseEvent("message_delta", {
-                  type: "message_delta",
-                  delta: { stop_reason: stopReason, stop_sequence: null },
-                  usage: { output_tokens: outputTokens },
-                }));
+                emit(
+                  sseEvent("message_delta", {
+                    type: "message_delta",
+                    delta: { stop_reason: stopReason, stop_sequence: null },
+                    usage: { output_tokens: outputTokens },
+                  }),
+                );
                 emit(sseEvent("message_stop", { type: "message_stop" }));
                 controller.close();
                 return;
               }
 
               case "response.failed": {
-                emit(sseEvent("error", {
-                  type: "error",
-                  error: { type: "api_error", message: codexFailureMessage(data) },
-                }));
+                emit(
+                  sseEvent("error", {
+                    type: "error",
+                    error: {
+                      type: "api_error",
+                      message: codexFailureMessage(data),
+                    },
+                  }),
+                );
                 controller.close();
                 return;
               }
@@ -915,20 +1070,32 @@ export function translateCodexStreamToAnthropic(
         if (textBlockOpen) {
           for (const [, block] of blockMap) {
             if (block.type === "text") {
-              emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+              emit(
+                sseEvent("content_block_stop", {
+                  type: "content_block_stop",
+                  index: block.idx,
+                }),
+              );
             }
           }
         }
         for (const [, block] of blockMap) {
           if (block.type === "tool") {
-            emit(sseEvent("content_block_stop", { type: "content_block_stop", index: block.idx }));
+            emit(
+              sseEvent("content_block_stop", {
+                type: "content_block_stop",
+                index: block.idx,
+              }),
+            );
           }
         }
-        emit(sseEvent("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: stopReason, stop_sequence: null },
-          usage: { output_tokens: outputTokens },
-        }));
+        emit(
+          sseEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: stopReason, stop_sequence: null },
+            usage: { output_tokens: outputTokens },
+          }),
+        );
         emit(sseEvent("message_stop", { type: "message_stop" }));
         controller.close();
       } catch (err) {
@@ -972,7 +1139,9 @@ export async function codexStreamToAnthropicResponse(
   let buf = "";
   let currentEvent = "";
 
-  const ensureTextBlock = (outputIndex: number): Extract<Block, { type: "text" }> => {
+  const ensureTextBlock = (
+    outputIndex: number,
+  ): Extract<Block, { type: "text" }> => {
     const existing = blockMap.get(outputIndex);
     if (existing?.type === "text") return existing;
     const block: Extract<Block, { type: "text" }> = {
@@ -1006,7 +1175,11 @@ export async function codexStreamToAnthropicResponse(
         if (raw === "[DONE]") continue;
 
         let data: Record<string, unknown>;
-        try { data = JSON.parse(raw) as Record<string, unknown>; } catch { continue; }
+        try {
+          data = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
 
         const evType = (data.type as string | undefined) ?? currentEvent;
         const outputIndex = (data.output_index as number | undefined) ?? 0;
@@ -1018,7 +1191,9 @@ export async function codexStreamToAnthropicResponse(
               blockMap.set(outputIndex, {
                 type: "tool",
                 idx: nextBlockIdx++,
-                id: (item.call_id as string | undefined) ?? `toolu_${outputIndex}`,
+                id:
+                  (item.call_id as string | undefined) ??
+                  `toolu_${outputIndex}`,
                 name: (item.name as string | undefined) ?? "",
                 args: "",
               });
@@ -1051,15 +1226,21 @@ export async function codexStreamToAnthropicResponse(
             if (item?.type === "function_call" && block?.type === "tool") {
               if (typeof item.call_id === "string") block.id = item.call_id;
               if (typeof item.name === "string") block.name = item.name;
-              if (typeof item.arguments === "string") block.args = item.arguments;
+              if (typeof item.arguments === "string")
+                block.args = item.arguments;
             }
             break;
           }
 
           case "response.completed": {
-            const response = data.response as Record<string, unknown> | undefined;
-            const usage = response?.usage as Record<string, unknown> | undefined;
-            if (typeof usage?.output_tokens === "number") outputTokens = usage.output_tokens;
+            const response = data.response as
+              | Record<string, unknown>
+              | undefined;
+            const usage = response?.usage as
+              | Record<string, unknown>
+              | undefined;
+            if (typeof usage?.output_tokens === "number")
+              outputTokens = usage.output_tokens;
             break;
           }
 
@@ -1077,7 +1258,11 @@ export async function codexStreamToAnthropicResponse(
     .map((block) => {
       if (block.type === "text") return { type: "text", text: block.text };
       let input: unknown = {};
-      try { input = block.args ? JSON.parse(block.args) : {}; } catch { input = {}; }
+      try {
+        input = block.args ? JSON.parse(block.args) : {};
+      } catch {
+        input = {};
+      }
       return { type: "tool_use", id: block.id, name: block.name, input };
     });
 
@@ -1087,7 +1272,9 @@ export async function codexStreamToAnthropicResponse(
     role: "assistant",
     content,
     model: originalModel,
-    stop_reason: content.some((block) => block.type === "tool_use") ? "tool_use" : "end_turn",
+    stop_reason: content.some((block) => block.type === "tool_use")
+      ? "tool_use"
+      : "end_turn",
     stop_sequence: null,
     usage: { input_tokens: estimatedInputTokens, output_tokens: outputTokens },
   };
@@ -1099,9 +1286,15 @@ export async function codexStreamToAnthropicResponse(
 
 export async function handleMessagesViaOpenAI(
   c: Context,
-  session: { token: string; gatewayToken?: string; accountId?: string },
+  session: {
+    token: string;
+    gatewayToken?: string;
+    accountId?: string;
+    sessionId?: string;
+  },
+  requestBody?: ArrayBuffer,
 ): Promise<Response> {
-  const rawBody = await c.req.arrayBuffer();
+  const rawBody = requestBody ?? (await c.req.arrayBuffer());
   let body: AntRequest;
   try {
     body = JSON.parse(new TextDecoder().decode(rawBody)) as AntRequest;
@@ -1110,18 +1303,33 @@ export async function handleMessagesViaOpenAI(
   }
 
   const originalModel = body.model;
+  let route;
+  try {
+    route = routeModelOrThrow(originalModel);
+  } catch (err) {
+    return c.json(
+      anthropicGatewayError(err instanceof Error ? err.message : String(err)),
+      400,
+    );
+  }
+  recordSessionRequest(session.sessionId, route);
+
   const isCodex = isCodexOAuthToken(session.token);
   const codexContext = isCodex ? trimCodexBodyForContext(body) : null;
   const upstreamBody = codexContext?.body ?? body;
   if (codexContext?.trimmed) {
     console.warn(
       `[llm-gateway] Codex context trimmed for ${originalModel}: ` +
-      `${codexContext.beforeChars} -> ${codexContext.afterChars} chars`,
+        `${codexContext.beforeChars} -> ${codexContext.afterChars} chars`,
     );
   }
-  const upstreamReq = isCodex ? toCodexRequest(upstreamBody) : toOpenAIRequest(upstreamBody);
+  const upstreamReq = isCodex
+    ? toCodexRequest(upstreamBody)
+    : toOpenAIRequest(upstreamBody);
   const messageId = `msg_${Date.now().toString(36)}`;
-  const estimatedInputTokens = Math.ceil(JSON.stringify(upstreamBody.messages).length / 4);
+  const estimatedInputTokens = Math.ceil(
+    JSON.stringify(upstreamBody.messages).length / 4,
+  );
 
   const doFetch = (token: string) => {
     if (isCodex) {
@@ -1162,7 +1370,9 @@ export async function handleMessagesViaOpenAI(
   } catch (err) {
     if (abortError(err)) return new Response(null, { status: 499 });
     return c.json(
-      anthropicGatewayError(`Upstream fetch failed: ${upstreamFetchErrorMessage(err)}`),
+      anthropicGatewayError(
+        `Upstream fetch failed: ${upstreamFetchErrorMessage(err)}`,
+      ),
       502,
     );
   }
@@ -1172,13 +1382,16 @@ export async function handleMessagesViaOpenAI(
     await upstream.body?.cancel().catch(() => {});
     const newToken = await refreshOAuthToken(session.accountId);
     if (newToken) {
-      if (session.gatewayToken) updateSessionToken(session.gatewayToken, newToken);
+      if (session.gatewayToken)
+        updateSessionToken(session.gatewayToken, newToken);
       try {
         upstream = await fetchUpstreamWithRetry(() => doFetch(newToken));
       } catch (err) {
         if (abortError(err)) return new Response(null, { status: 499 });
         return c.json(
-          anthropicGatewayError(`Upstream fetch failed: ${upstreamFetchErrorMessage(err)}`),
+          anthropicGatewayError(
+            `Upstream fetch failed: ${upstreamFetchErrorMessage(err)}`,
+          ),
           502,
         );
       }
@@ -1189,7 +1402,10 @@ export async function handleMessagesViaOpenAI(
     const errBody = await upstream.text();
     return new Response(errBody, {
       status: upstream.status,
-      headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+      headers: {
+        "content-type":
+          upstream.headers.get("content-type") ?? "application/json",
+      },
     });
   }
 
@@ -1224,7 +1440,10 @@ export async function handleMessagesViaOpenAI(
         ),
       );
     } catch (err) {
-      return c.json(anthropicGatewayError(err instanceof Error ? err.message : String(err)), 502);
+      return c.json(
+        anthropicGatewayError(err instanceof Error ? err.message : String(err)),
+        502,
+      );
     }
   }
 

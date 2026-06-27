@@ -1,13 +1,31 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { findAccount, selectAccount } from "./accounts.js";
+import {
+  accountSupportsRoute,
+  findAccount,
+  selectAccount,
+  selectAccountForRoute,
+} from "./accounts.js";
 import type { AccountDescriptor } from "./accounts.js";
+import {
+  resolveModelRoute,
+  routeForProvider,
+  type RoutingTarget,
+} from "./model-catalog.js";
+import { upsertSessionLedger } from "./session-ledger.js";
 
 // ─── k8s ConfigMap client ────────────────────────────────────────────────────
 
 const SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token";
-const K8S_HOST = process.env.KUBERNETES_SERVICE_HOST ?? "kubernetes.default.svc.cluster.local";
+const K8S_HOST =
+  process.env.KUBERNETES_SERVICE_HOST ?? "kubernetes.default.svc.cluster.local";
 const K8S_PORT = process.env.KUBERNETES_SERVICE_PORT ?? "443";
 const NAMESPACE = process.env.POD_NAMESPACE ?? "sentropic-remote";
 const CONFIGMAP_NAME = process.env.STICKY_CONFIGMAP ?? "llm-gateway-sticky";
@@ -29,7 +47,10 @@ function cmUrl(): string {
 function readLocalSticky(): Record<string, string> {
   if (!LOCAL_STICKY_FILE) return {};
   try {
-    return JSON.parse(readFileSync(LOCAL_STICKY_FILE, "utf8")) as Record<string, string>;
+    return JSON.parse(readFileSync(LOCAL_STICKY_FILE, "utf8")) as Record<
+      string,
+      string
+    >;
   } catch {
     return {};
   }
@@ -45,6 +66,7 @@ function writeLocalSticky(data: Record<string, string>): void {
 }
 
 export async function readSticky(): Promise<Record<string, string>> {
+  if (LOCAL_STICKY_FILE) return readLocalSticky();
   const token = saToken();
   if (!token) return readLocalSticky();
   const resp = await fetch(cmUrl(), {
@@ -56,7 +78,14 @@ export async function readSticky(): Promise<Record<string, string>> {
   return cm.data ?? {};
 }
 
-export async function writeSticky(sessionId: string, accountId: string): Promise<void> {
+export async function writeSticky(
+  sessionId: string,
+  accountId: string,
+): Promise<void> {
+  if (LOCAL_STICKY_FILE) {
+    writeLocalSticky({ ...readLocalSticky(), [sessionId]: accountId });
+    return;
+  }
   const token = saToken();
   if (!token) {
     writeLocalSticky({ ...readLocalSticky(), [sessionId]: accountId });
@@ -76,12 +105,14 @@ export async function writeSticky(sessionId: string, accountId: string): Promise
     },
     body: JSON.stringify(patch),
   });
-  if (!resp.ok) throw new Error(`sticky ConfigMap patch failed: ${resp.status}`);
+  if (!resp.ok)
+    throw new Error(`sticky ConfigMap patch failed: ${resp.status}`);
 }
 
 // ─── Restart-safe gateway token derivation ──────────────────────────────────
 
-interface SessionEntry {
+export interface SessionEntry {
+  sessionId: string;
   gatewayToken: string;
   accountId: string;
   token: string;
@@ -141,7 +172,9 @@ export function sessionCount(): number {
   return _sessions.size;
 }
 
-export async function lookupToken(gatewayToken: string): Promise<SessionEntry | undefined> {
+export async function lookupToken(
+  gatewayToken: string,
+): Promise<SessionEntry | undefined> {
   const cached = _sessions.get(gatewayToken);
   if (cached) return cached;
 
@@ -156,7 +189,8 @@ export async function lookupToken(gatewayToken: string): Promise<SessionEntry | 
     await writeSticky(sessionId, account.id);
   }
 
-  const entry = {
+  const entry: SessionEntry = {
+    sessionId,
     gatewayToken,
     accountId: account.id,
     token: account.token,
@@ -164,13 +198,45 @@ export async function lookupToken(gatewayToken: string): Promise<SessionEntry | 
     ...(account.authType ? { authType: account.authType } : {}),
   };
   _sessions.set(gatewayToken, entry);
+  upsertSessionLedger({
+    gatewaySessionId: sessionId,
+    account,
+  });
   return entry;
 }
 
 /** Update the bearer token for a session after an OAuth refresh. */
-export function updateSessionToken(gatewayToken: string, newToken: string): void {
+export function updateSessionToken(
+  gatewayToken: string,
+  newToken: string,
+): void {
   const entry = _sessions.get(gatewayToken);
   if (entry) (entry as { token: string }).token = newToken;
+}
+
+export async function rebindGatewaySession(
+  gatewayToken: string,
+  account: AccountDescriptor,
+  route?: RoutingTarget,
+): Promise<SessionEntry | undefined> {
+  const sessionId = sessionIdFromGatewayToken(gatewayToken);
+  if (!sessionId) return undefined;
+  await writeSticky(sessionId, account.id);
+  const entry: SessionEntry = {
+    sessionId,
+    gatewayToken,
+    accountId: account.id,
+    token: account.token,
+    provider: account.provider,
+    ...(account.authType ? { authType: account.authType } : {}),
+  };
+  _sessions.set(gatewayToken, entry);
+  upsertSessionLedger({
+    gatewaySessionId: sessionId,
+    account,
+    ...(route ? { route } : {}),
+  });
+  return entry;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -178,6 +244,26 @@ export function updateSessionToken(gatewayToken: string, newToken: string): void
 export interface SessionResult {
   gatewayToken: string;
   accountId: string;
+  modelId?: string;
+  upstreamModel?: string;
+  routePolicy?: string;
+  routeReason?: string;
+}
+
+export interface AcquireSessionOptions {
+  model?: string;
+  provider?: string;
+  workspaceId?: string;
+  profile?: string;
+  clientSessionId?: string;
+}
+
+function routeFromOptions(
+  options: AcquireSessionOptions,
+): RoutingTarget | undefined {
+  if (options.model) return resolveModelRoute(options.model);
+  if (options.provider) return routeForProvider(options.provider);
+  return undefined;
 }
 
 /**
@@ -185,7 +271,14 @@ export interface SessionResult {
  * Idempotent: the same sessionId always maps to the same accountId and token.
  * The token is derived from LLM_GATEWAY_TOKEN_SEED + sessionId, never persisted.
  */
-export async function acquireSession(sessionId: string): Promise<SessionResult> {
+export async function acquireSession(
+  sessionId: string,
+  options: AcquireSessionOptions = {},
+): Promise<SessionResult> {
+  const route = routeFromOptions(options);
+  if (options.model && !route)
+    throw new Error(`unsupported model: ${options.model}`);
+
   // Check ConfigMap for existing sticky binding
   const existing = await readSticky();
   let account: AccountDescriptor;
@@ -193,25 +286,41 @@ export async function acquireSession(sessionId: string): Promise<SessionResult> 
   const boundId = existing[sessionId];
   if (boundId !== undefined) {
     const found = findAccount(boundId);
-    if (found) {
+    if (found && (!route || accountSupportsRoute(found, route))) {
       account = found;
     } else {
-      account = selectAccount();
+      account = route ? selectAccountForRoute(route) : selectAccount();
       await writeSticky(sessionId, account.id);
     }
   } else {
-    account = selectAccount();
+    account = route ? selectAccountForRoute(route) : selectAccount();
     await writeSticky(sessionId, account.id);
   }
 
   const gatewayToken = gatewayTokenForSession(sessionId);
   _sessions.set(gatewayToken, {
+    sessionId,
     gatewayToken,
     accountId: account.id,
     token: account.token,
     provider: account.provider,
     ...(account.authType ? { authType: account.authType } : {}),
   });
+  upsertSessionLedger({
+    gatewaySessionId: sessionId,
+    clientSessionId: options.clientSessionId ?? sessionId,
+    ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+    ...(options.profile ? { profile: options.profile } : {}),
+    account,
+    ...(route ? { route } : {}),
+  });
 
-  return { gatewayToken, accountId: account.id };
+  return {
+    gatewayToken,
+    accountId: account.id,
+    ...(route?.catalogModelId ? { modelId: route.catalogModelId } : {}),
+    ...(route?.upstreamModel ? { upstreamModel: route.upstreamModel } : {}),
+    ...(route?.routingPolicy ? { routePolicy: route.routingPolicy } : {}),
+    ...(route?.routeReason ? { routeReason: route.routeReason } : {}),
+  };
 }

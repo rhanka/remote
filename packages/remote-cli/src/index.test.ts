@@ -30,6 +30,7 @@ const listWorkspaces = vi.fn();
 const deleteWorkspace = vi.fn();
 const readWorkspaceMarker = vi.fn();
 const writeWorkspaceMarker = vi.fn();
+const ensureManagedTmuxProfile = vi.hoisted(() => vi.fn());
 
 vi.mock("./attach.js", () => ({
   attach,
@@ -125,6 +126,14 @@ vi.mock("./tunnel.js", () => ({
   stopTunnel: vi.fn(),
 }));
 
+vi.mock("./tmux.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./tmux.js")>();
+  return {
+    ...actual,
+    ensureManagedTmuxProfile,
+  };
+});
+
 const stderrWrite = vi
   .spyOn(process.stderr, "write")
   .mockImplementation(() => true);
@@ -163,6 +172,7 @@ describe("main", () => {
     deleteWorkspace.mockReset();
     readWorkspaceMarker.mockReset();
     writeWorkspaceMarker.mockReset();
+    ensureManagedTmuxProfile.mockReset();
     readWorkspaceMarker.mockReturnValue(undefined);
     createWorkspace.mockResolvedValue({ id: "ws-new", createdAt: "now" });
     listWorkspaces.mockResolvedValue([]);
@@ -524,6 +534,7 @@ describe("main", () => {
 
     expect(exitCode).toBe(0);
     expect(setDefaultRemote).toHaveBeenCalledWith("http://localhost:8080");
+    expect(ensureManagedTmuxProfile).toHaveBeenCalledWith("remote");
   });
 
   it("stores a bearer token from config token", async () => {
@@ -550,6 +561,7 @@ describe("main", () => {
 
     expect(exitCode).toBe(0);
     expect(setDefaultRemote).toHaveBeenCalledWith("http://localhost:8080");
+    expect(ensureManagedTmuxProfile).toHaveBeenCalledWith("remote");
   });
 
   it("shows default remote when configured", async () => {

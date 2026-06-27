@@ -2,7 +2,26 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 
 // Mock the accounts module to avoid GATEWAY_ACCOUNTS requirement
 vi.mock("./accounts.js", () => ({
-  selectAccount: vi.fn(() => ({ id: "c1", provider: "claude-code", label: "A", token: "sk-ant-1" })),
+  selectAccount: vi.fn(() => ({
+    id: "c1",
+    provider: "claude-code",
+    label: "A",
+    token: "sk-ant-1",
+  })),
+  selectAccountForRoute: vi.fn(() => ({
+    id: "c1",
+    provider: "claude-code",
+    label: "A",
+    token: "sk-ant-1",
+  })),
+  accountSupportsRoute: vi.fn(() => true),
+  publicAccountDescriptor: vi.fn((account) => ({
+    id: account.id,
+    provider: account.provider,
+    label: account.label,
+    modelIds: [],
+    status: "active",
+  })),
   findAccount: vi.fn((id: string) =>
     id === "c1"
       ? { id: "c1", provider: "claude-code", label: "A", token: "sk-ant-1" }
@@ -22,7 +41,10 @@ afterEach(() => {
 
 describe("acquireSession", () => {
   it("assigns a new account via round-robin on first call", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404, ok: false }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ status: 404, ok: false }),
+    );
 
     const { acquireSession } = await import("./sticky.js");
     const result = await acquireSession("sess-001");
@@ -52,7 +74,10 @@ describe("acquireSession", () => {
   });
 
   it("returns a gateway token that lookupToken can find", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404, ok: false }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ status: 404, ok: false }),
+    );
 
     const { acquireSession, lookupToken } = await import("./sticky.js");
     const { gatewayToken } = await acquireSession("sess-003");
@@ -63,7 +88,10 @@ describe("acquireSession", () => {
   });
 
   it("derives different stable tokens for different sessionIds", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404, ok: false }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ status: 404, ok: false }),
+    );
 
     const { acquireSession } = await import("./sticky.js");
     const r1 = await acquireSession("sess-a");
@@ -73,7 +101,10 @@ describe("acquireSession", () => {
   });
 
   it("rejects valid-looking tokens if the seed changes", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404, ok: false }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ status: 404, ok: false }),
+    );
 
     const { acquireSession } = await import("./sticky.js");
     const { gatewayToken } = await acquireSession("sess-seed");

@@ -45,7 +45,10 @@ sessions — local (tmux) and deported (Scaleway Kapsule) alike. `remote
   agy/opencode/shell) in `path` (default cwd). Manage it like a remote one.
   `-r/--resume <conv>` resumes a conversation, `--name <slug>` keeps several
   sessions of one project distinct, `--h2a` also starts the h2a MCP server in a
-  side window. Detach with `Ctrl-b d`; the session keeps running.
+  side window. Remote applies its embedded scroll-safe tmux profile at launch
+  (`history-limit 50000`, mouse/copy-mode wheel scrolling, passthrough, title
+  propagation); no matching `~/.tmux.conf` is required. Detach with `Ctrl-b d`;
+  the session keeps running.
 - `remote attach <slug|id> [sessionId]` — attach to a LOCAL tmux session (by
   slug) or, failing that, a remote one. For remote, `--exec` (default with a
   tunnel) execs straight into the Pod's tmux (native scrollback + OSC52).
@@ -98,7 +101,10 @@ sessions — local (tmux) and deported (Scaleway Kapsule) alike. `remote
 ### Connectivity & config
 
 - `remote install <url>` / `remote config` — set the default remote URL and
-  manage endpoint configuration.
+  manage endpoint configuration. `install` and `config set` also apply remote's
+  embedded local tmux profile idempotently. `remote config tmux-profile <name>`
+  keeps the profile marker configurable for compatibility while the scroll-safe
+  options remain owned by remote.
 - `remote connect` / `remote disconnect` — open/close the managed control-plane
   tunnel (a `kubectl port-forward`, opened on demand by most commands).
 - `remote check <profile>` — end-to-end smoke probe (create → terminal.opened →
