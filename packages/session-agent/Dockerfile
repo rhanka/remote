@@ -63,6 +63,9 @@ RUN printf '%s\n' \
         'bind -n WheelUpPane if -Ft= "#{pane_in_mode}" "send-keys -M" "copy-mode -e; send-keys -M"' \
         'bind -n WheelDownPane send-keys -M' \
         'bind -n PPage copy-mode -eu' \
+        'bind -n C-S-c if -F "#{pane_in_mode}" "send-keys -X copy-pipe-and-cancel" "send-keys C-S-c"' \
+        'bind -T copy-mode C-S-c send-keys -X copy-pipe-and-cancel' \
+        'bind -T copy-mode-vi C-S-c send-keys -X copy-pipe-and-cancel' \
     > /etc/tmux.conf
 
 # Install the agent CLIs available system-wide so any session profile maps to

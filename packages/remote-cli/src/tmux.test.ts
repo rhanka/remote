@@ -466,6 +466,13 @@ describe("buildTmuxGlobalOptions (bug #1 — tab follows the agent's live title)
     expect(wheelUp).not.toContain("#{alternate_on}");
     expect(lines.some((l) => l.startsWith("bind -n WheelDownPane"))).toBe(true);
     expect(lines.some((l) => l.startsWith("bind -n PPage"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("bind -n C-S-c"))).toBe(true);
+    expect(lines).toContain(
+      "bind -T copy-mode C-S-c send-keys -X copy-pipe-and-cancel",
+    );
+    expect(lines).toContain(
+      "bind -T copy-mode-vi C-S-c send-keys -X copy-pipe-and-cancel",
+    );
     expect(lines.some((l) => l.startsWith("bind -n C-v if-shell"))).toBe(true);
   });
 

@@ -60,6 +60,9 @@ export const REMOTE_TMUX_PROFILE = {
     { prefix: "bind -n WheelUpPane " },
     { line: "bind -n WheelDownPane send-keys -M" },
     { line: "bind -n PPage copy-mode -eu" },
+    { prefix: "bind -n C-S-c " },
+    { line: "bind -T copy-mode C-S-c send-keys -X copy-pipe-and-cancel" },
+    { line: "bind -T copy-mode-vi C-S-c send-keys -X copy-pipe-and-cancel" },
     { prefix: "bind -n C-v if-shell " },
   ] satisfies ReadonlyArray<TmuxProfileInvariant>,
 } as const;
@@ -379,6 +382,39 @@ export function buildTmuxGlobalOptions(
     ],
     ["bind", "-n", "WheelDownPane", "send-keys", "-M"],
     ["bind", "-n", "PPage", "copy-mode", "-eu"],
+    // Some terminals/desktop stacks forward Ctrl+Shift+C to tmux when the
+    // selection was made inside tmux copy-mode. Bind it as an explicit fallback
+    // so the familiar terminal shortcut copies the active tmux selection through
+    // copy-command instead of being swallowed. Outside copy-mode, forward the key
+    // unchanged so terminals that own Ctrl+Shift+C keep their native behavior.
+    [
+      "bind",
+      "-n",
+      "C-S-c",
+      "if",
+      "-F",
+      "#{pane_in_mode}",
+      "send-keys -X copy-pipe-and-cancel",
+      "send-keys C-S-c",
+    ],
+    [
+      "bind",
+      "-T",
+      "copy-mode",
+      "C-S-c",
+      "send-keys",
+      "-X",
+      "copy-pipe-and-cancel",
+    ],
+    [
+      "bind",
+      "-T",
+      "copy-mode-vi",
+      "C-S-c",
+      "send-keys",
+      "-X",
+      "copy-pipe-and-cancel",
+    ],
     buildCodexImagePasteBinding(),
   ];
   // copy-command makes every copy-pipe-and-cancel (mouse drag, double/triple
@@ -459,7 +495,9 @@ export function buildCodexImagePasteBinding(): ReadonlyArray<string> {
  * works (VTE drops OSC52, so set-clipboard alone is not enough). Wheel events
  * follow the proven old-PC baseline: enter copy-mode on wheel-up and forward the
  * real mouse event (`send-keys -M`) instead of synthetic copy-mode scroll
- * commands. Native selection (for Ctrl+Shift+C) stays available via Shift+drag.
+ * commands. Native selection (for Ctrl+Shift+C) stays available via Shift+drag;
+ * if Ctrl+Shift+C reaches tmux while in copy-mode, remote explicitly maps it to
+ * copy-pipe-and-cancel so the same gesture still copies through copy-command.
  * ALSO turns on the
  * title-following options (see buildTmuxGlobalOptions) so the GNOME tab tracks
  * the agent's live title. Global, idempotent, applied at every run/attach so it
