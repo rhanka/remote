@@ -4767,11 +4767,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
   program
     .command("run <profile> [path]")
     .description(
-      "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd). Remote applies its embedded scroll-safe tmux profile at launch; no ~/.tmux.conf is required. Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
+      "Start a LOCAL session in tmux (claude/codex/…) in <path> (default: cwd), then attach this terminal by default. Remote applies its embedded scroll-safe tmux profile at launch; no ~/.tmux.conf is required. Manage it like a remote one: `remote ls`, `remote attach <slug>`, `remote stop <slug>`. Detach with Ctrl-b d; the session keeps running.",
     )
     .option(
-      "--attach",
-      "attach immediately after starting (default: start detached)",
+      "--no-attach",
+      "start detached and print the attach command instead (for scripts / fan-out orchestration)",
     )
     .option(
       "-r, --resume <convId>",
@@ -4951,13 +4951,17 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(
           `[remote] local session ${only.slug} started (${profile}${opts.resume ? ` --resume ${opts.resume}` : ""} in ${cwd})\n`,
         );
-        if (opts.attach) {
-          process.exitCode = attachLocalSession(only.name);
+        // Single local runs hand off the terminal by default: there is no value
+        // in making users type a second `remote attach <slug>` command. Commander
+        // sets opts.attach=false only for --no-attach.
+        if (opts.attach === false) {
+          process.stderr.write(
+            `[remote] attach with: remote attach ${only.slug}\n`,
+          );
           return;
         }
-        process.stderr.write(
-          `[remote] attach with: remote attach ${only.slug}\n`,
-        );
+        process.exitCode = attachLocalSession(only.name);
+        return;
       },
     );
 
