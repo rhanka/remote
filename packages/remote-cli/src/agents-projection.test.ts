@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   findProjectedAgent,
+  projectRemoteAgentInspect,
   projectRemoteAgents,
   type RemoteAgentsEnvelope,
 } from "./agents-projection.js";
@@ -44,9 +45,10 @@ describe("projectRemoteAgents", () => {
     });
 
     expect(envelope).toMatchObject({
-      ok: true,
-      ownerSystem: "remote",
-      authoritativeForObjectiveState: false,
+      kind: "remote-agents-list",
+      version: 1,
+      warnings: [],
+      degraded: false,
     });
     expect(envelope.agents).toHaveLength(2);
     expect(envelope.agents.every((agent) => agent.capabilities.objectiveStateAuthority === false)).toBe(true);
@@ -82,6 +84,19 @@ describe("projectRemoteAgents", () => {
     expect(envelope.agents[0]).toMatchObject({
       remoteSessionId: "sess-1",
       capabilities: { attach: false, logs: true, remote: true, objectiveStateAuthority: false },
+    });
+  });
+
+  it("projects inspect detail envelope with empty related sources", () => {
+    const envelope = projectRemoteAgents({ jobs: [job()], localRows: [] });
+    const agent = findProjectedAgent(envelope.agents, "j1")!;
+
+    expect(projectRemoteAgentInspect(agent)).toMatchObject({
+      kind: "remote-agent-detail",
+      version: 1,
+      agent: { id: "job:j1", authoritativeForObjectiveState: false },
+      related: { jobs: [], sessions: [], logs: [] },
+      warnings: [],
     });
   });
 });

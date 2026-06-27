@@ -35,17 +35,23 @@ export type RemoteAgentProjection = {
 };
 
 export type RemoteAgentsEnvelope = {
-  ok: true;
-  ownerSystem: "remote";
-  authoritativeForObjectiveState: false;
+  kind: "remote-agents-list";
+  version: 1;
   agents: RemoteAgentProjection[];
+  warnings: string[];
+  degraded: false;
 };
 
 export type RemoteAgentInspectEnvelope = {
-  ok: true;
-  ownerSystem: "remote";
-  authoritativeForObjectiveState: false;
+  kind: "remote-agent-detail";
+  version: 1;
   agent: RemoteAgentProjection;
+  related: {
+    jobs: unknown[];
+    sessions: unknown[];
+    logs: unknown[];
+  };
+  warnings: string[];
 };
 
 export function agentInstanceForJob(job: RegistryEntry): string {
@@ -111,10 +117,23 @@ export function projectRemoteAgents(args: {
     ...args.localRows.map(projectLocalSessionAgent),
   ].sort((a, b) => a.id.localeCompare(b.id));
   return {
-    ok: true,
-    ownerSystem: "remote",
-    authoritativeForObjectiveState: false,
+    kind: "remote-agents-list",
+    version: 1,
     agents,
+    warnings: [],
+    degraded: false,
+  };
+}
+
+export function projectRemoteAgentInspect(
+  agent: RemoteAgentProjection,
+): RemoteAgentInspectEnvelope {
+  return {
+    kind: "remote-agent-detail",
+    version: 1,
+    agent,
+    related: { jobs: [], sessions: [], logs: [] },
+    warnings: [],
   };
 }
 

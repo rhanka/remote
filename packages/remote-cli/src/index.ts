@@ -219,6 +219,7 @@ import {
 } from "./auth-bundle.js";
 import {
   findProjectedAgent,
+  projectRemoteAgentInspect,
   projectRemoteAgents,
 } from "./agents-projection.js";
 import {
@@ -5273,11 +5274,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         process.stderr.write(
           `[remote] no projected agent \"${id}\" (see: remote agents ls --json)\n`,
         );
-        process.exitCode = 2;
+        process.exitCode = 1;
         return;
       }
       process.stdout.write(
-        `${JSON.stringify({ ok: true, ownerSystem: "remote", authoritativeForObjectiveState: false, agent }, null, 2)}\n`,
+        `${JSON.stringify(projectRemoteAgentInspect(agent), null, 2)}\n`,
       );
     });
 
