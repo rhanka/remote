@@ -42,5 +42,10 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rhanka/remote",
+    "directory": "packages/remote-cli"
   }
 }
