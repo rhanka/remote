@@ -339,8 +339,8 @@ function projLatest(arr: DiscoveredSession[]): number {
  * live → `remote attach <slug>` (do NOT `remote run -r`, which the single-writer
  * guard refuses while that session still holds the conversation — this is what
  * broke a `restore` over still-detached sessions); otherwise create it via
- * `remote run … --resume … --attach`. `liveSlugs` = slugs of currently-live
- * local tmux sessions (empty for the reproducible layout snapshot).
+ * `remote run … --resume …` (which attaches by default). `liveSlugs` = slugs of
+ * currently-live local tmux sessions (empty for the reproducible layout snapshot).
  */
 export function tabCommand(
   tab: LayoutTab,
@@ -360,7 +360,7 @@ export function tabCommand(
   return (
     `remote run ${q(tab.tool ?? "shell")} ${q(tab.cwd)} ` +
     (tab.sid ? `--resume ${q(tab.sid)} ` : "") +
-    `--name ${q(tab.label)} --attach`
+    `--name ${q(tab.label)}`
   );
 }
 

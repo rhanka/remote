@@ -230,7 +230,7 @@ describe("layout-last.json", () => {
     const last = readLastLayout()!;
     expect(last.group).toBeUndefined();
     expect(last.windows[0]!.tabs[0]!.cmd).not.toContain("--resume");
-    expect(last.windows[0]!.tabs[0]!.cmd).toContain("--name 'a' --attach");
+    expect(last.windows[0]!.tabs[0]!.cmd).toContain("--name 'a'");
   });
 });
 
@@ -244,7 +244,7 @@ describe("tabCommand", () => {
   it("runs a local session that is NOT live (create + resume + attach)", () => {
     expect(
       tabCommand({ cwd: "/home/u/src/dataviz", label: "dataviz", tool: "codex", sid: "r1" }),
-    ).toBe("remote run 'codex' '/home/u/src/dataviz' --resume 'r1' --name 'dataviz' --attach");
+    ).toBe("remote run 'codex' '/home/u/src/dataviz' --resume 'r1' --name 'dataviz'");
   });
 
   it("ATTACHES (not run -r) a local session that is already live — avoids the guard", () => {

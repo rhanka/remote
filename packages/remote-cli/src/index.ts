@@ -1923,7 +1923,6 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "run",
       profile,
       process.cwd(),
-      "--attach",
     ]);
   }
 
