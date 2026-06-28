@@ -38,6 +38,8 @@ export type DiscoveredSession = {
   origin?: "registry" | "scan";
   /** Preferred tab label (registry entries carry a reliable one). */
   label?: string;
+  /** Pinned llm-mesh gateway posture (from an explicit --gw/--no-gw at launch). */
+  gatewayMode?: "gateway" | "direct";
 };
 
 export type LayoutTab = {
@@ -50,6 +52,8 @@ export type LayoutTab = {
   remoteId?: string;
   /** discovery provenance, shown as [registry]/[guess] in --dry-run */
   origin?: "registry" | "scan";
+  /** Pinned llm-mesh gateway posture; re-emitted as --gw/--no-gw on restore. */
+  gatewayMode?: "gateway" | "direct";
 };
 
 export type LayoutWindow = { title: string; tabs: LayoutTab[] };
@@ -154,6 +158,7 @@ export function registrySessions(
       origin: "registry",
     };
     if (e.label !== undefined) session.label = e.label;
+    if (e.gatewayMode !== undefined) session.gatewayMode = e.gatewayMode;
     out.push(session);
   }
   return out;
@@ -282,6 +287,7 @@ export function groupSessions(
         sid: s.sid,
       };
       if (s.origin !== undefined) tab.origin = s.origin;
+      if (s.gatewayMode !== undefined) tab.gatewayMode = s.gatewayMode;
       return tab;
     });
   };
@@ -357,10 +363,16 @@ export function tabCommand(
     // attach instead of re-running into the guard.
     return `remote attach ${q(slug)}`;
   }
+  const gwFlag =
+    tab.gatewayMode === "gateway"
+      ? " --gw"
+      : tab.gatewayMode === "direct"
+        ? " --no-gw"
+        : "";
   return (
     `remote run ${q(tab.tool ?? "shell")} ${q(tab.cwd)} ` +
     (tab.sid ? `--resume ${q(tab.sid)} ` : "") +
-    `--name ${q(tab.label)}`
+    `--name ${q(tab.label)}${gwFlag}`
   );
 }
 

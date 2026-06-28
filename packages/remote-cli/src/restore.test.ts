@@ -114,6 +114,12 @@ describe("registry-first discovery", () => {
     expect(registrySessions(home, entries)).toEqual([]);
   });
 
+  it("carries the pinned gatewayMode from the registry entry onto the session", () => {
+    const entries = [registryEntry("impots", { gatewayMode: "direct" })];
+    const [session] = registrySessions(home, entries);
+    expect(session?.gatewayMode).toBe("direct");
+  });
+
   it("groupSessions propagates the origin badge onto tabs", () => {
     const sessions: DiscoveredSession[] = [
       {
@@ -255,5 +261,35 @@ describe("tabCommand", () => {
         live,
       ),
     ).toBe("remote attach 'dataviz'");
+  });
+
+  it("re-emits a pinned --no-gw so a direct instance is NOT restored onto the gateway", () => {
+    expect(
+      tabCommand({
+        cwd: "/home/u/src/impots",
+        label: "impots",
+        tool: "claude",
+        sid: "c1",
+        gatewayMode: "direct",
+      }),
+    ).toBe("remote run 'claude' '/home/u/src/impots' --resume 'c1' --name 'impots' --no-gw");
+  });
+
+  it("re-emits a pinned --gw for a gateway instance", () => {
+    expect(
+      tabCommand({
+        cwd: "/home/u/src/geo",
+        label: "geo",
+        tool: "claude",
+        sid: "c2",
+        gatewayMode: "gateway",
+      }),
+    ).toBe("remote run 'claude' '/home/u/src/geo' --resume 'c2' --name 'geo' --gw");
+  });
+
+  it("omits any gw flag when the instance was launched in auto mode (unpinned)", () => {
+    expect(
+      tabCommand({ cwd: "/home/u/src/geo", label: "geo", tool: "claude", sid: "c3" }),
+    ).toBe("remote run 'claude' '/home/u/src/geo' --resume 'c3' --name 'geo'");
   });
 });

@@ -120,6 +120,13 @@ export type RegistryEntry = {
   effort?: string;
   /** Force a specific account from the pool (bypass selectAccountWithFallback). */
   accountId?: string;
+  /**
+   * Pinned llm-mesh gateway choice, captured at launch from an EXPLICIT
+   * --gw/--no-gw. Re-emitted verbatim by `remote restore` so each instance
+   * keeps its own gateway posture instead of falling back to the global
+   * default. Absent = launched in "auto" mode (follows the default).
+   */
+  gatewayMode?: "gateway" | "direct";
 };
 
 export type EnrollInput = {
@@ -148,6 +155,7 @@ export type EnrollInput = {
   model?: string;
   effort?: string;
   accountId?: string;
+  gatewayMode?: "gateway" | "direct";
 };
 
 /** Injectable liveness probes (tests stay deterministic, no tmux/pid needed). */
@@ -396,6 +404,8 @@ function applyEnroll(
   if (model !== undefined) entry.model = model;
   const effort = input.effort ?? prev?.effort;
   if (effort !== undefined) entry.effort = effort;
+  const gatewayMode = input.gatewayMode ?? prev?.gatewayMode;
+  if (gatewayMode !== undefined) entry.gatewayMode = gatewayMode;
   if (idx >= 0) entries[idx] = entry;
   else entries.push(entry);
   return entry;
@@ -678,6 +688,7 @@ export function enrollFromRun(args: {
   tmuxSession: string;
   cwd: string;
   convId?: string;
+  gatewayMode?: "gateway" | "direct";
 }): void {
   const tool = coerceRegistryTool(args.profile);
   if (!tool) return; // shell/opencode/… sessions stay tmux-only
@@ -691,6 +702,7 @@ export function enrollFromRun(args: {
       label: args.slug,
       tmuxSession: args.tmuxSession,
       ...(args.convId !== undefined ? { convId: args.convId } : {}),
+      ...(args.gatewayMode !== undefined ? { gatewayMode: args.gatewayMode } : {}),
     });
   } catch {
     // best-effort: the tmux session is up regardless

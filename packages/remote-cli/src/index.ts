@@ -4748,6 +4748,7 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
           tmuxSession: name,
           cwd: entry.cwd,
           ...(entry.convId ? { convId: entry.convId } : {}),
+          ...(gatewayMode !== "auto" ? { gatewayMode } : {}),
         });
         process.stderr.write(
           `[remote] resumed local session ${resumeSlug} (${profile} resume${entry.convId ? ` ${entry.convId}` : ""} in ${entry.cwd})\n`,
@@ -4921,12 +4922,15 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
             label,
           );
           // Auto-enroll in the live-session registry (feeds `remote ls`/`restore`).
+          // Pin the gateway posture ONLY when the user was explicit (--gw/--no-gw);
+          // an "auto" launch stays unpinned so restore follows the live default.
           enrollFromRun({
             profile,
             slug,
             tmuxSession: name,
             cwd,
             ...(opts.resume !== undefined ? { convId: opts.resume } : {}),
+            ...(gatewayMode !== "auto" ? { gatewayMode } : {}),
           });
           started.push({ name, slug });
           // h2a launcher contract (opt-in): --h2a forces it; `h2a.enabled` makes
