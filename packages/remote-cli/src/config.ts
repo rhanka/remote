@@ -38,8 +38,14 @@ export type LayoutConfig = {
   maxPerWindow: number;
   /** Number of shared round-robin windows for ungrouped projects. */
   sharedWindows: number;
-  /** Per-project: how many recent sessions to resume (default 1). */
+  /** Per-project: how many recent sessions to resume (default `multiSessionDefault`). */
   multiSession: Record<string, number>;
+  /**
+   * Fallback per-project cap when a project has no `multiSession` override.
+   * 1 = the old behaviour (one tab per project). <= 0 = no limit (resume EVERY
+   * live session of the project) — useful for a full-fleet `remote restore`.
+   */
+  multiSessionDefault: number;
   /** Explicit windows; their projects leave the shared pool. */
   groups: LayoutGroup[];
 };
@@ -49,6 +55,7 @@ export const DEFAULT_LAYOUT: LayoutConfig = {
   maxPerWindow: 12,
   sharedWindows: 2,
   multiSession: {},
+  multiSessionDefault: 1,
   groups: [],
 };
 
@@ -482,6 +489,10 @@ export function getLayoutConfig(): LayoutConfig {
       raw.multiSession && typeof raw.multiSession === "object"
         ? raw.multiSession
         : DEFAULT_LAYOUT.multiSession,
+    multiSessionDefault:
+      typeof raw.multiSessionDefault === "number"
+        ? raw.multiSessionDefault
+        : DEFAULT_LAYOUT.multiSessionDefault,
     groups: Array.isArray(raw.groups) ? raw.groups : DEFAULT_LAYOUT.groups,
   };
 }

@@ -275,10 +275,15 @@ export function groupSessions(
     byProject.set(s.project, arr);
   }
   const slotsFor = (project: string): LayoutTab[] => {
+    // Per-project cap: explicit override, else the global default. <= 0 = no
+    // limit (every live session of the project gets a tab) — `remote restore`
+    // then sweeps the WHOLE fleet, duplicates included.
+    const cap = cfg.multiSession[project] ?? cfg.multiSessionDefault;
+    const limit = cap <= 0 ? Number.POSITIVE_INFINITY : cap;
     const arr = (byProject.get(project) ?? [])
       .slice()
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
-      .slice(0, cfg.multiSession[project] ?? 1);
+      .slice(0, limit);
     return arr.map((s, i) => {
       const tab: LayoutTab = {
         cwd: s.cwd,

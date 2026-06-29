@@ -145,6 +145,31 @@ describe("registry-first discovery", () => {
     expect(tabs.find((t) => t.label === "projA")?.origin).toBe("registry");
     expect(tabs.find((t) => t.label === "projB")?.origin).toBe("scan");
   });
+
+  it("multiSessionDefault caps per-project tabs (default 1 keeps newest only)", () => {
+    const mk = (sid: string, ageMs: number): DiscoveredSession => ({
+      project: "sentropic",
+      mtimeMs: Date.now() - ageMs,
+      tool: "claude",
+      sid,
+      cwd: join(home, "src", "sentropic"),
+      origin: "registry",
+      label: sid,
+    });
+    const sessions = [mk("a", 0), mk("b", 1000), mk("c", 2000)];
+    const oneTab = groupSessions(sessions, DEFAULT_LAYOUT).windows.flatMap(
+      (w) => w.tabs,
+    );
+    expect(oneTab).toHaveLength(1);
+    expect(oneTab[0]!.label).toBe("a"); // newest
+
+    // <= 0 = no limit: every live session of the project gets a tab.
+    const allTabs = groupSessions(sessions, {
+      ...DEFAULT_LAYOUT,
+      multiSessionDefault: 0,
+    }).windows.flatMap((w) => w.tabs);
+    expect(allTabs.map((t) => t.label).sort()).toEqual(["a", "b", "c"]);
+  });
 });
 
 describe("dropRemoteBackedLocals (bug #3 — stop ghost local repop of remote sessions)", () => {
