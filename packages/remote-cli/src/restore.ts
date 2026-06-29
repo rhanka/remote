@@ -371,11 +371,13 @@ export function tabCommand(
   if (liveSlugs.has(slug)) {
     // Already running. Normally we just attach (no redundant relaunch, no guard
     // fight). But a forced posture (restore --gw/--no-gw) must actually SWITCH a
-    // live session — a reattach can't change a running process's gateway env —
-    // so relaunch it: `--replace` kills the existing tmux session before
-    // resuming in the forced posture.
+    // live session — a reattach can't change a running process's gateway env.
+    // `remote run` has NO --replace and refuses to clobber a live session, so
+    // relaunch via `remote resume --replace`: it kills the running tmux session,
+    // resumes the conversation in the forced posture (--no-gw scrubs the gateway
+    // env), and --attach reopens the terminal onto it.
     if (!opts.forceGateway) return `remote attach ${q(slug)}`;
-    return runCmd(" --replace");
+    return `remote resume ${q(slug)} --replace --attach${gwFlag}`;
   }
   return runCmd("");
 }

@@ -293,7 +293,7 @@ describe("tabCommand", () => {
     ).toBe("remote run 'claude' '/home/u/src/geo' --resume 'c3' --name 'geo'");
   });
 
-  it("forceGateway 'direct' RELAUNCHES a live session with --no-gw --replace (switches posture)", () => {
+  it("forceGateway 'direct' RELAUNCHES a live session via resume --replace --attach --no-gw", () => {
     const live = new Set(["surch"]);
     expect(
       tabCommand(
@@ -301,12 +301,10 @@ describe("tabCommand", () => {
         live,
         { forceGateway: "direct" },
       ),
-    ).toBe(
-      "remote run 'claude' '/home/u/src/surch' --resume 'c1' --name 'surch' --no-gw --replace",
-    );
+    ).toBe("remote resume 'surch' --replace --attach --no-gw");
   });
 
-  it("forceGateway 'gateway' RELAUNCHES a live session with --gw --replace", () => {
+  it("forceGateway 'gateway' RELAUNCHES a live session via resume --replace --attach --gw", () => {
     const live = new Set(["geo"]);
     expect(
       tabCommand(
@@ -314,7 +312,7 @@ describe("tabCommand", () => {
         live,
         { forceGateway: "gateway" },
       ),
-    ).toBe("remote run 'claude' '/home/u/src/geo' --resume 'c2' --name 'geo' --gw --replace");
+    ).toBe("remote resume 'geo' --replace --attach --gw");
   });
 
   it("forceGateway OVERRIDES the per-instance pin (pinned gateway, forced direct)", () => {
