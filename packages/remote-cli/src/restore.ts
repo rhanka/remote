@@ -351,6 +351,7 @@ function projLatest(arr: DiscoveredSession[]): number {
 export function tabCommand(
   tab: LayoutTab,
   liveSlugs: ReadonlySet<string> = new Set(),
+  opts: { forceGateway?: "gateway" | "direct" } = {},
 ): string {
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   if (tab.remoteId) {
@@ -358,22 +359,25 @@ export function tabCommand(
     return `remote attach ${q(tab.remoteId)} --exec`;
   }
   const slug = slugify(tab.label);
-  if (liveSlugs.has(slug)) {
-    // Already running (e.g. terminals were closed but tmux kept the session):
-    // attach instead of re-running into the guard.
-    return `remote attach ${q(slug)}`;
-  }
+  // Effective gateway posture: an explicit `restore --gw/--no-gw` OVERRIDES the
+  // per-instance pin; otherwise honour the pinned gatewayMode (absent = default).
+  const posture = opts.forceGateway ?? tab.gatewayMode;
   const gwFlag =
-    tab.gatewayMode === "gateway"
-      ? " --gw"
-      : tab.gatewayMode === "direct"
-        ? " --no-gw"
-        : "";
-  return (
+    posture === "gateway" ? " --gw" : posture === "direct" ? " --no-gw" : "";
+  const runCmd = (extra: string) =>
     `remote run ${q(tab.tool ?? "shell")} ${q(tab.cwd)} ` +
     (tab.sid ? `--resume ${q(tab.sid)} ` : "") +
-    `--name ${q(tab.label)}${gwFlag}`
-  );
+    `--name ${q(tab.label)}${gwFlag}${extra}`;
+  if (liveSlugs.has(slug)) {
+    // Already running. Normally we just attach (no redundant relaunch, no guard
+    // fight). But a forced posture (restore --gw/--no-gw) must actually SWITCH a
+    // live session — a reattach can't change a running process's gateway env —
+    // so relaunch it: `--replace` kills the existing tmux session before
+    // resuming in the forced posture.
+    if (!opts.forceGateway) return `remote attach ${q(slug)}`;
+    return runCmd(" --replace");
+  }
+  return runCmd("");
 }
 
 // gnome-terminal applies ONE trailing `-- command` to EVERY tab of an
@@ -414,16 +418,20 @@ function runDir(): string {
 export function launchLayout(
   windows: LayoutWindow[],
   stderr: NodeJS.WriteStream = process.stderr,
-  opts: { reattach?: boolean } = {},
+  opts: { reattach?: boolean; forceGateway?: "gateway" | "direct" } = {},
 ): { opened: number; skippedLive: string[] } {
   const liveSlugs = new Set(listLocalSessions().map((s) => s.slug));
   const skippedLive: string[] = [];
   let opened = 0;
+  // A forced posture must reach EVERY session (live ones get relaunched), so it
+  // includes already-live tabs just like --reattach.
+  const includeLive = opts.reattach || opts.forceGateway !== undefined;
+  const tabOpts = opts.forceGateway ? { forceGateway: opts.forceGateway } : {};
 
   for (const win of windows) {
     // Filter tabs: skip local sessions already in tmux (attach would be redundant).
     // Remote (k8s) tabs are always included — we can't probe pod health here.
-    const activeTabs = opts.reattach
+    const activeTabs = includeLive
       ? win.tabs
       : win.tabs.filter((t) => {
           if (t.remoteId) return true;
@@ -448,8 +456,9 @@ export function launchLayout(
       `restore-${process.pid}-${slug}-${mapCounter++}.map`,
     );
     const body =
-      activeTabs.map((t) => `${t.cwd}\t${tabCommand(t, liveSlugs)}`).join("\n") +
-      "\n";
+      activeTabs
+        .map((t) => `${t.cwd}\t${tabCommand(t, liveSlugs, tabOpts)}`)
+        .join("\n") + "\n";
     writeFileSync(mapPath, body, "utf8");
 
     const args: string[] = [];
@@ -501,6 +510,12 @@ export type RestoreOptions = {
    * Default (false): sessions already in tmux are skipped — no redundant tab.
    */
   reattach?: boolean;
+  /**
+   * Force the llm-mesh gateway posture for the WHOLE restore, overriding every
+   * session's pinned gatewayMode. Live sessions on the wrong posture are
+   * relaunched (--replace) so the switch actually takes effect.
+   */
+  forceGateway?: "gateway" | "direct";
   stderr?: NodeJS.WriteStream;
 };
 
@@ -577,7 +592,10 @@ export function restore(
   if (dropped > 0 && !opts.group)
     stderr.write(`  (! ${dropped} session(s) ignorée(s), plafond atteint)\n`);
   if (!opts.dryRun && total > 0) {
-    launchLayout(windows, stderr, opts.reattach ? { reattach: true } : {});
+    launchLayout(windows, stderr, {
+      ...(opts.reattach ? { reattach: true } : {}),
+      ...(opts.forceGateway ? { forceGateway: opts.forceGateway } : {}),
+    });
     // Auto-record the launched layout (inspect with `remote layout show`).
     try {
       writeLastLayout(windows, opts.group);

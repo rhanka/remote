@@ -292,4 +292,54 @@ describe("tabCommand", () => {
       tabCommand({ cwd: "/home/u/src/geo", label: "geo", tool: "claude", sid: "c3" }),
     ).toBe("remote run 'claude' '/home/u/src/geo' --resume 'c3' --name 'geo'");
   });
+
+  it("forceGateway 'direct' RELAUNCHES a live session with --no-gw --replace (switches posture)", () => {
+    const live = new Set(["surch"]);
+    expect(
+      tabCommand(
+        { cwd: "/home/u/src/surch", label: "surch", tool: "claude", sid: "c1" },
+        live,
+        { forceGateway: "direct" },
+      ),
+    ).toBe(
+      "remote run 'claude' '/home/u/src/surch' --resume 'c1' --name 'surch' --no-gw --replace",
+    );
+  });
+
+  it("forceGateway 'gateway' RELAUNCHES a live session with --gw --replace", () => {
+    const live = new Set(["geo"]);
+    expect(
+      tabCommand(
+        { cwd: "/home/u/src/geo", label: "geo", tool: "claude", sid: "c2" },
+        live,
+        { forceGateway: "gateway" },
+      ),
+    ).toBe("remote run 'claude' '/home/u/src/geo' --resume 'c2' --name 'geo' --gw --replace");
+  });
+
+  it("forceGateway OVERRIDES the per-instance pin (pinned gateway, forced direct)", () => {
+    expect(
+      tabCommand(
+        {
+          cwd: "/home/u/src/geo",
+          label: "geo",
+          tool: "claude",
+          sid: "c4",
+          gatewayMode: "gateway",
+        },
+        new Set(),
+        { forceGateway: "direct" },
+      ),
+    ).toBe("remote run 'claude' '/home/u/src/geo' --resume 'c4' --name 'geo' --no-gw");
+  });
+
+  it("forceGateway on a DEAD session emits the flag WITHOUT --replace (nothing to kill)", () => {
+    expect(
+      tabCommand(
+        { cwd: "/home/u/src/kog", label: "kog", tool: "claude", sid: "c5" },
+        new Set(),
+        { forceGateway: "direct" },
+      ),
+    ).toBe("remote run 'claude' '/home/u/src/kog' --resume 'c5' --name 'kog' --no-gw");
+  });
 });

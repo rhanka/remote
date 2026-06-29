@@ -6956,10 +6956,27 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
       "--reattach",
       "ouvre aussi un onglet pour les sessions déjà actives en tmux (ré-attache)",
     )
+    .option(
+      "--llm-gateway",
+      "force TOUTES les sessions sur la gateway llm-mesh (ignore le pin par instance; relance les sessions vivantes via --replace)",
+    )
+    .option("--gw", "alias de --llm-gateway")
+    .option(
+      "--no-llm-gateway",
+      "force TOUTES les sessions en direct, sans gateway (ignore le pin par instance; relance les sessions vivantes via --replace)",
+    )
+    .option("--no-gw", "alias de --no-llm-gateway")
     .action(
       async (
         group: string | undefined,
-        opts: { dryRun?: boolean; reattach?: boolean },
+        opts: {
+          dryRun?: boolean;
+          reattach?: boolean;
+          llmGateway?: boolean;
+          gw?: boolean;
+          noLlmGateway?: boolean;
+          noGw?: boolean;
+        },
       ) => {
         if (!tmuxAvailable()) {
           process.stderr.write(
@@ -6982,6 +6999,20 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         if (group) restoreOpts.group = group;
         if (opts.dryRun) restoreOpts.dryRun = true;
 
+        // Optional whole-fleet gateway override. "auto" (no flag) leaves each
+        // session on its pinned posture; gateway/direct forces all + relaunches
+        // live sessions to actually switch them.
+        let forceGateway: "gateway" | "direct" | undefined;
+        try {
+          const mode = gatewayModeFromOptions(opts);
+          if (mode !== "auto") forceGateway = mode;
+        } catch (error) {
+          process.stderr.write(`[remote] ${(error as Error).message}.\n`);
+          process.exitCode = 1;
+          return;
+        }
+        if (forceGateway) restoreOpts.forceGateway = forceGateway;
+
         if (needRemote) {
           const url = getConfiguredRemote();
           await ensureConnected(url);
@@ -6999,7 +7030,11 @@ export async function main(argv: ReadonlyArray<string>): Promise<number> {
         }
 
         if (opts.reattach) restoreOpts.reattach = true;
-        await prepareLlmMeshForRestore({ dryRun: Boolean(opts.dryRun) });
+        // Forced-direct restore must NOT spin up the gateway; otherwise prepare
+        // it as before (no-op when the gateway is disabled).
+        if (forceGateway !== "direct") {
+          await prepareLlmMeshForRestore({ dryRun: Boolean(opts.dryRun) });
+        }
         const { total } = restoreLayout(restoreOpts);
         if (total === 0) {
           process.stderr.write(
